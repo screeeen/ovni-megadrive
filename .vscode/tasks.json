@@ -1,0 +1,28 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "SGDK: build",
+            "type": "shell",
+            "command": "make",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "SGDK: clean",
+            "type": "shell",
+            "command": "make clean",
+            "problemMatcher": []
+        },
+        {
+            "label": "SGDK: run in BlastEm",
+            "type": "shell",
+            "command": "blastem out/rom.bin",
+            "problemMatcher": [],
+            "dependsOn": "SGDK: build"
+        }
+    ]
+}

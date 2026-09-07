@@ -1,0 +1,9 @@
+out/
+*.o
+*.o80
+*.bin
+*.wav
+*.raw
+.DS_Store
+# regenerated from $(GDK)/src/boot/rom_header.c on every build
+src/rom_header.c
