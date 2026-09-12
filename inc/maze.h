@@ -24,6 +24,13 @@
 // overlapping maze.c's tileset in VRAM.
 #define MAZE_TILE_COUNT 40
 
+// One representative wall-dither subtile (variant 5's top-left quarter,
+// see BASE_TILE/CELL_ROW_TILES in maze.c: subtile = TILE_USER_INDEX + 2*c
+// for wall variant c). Other modules can reuse this for a textured
+// "duotono" look consistent with the maze's own walls instead of
+// introducing flat new art.
+#define MAZE_WALL_DITHER_TILE (TILE_USER_INDEX + (2 * 5))
+
 // Uploads the maze tileset to VRAM and sets its palette. Call once at boot.
 void Maze_loadGraphics(void);
 

@@ -313,16 +313,32 @@ void GuideMap_generate(void)
 
 // Overlay tileset lives right after maze.c's tiles in VRAM (spec §5's
 // MAZE_TILE_COUNT reservation).
+// Tile order here must match map_tiles.png left-to-right: OPEN first so the
+// image's very first (top-left) pixel is background, same as
+// maze_tiles.png's cell0/floor -- rescomp assigns palette index 0 to
+// whichever color it scans first, and index0 must be background for this
+// tileset to share PAL0 correctly with maze.c's tiles (verified against the
+// compiled bytes in out/release/res/resources.s after a mixup: index0
+// ended up meaning "violet" instead when WALL was drawn first).
 #define MAP_TILE_BASE       (TILE_USER_INDEX + MAZE_TILE_COUNT)
-#define MAP_TILE_WALL       (MAP_TILE_BASE + 0)
-#define MAP_TILE_OPEN       (MAP_TILE_BASE + 1)
-#define MAP_TILE_CORRIDOR_H (MAP_TILE_BASE + 2)
-#define MAP_TILE_CORRIDOR_V (MAP_TILE_BASE + 3)
+#define MAP_TILE_OPEN       (MAP_TILE_BASE + 0) // unused directly; anchors index0=bg (see above)
+#define MAP_TILE_CORNER_TL  (MAP_TILE_BASE + 1)
+#define MAP_TILE_EDGE_T     (MAP_TILE_BASE + 2)
+#define MAP_TILE_CORNER_TR  (MAP_TILE_BASE + 3)
+#define MAP_TILE_CORNER_BL  (MAP_TILE_BASE + 4)
+#define MAP_TILE_EDGE_B     (MAP_TILE_BASE + 5)
+#define MAP_TILE_CORNER_BR  (MAP_TILE_BASE + 6)
+#define MAP_TILE_CORRIDOR_H (MAP_TILE_BASE + 7)
+#define MAP_TILE_CORRIDOR_V (MAP_TILE_BASE + 8)
+#define MAP_TILE_FILL       (MAP_TILE_BASE + 9)
 
-// Each room is a small 3x2 box (a Metroid-style map, but every room drawn
-// the same size since every room in this engine really is the same size --
-// see docs/spec-mapa-guia.md's note on this). +1 tile of gap between boxes
-// is where a corridor segment gets drawn when both sides are visited.
+// Each room is a small 3x2 box outlined with a 2px border (hollow center) --
+// reverted from a dithered-texture fill (spec §6bis) after the user tried
+// it and preferred the bordered look. Every room uses the same single
+// color (PAL0's violet, no PAL2/PAL3) -- the current room is marked by
+// SHAPE instead: a solid fill (MAP_TILE_FILL) instead of the hollow
+// border, since color is off the table. +1 tile of gap between boxes is
+// where a corridor segment gets drawn when both sides are visited.
 #define ROOM_BOX_W 3
 #define ROOM_BOX_H 2
 #define ROOM_STRIDE_W (ROOM_BOX_W + 1)
@@ -331,12 +347,8 @@ void GuideMap_generate(void)
 void GuideMap_loadGraphics(void)
 {
     // PAL0 is already set up by Maze_loadGraphics (index0=dark bg,
-    // index1=violet) -- reused here for every non-highlighted room. PAL2
-    // gets the same background but a bright highlight color instead, for
-    // the current room.
-    PAL_setColor(2 * 16, RGB24_TO_VDPCOLOR(0x252525));
-    PAL_setColor((2 * 16) + 1, RGB24_TO_VDPCOLOR(0xFFEE58));
-
+    // index1=violet, 0x987DFA) -- every room and corridor reuses it
+    // unchanged, no separate colors for visited/unvisited/current.
     VDP_loadTileSet(&mapTiles, MAP_TILE_BASE, DMA);
 }
 
@@ -360,30 +372,55 @@ void GuideMap_drawOverlay(u8 curCol, u8 curRow)
         for (col = 0; col < mapCols; col++)
         {
             const MapCell cell = guideMap[row][col];
-            const u16 pal = ((col == curCol) && (row == curRow)) ? PAL2 : PAL0;
             const u16 rx = offsetX + (col * ROOM_STRIDE_W);
             const u16 ry = offsetY + (row * ROOM_STRIDE_H);
-            s16 x, y;
+            const u16 pal = PAL0; // only the tilemap's own violet (0x987DFA), no other colors
 
-            if (!cell.visited)
-                continue; // fog of war: nothing drawn for this room at all
+            if (cell.type != CELL_ROOM)
+                continue; // not a room at all -- nothing drawn here
 
-            // The room itself is always a solid 3x2 block -- punching a
-            // gap per open door looked like broken letter fragments at
-            // this size (a door erases a third of the box). Connectivity
-            // is shown entirely by the corridor segments below instead,
-            // matching how Metroid-style maps actually read: solid room,
-            // thin corridor line to whichever neighbor it connects to.
-            for (y = 0; y < ROOM_BOX_H; y++)
-                for (x = 0; x < ROOM_BOX_W; x++)
-                    putTile(MAP_TILE_WALL, pal, rx + x, ry + y);
+            if ((col == curCol) && (row == curRow))
+            {
+                // Current room: fully solid -- shape marks position since
+                // color no longer does.
+                s16 x, y;
 
-            // Corridor segment in the gap toward the next room, only once
-            // both rooms are visited (otherwise it'd reveal an unexplored
-            // room's existence through the fog of war).
-            if (cell.doorE && (col + 1 < mapCols) && guideMap[row][col + 1].visited)
+                for (y = 0; y < ROOM_BOX_H; y++)
+                    for (x = 0; x < ROOM_BOX_W; x++)
+                        putTile(MAP_TILE_FILL, pal, rx + x, ry + y);
+            }
+            else if (cell.visited)
+            {
+                // Visited (not current): filled with the maze's own wall
+                // dither pattern (MAZE_WALL_DITHER_TILE, maze.h) instead of
+                // a flat fill -- a third distinct look between "hollow
+                // outline" (known, unvisited) and "fully solid" (current),
+                // still one color throughout.
+                s16 x, y;
+
+                for (y = 0; y < ROOM_BOX_H; y++)
+                    for (x = 0; x < ROOM_BOX_W; x++)
+                        putTile(MAZE_WALL_DITHER_TILE, pal, rx + x, ry + y);
+            }
+            else
+            {
+                // Known, unvisited: 3x2 outline (top row: corner/edge/corner,
+                // bottom row: corner/edge/corner), hollow in the middle.
+                putTile(MAP_TILE_CORNER_TL, pal, rx,     ry);
+                putTile(MAP_TILE_EDGE_T,    pal, rx + 1, ry);
+                putTile(MAP_TILE_CORNER_TR, pal, rx + 2, ry);
+                putTile(MAP_TILE_CORNER_BL, pal, rx,     ry + 1);
+                putTile(MAP_TILE_EDGE_B,    pal, rx + 1, ry + 1);
+                putTile(MAP_TILE_CORNER_BR, pal, rx + 2, ry + 1);
+            }
+
+            // Corridors are always shown between two rooms with a door
+            // between them (doors only ever exist between two CELL_ROOM
+            // cells by construction) -- unvisited rooms are shown too now,
+            // so hiding the corridor to one would look inconsistent.
+            if (cell.doorE && (col + 1 < mapCols))
                 putTile(MAP_TILE_CORRIDOR_H, PAL0, rx + ROOM_BOX_W, ry);
-            if (cell.doorS && (row + 1 < mapRows) && guideMap[row + 1][col].visited)
+            if (cell.doorS && (row + 1 < mapRows))
                 putTile(MAP_TILE_CORRIDOR_V, PAL0, rx + (ROOM_BOX_W / 2), ry + ROOM_BOX_H);
         }
     }

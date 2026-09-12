@@ -417,6 +417,58 @@ referencia, donde varían) — decisión confirmada con el usuario.
 - **Resaltado de la habitación actual**: mismo tileset, pero con `PAL2`
   (fondo igual, color de "pared" distinto — amarillo brillante) en vez de
   `PAL0`. No hace falta un tile aparte.
+- **Bug real corregido (índices de paleta invertidos)**: `rescomp` asigna
+  el índice de paleta 0 al primer color que encuentra escaneando la
+  imagen de arriba-izquierda a abajo-derecha. `maze_tiles.png` empieza
+  con su celda de suelo/fondo, así que ahí índice0=fondo (de donde
+  `maze.c` obtiene su convención `PAL_setColor(0,fondo)`). La primera
+  versión de `map_tiles.png` empezaba con el tile WALL (violeta), así
+  que rescomp asignó índice0=violeta e índice1=fondo — justo al revés
+  de lo que las paletas (`PAL2`/`PAL3`) asumían. Efecto visible: las
+  cajas sólidas salían invisibles, y los tiles de pasillo se veían como
+  un bloque violeta con una raya oscura en medio (los patrones "II"/"="
+  que reportó el usuario). Arreglo: reordenar el tileset (hueco/fondo
+  primero, pared después) para que el primer píxel escaneado sea fondo,
+  igual que `maze_tiles.png` — verificado contra los bytes compilados
+  en `resources.s` antes de darlo por cerrado.
+- **Iteraciones de estilo (feedback del usuario)**: primero relleno
+  sólido plano (se leía como un blob, no una habitación); luego se
+  probó rellenar con el tile de dither punteado del maze
+  (`MAZE_WALL_DITHER_TILE` en `maze.h`, queda definido aunque hoy no se
+  usa) — el usuario lo probó y pidió revertir, prefería el contorno de
+  2px hueco de la iteración anterior.
+- **Un solo color, sin PAL2/PAL3 (feedback del usuario)**: el usuario
+  pidió usar únicamente "el color del tilemap" — el violeta ya
+  establecido en todo el juego, `0x987DFA` (PAL0, el mismo que las
+  paredes del maze). Se quitaron `PAL2` (resaltado amarillo de la
+  habitación actual) y `PAL3` (gris de no-visitada); ahora **todas**
+  las habitaciones (visitadas, no visitadas, actual) se dibujan con el
+  mismo contorno violeta — ya no hay forma visual de distinguir la
+  posición actual ni qué se ha visitado, solo por color. **Estado
+  final**: contorno hueco de 2px (9 tiles en `map_tiles.png`: ancla de
+  fondo + 6 piezas de borde TL/T/TR/BL/B/BR + 2 de pasillo), un único
+  color violeta.
+- **Posición actual marcada por forma, no por color**: con un solo
+  color ya no hay manera de resaltar la habitación actual tintándola
+  distinto. Se añadió un 10º tile (`MAP_TILE_FILL`, relleno sólido) que
+  sustituye al contorno hueco **solo** en `(currentCol, currentRow)` —
+  el resto de habitaciones conocidas siguen siendo el contorno de 2px.
+  Mismo color violeta en ambos casos; la diferencia es forma (hueca vs
+  sólida), no tinte.
+- **Habitaciones visitadas marcadas (feedback del usuario)**: primero
+  con 4 esquinas sólidas + bordes medios en blanco; el usuario pidió
+  cambiarlo a un relleno estilo dithering. Estado final: rellenas con
+  `MAZE_WALL_DITHER_TILE` (el mismo tile punteado de las paredes del
+  maze, ya definido en `maze.h` — sin arte nuevo), dando una tercera
+  textura distinta a la caja hueca (conocida, no visitada) y la caja
+  sólida (actual). Las tres formas conviven, siempre en el mismo violeta.
+- **Cambio de fog-of-war tras feedback del usuario**: ya no se oculta del
+  todo una habitación no visitada — se dibuja igual (mismo tile sólido)
+  pero con `PAL3` (gris apagado) en vez de violeta, y los pasillos se
+  muestran entre cualquier par de habitaciones con puerta, visitadas o
+  no. Solo las celdas `CELL_EMPTY` (las que nunca fueron habitación) no
+  se dibujan. Esto revela la forma del mapa antes de explorarlo del
+  todo — es una decisión explícita del usuario, no un descuido.
 - **No verificado interactivamente**: igual que el resto del overlay,
   compila limpio y el ROM arranca sin errores en BlastEm, pero no se pudo
   automatizar una captura de pantalla del contenido real de BlastEm en

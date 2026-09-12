@@ -162,13 +162,13 @@ int main(bool hardReset)
         }
         else // STATE_PLAYING
         {
-            // Edge-triggered: rotate once per press. A matches the keydown/SPACE
-            // handler in the original js13k game (counter-clockwise); B is the
-            // new opposite turn (clockwise).
-            if ((state & BUTTON_A) && !(prevState & BUTTON_A))
-                Player_rotateCCW(&player);
-            if ((state & BUTTON_B) && !(prevState & BUTTON_B))
+            // Edge-triggered: rotate once per press. LEFT turns clockwise,
+            // RIGHT counter-clockwise (the original js13k game's single
+            // SPACE action, now split across the two directions).
+            if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
                 Player_rotateCW(&player);
+            if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
+                Player_rotateCCW(&player);
             if ((state & BUTTON_C) && !(prevState & BUTTON_C))
             {
                 mapViewOpen = !mapViewOpen;
