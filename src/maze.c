@@ -26,6 +26,15 @@ static const s16 endY = MAZE_H - 1;
 static const s8 dirX[4] = {  0, 0, -2, 2 };
 static const s8 dirY[4] = { -2, 2,  0, 0 };
 
+// carve()'s "always descend here regardless of the walls>=2 heuristic"
+// targets. The single-room Maze_generate() below sets this to the one
+// hardcoded {endX,endY} pair (original js13k behavior, byte-for-byte);
+// Maze_generateRoom() sets it to one entry per active door instead.
+#define MAX_FORCED_TARGETS 4
+static s16 forcedTargetX[MAX_FORCED_TARGETS];
+static s16 forcedTargetY[MAX_FORCED_TARGETS];
+static u8 forcedTargetCount;
+
 static u8 randomWallVariant(void)
 {
     return 1 + (random() % WALL_VARIANTS);
@@ -34,6 +43,17 @@ static u8 randomWallVariant(void)
 static bool isValid(s16 x, s16 y)
 {
     return (x > 0) && (y > 0) && (x < MAZE_W - 1) && (y < MAZE_H - 1) && (grid[y][x] != PATH);
+}
+
+static bool isForcedTarget(s16 x, s16 y)
+{
+    u8 i;
+
+    for (i = 0; i < forcedTargetCount; i++)
+        if ((forcedTargetX[i] == x) && (forcedTargetY[i] == y))
+            return TRUE;
+
+    return FALSE;
 }
 
 static void shuffleDirs(s8 order[4])
@@ -86,7 +106,7 @@ static void carve(s16 x, s16 y)
                     walls++;
             }
 
-            if ((walls >= 2) || ((nx == endX) && (ny == endY)))
+            if ((walls >= 2) || isForcedTarget(nx, ny))
                 carve(nx, ny);
         }
     }
@@ -99,6 +119,10 @@ void Maze_generate(void)
     for (y = 0; y < MAZE_H; y++)
         for (x = 0; x < MAZE_W; x++)
             grid[y][x] = randomWallVariant();
+
+    forcedTargetCount = 1;
+    forcedTargetX[0] = endX;
+    forcedTargetY[0] = endY;
 
     carve(startX, startY);
 
@@ -124,6 +148,102 @@ void Maze_generate(void)
     grid[endY][endX - 2] = PATH;
     grid[endY - 1][endX - 1] = PATH;
     grid[endY - 2][endX - 1] = PATH;
+}
+
+// Interior even/even anchor points near each border, on the same step-2
+// lattice carve() walks (see docs/spec-mapa-guia.md §5). Doors are punched
+// 2 cells wide, bridging the border down to whichever anchor's block was
+// force-carved -- same trick as Maze_generate()'s endX/endY punch-through,
+// generalized to up to 4 targets instead of 1.
+// The room's carve seed doubles as the player's spawn point in the very
+// first room of a run (spec §5) -- it's the same (col,row), just named
+// differently depending on which role is relevant at the call site.
+#define ROOM_SEED_COL MAZE_DOOR_COL
+#define ROOM_SEED_ROW MAZE_DOOR_ROW
+
+#define ANCHOR_N_X ROOM_SEED_COL
+#define ANCHOR_N_Y 2
+#define ANCHOR_S_X ROOM_SEED_COL
+#define ANCHOR_S_Y (MAZE_H - 4)
+#define ANCHOR_E_X (MAZE_W - 4)
+#define ANCHOR_E_Y ROOM_SEED_ROW
+#define ANCHOR_W_X 2
+#define ANCHOR_W_Y ROOM_SEED_ROW
+
+// carve()'s "walls>=2 OR isForcedTarget" trick only visits a target if the
+// DFS's natural wandering happens to reach a cell adjacent to it first --
+// rare misses do happen (~0.2% of room/door combinations, spec §11 Paso3).
+// Every ANCHOR_* shares an axis with (ROOM_SEED_COL, ROOM_SEED_ROW) by
+// construction, so a straight single-width line always reconnects a missed
+// target back to the seed, which carve() always visits first.
+static void bridgeToSeed(s16 x, s16 y)
+{
+    s16 cx = x, cy = y;
+
+    while ((cx != ROOM_SEED_COL) || (cy != ROOM_SEED_ROW))
+    {
+        grid[cy][cx] = PATH;
+        if (cx < ROOM_SEED_COL) cx++;
+        else if (cx > ROOM_SEED_COL) cx--;
+        if (cy < ROOM_SEED_ROW) cy++;
+        else if (cy > ROOM_SEED_ROW) cy--;
+    }
+}
+
+void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW, u16 roomSeed)
+{
+    s16 x, y;
+
+    setRandomSeed(roomSeed);
+
+    for (y = 0; y < MAZE_H; y++)
+        for (x = 0; x < MAZE_W; x++)
+            grid[y][x] = randomWallVariant();
+
+    forcedTargetCount = 0;
+    if (doorN) { forcedTargetX[forcedTargetCount] = ANCHOR_N_X; forcedTargetY[forcedTargetCount] = ANCHOR_N_Y; forcedTargetCount++; }
+    if (doorE) { forcedTargetX[forcedTargetCount] = ANCHOR_E_X; forcedTargetY[forcedTargetCount] = ANCHOR_E_Y; forcedTargetCount++; }
+    if (doorS) { forcedTargetX[forcedTargetCount] = ANCHOR_S_X; forcedTargetY[forcedTargetCount] = ANCHOR_S_Y; forcedTargetCount++; }
+    if (doorW) { forcedTargetX[forcedTargetCount] = ANCHOR_W_X; forcedTargetY[forcedTargetCount] = ANCHOR_W_Y; forcedTargetCount++; }
+
+    carve(ROOM_SEED_COL, ROOM_SEED_ROW);
+
+    if (doorN && (grid[ANCHOR_N_Y][ANCHOR_N_X] != PATH)) bridgeToSeed(ANCHOR_N_X, ANCHOR_N_Y);
+    if (doorE && (grid[ANCHOR_E_Y][ANCHOR_E_X] != PATH)) bridgeToSeed(ANCHOR_E_X, ANCHOR_E_Y);
+    if (doorS && (grid[ANCHOR_S_Y][ANCHOR_S_X] != PATH)) bridgeToSeed(ANCHOR_S_X, ANCHOR_S_Y);
+    if (doorW && (grid[ANCHOR_W_Y][ANCHOR_W_X] != PATH)) bridgeToSeed(ANCHOR_W_X, ANCHOR_W_Y);
+
+    for (x = 0; x < MAZE_W; x++)
+    {
+        grid[0][x] = randomWallVariant();
+        grid[MAZE_H - 1][x] = randomWallVariant();
+    }
+    for (y = 0; y < MAZE_H; y++)
+    {
+        grid[y][0] = randomWallVariant();
+        grid[y][MAZE_W - 1] = randomWallVariant();
+    }
+
+    if (doorN)
+    {
+        grid[0][ANCHOR_N_X] = PATH; grid[0][ANCHOR_N_X + 1] = PATH;
+        grid[1][ANCHOR_N_X] = PATH; grid[1][ANCHOR_N_X + 1] = PATH;
+    }
+    if (doorS)
+    {
+        grid[MAZE_H - 1][ANCHOR_S_X] = PATH; grid[MAZE_H - 1][ANCHOR_S_X + 1] = PATH;
+        grid[MAZE_H - 2][ANCHOR_S_X] = PATH; grid[MAZE_H - 2][ANCHOR_S_X + 1] = PATH;
+    }
+    if (doorE)
+    {
+        grid[ANCHOR_E_Y][MAZE_W - 1] = PATH; grid[ANCHOR_E_Y + 1][MAZE_W - 1] = PATH;
+        grid[ANCHOR_E_Y][MAZE_W - 2] = PATH; grid[ANCHOR_E_Y + 1][MAZE_W - 2] = PATH;
+    }
+    if (doorW)
+    {
+        grid[ANCHOR_W_Y][0] = PATH; grid[ANCHOR_W_Y + 1][0] = PATH;
+        grid[ANCHOR_W_Y][1] = PATH; grid[ANCHOR_W_Y + 1][1] = PATH;
+    }
 }
 
 void Maze_loadGraphics(void)

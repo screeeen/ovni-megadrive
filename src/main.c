@@ -2,16 +2,121 @@
 #include "resources.h"
 #include "maze.h"
 #include "player.h"
+#include "guidemap.h"
+
+typedef enum { STATE_MENU, STATE_PLAYING } GameState;
+
+typedef struct { u8 cols, rows; } SizePreset;
+
+static const SizePreset sizePresets[] = {
+    { 6, 4 },
+    { 8, 6 },
+    { 10, 8 },
+};
+#define SIZE_PRESET_COUNT 3
+#define SIZE_PRESET_DEFAULT 1 // 8x6, the size the spec settled on (§0)
 
 static Player player;
 static Sprite *playerSprite;
+static u16 mapSeed;
+static u8 currentCol, currentRow;
+static bool mapViewOpen;
+static GameState gameState;
+static u8 sizePresetIndex = SIZE_PRESET_DEFAULT;
+
+// Deterministic per-room seed (spec §5): same (col,row) under the same
+// mapSeed always yields the same roomSeed, so Maze_generateRoom's layout
+// persists across re-entries without ever storing it.
+static u16 roomSeedFor(u8 col, u8 row)
+{
+    u32 h = mapSeed;
+
+    h = h * 374761393u + col;
+    h = h * 668265263u + row;
+    h ^= h >> 15;
+
+    return (u16) h;
+}
+
+static void loadRoom(u8 col, u8 row)
+{
+    const MapCell cell = guideMap[row][col];
+
+    Maze_generateRoom(cell.doorN, cell.doorE, cell.doorS, cell.doorW, roomSeedFor(col, row));
+    Maze_draw();
+
+    guideMap[row][col].visited = TRUE;
+}
+
+// Room transition (spec §7): move to the neighboring cell, regenerate its
+// (deterministic) layout, and place the player just inside the opposite
+// border, aligned with the door's span, still heading the same direction.
+static void enterRoomFrom(u8 exitDir)
+{
+    switch (exitDir)
+    {
+        case EXIT_NORTH: currentRow--; break;
+        case EXIT_EAST:  currentCol++; break;
+        case EXIT_SOUTH: currentRow++; break;
+        case EXIT_WEST:  currentCol--; break;
+    }
+
+    loadRoom(currentCol, currentRow);
+
+    switch (exitDir)
+    {
+        case EXIT_NORTH:
+            player.y = MAZE_TILE_PX * (MAZE_H - 2);
+            player.x = MAZE_DOOR_COL * MAZE_TILE_PX;
+            break;
+        case EXIT_SOUTH:
+            player.y = MAZE_TILE_PX;
+            player.x = MAZE_DOOR_COL * MAZE_TILE_PX;
+            break;
+        case EXIT_EAST:
+            player.x = MAZE_TILE_PX;
+            player.y = MAZE_DOOR_ROW * MAZE_TILE_PX;
+            break;
+        case EXIT_WEST:
+            player.x = MAZE_TILE_PX * (MAZE_W - 2);
+            player.y = MAZE_DOOR_ROW * MAZE_TILE_PX;
+            break;
+    }
+}
 
 static void newGame(void)
 {
-    Maze_generate();
-    Maze_draw();
-    Player_init(&player);
+    mapViewOpen = FALSE;
+    mapSeed = random();
+
+    mapCols = sizePresets[sizePresetIndex].cols;
+    mapRows = sizePresets[sizePresetIndex].rows;
+
+    GuideMap_generate();
+
+    currentCol = startCol;
+    currentRow = startRow;
+
+    loadRoom(currentCol, currentRow);
+    Player_spawnAtRoomCenter(&player);
     SPR_setPosition(playerSprite, player.x, player.y);
+    SPR_setVisibility(playerSprite, VISIBLE);
+}
+
+static void drawMenu(void)
+{
+    char buf[16];
+    int len;
+
+    VDP_clearPlane(BG_A, TRUE);
+
+    VDP_drawText("OVNI", 18, 6);
+    VDP_drawText("TAMANO DE MAPA", 13, 11);
+
+    len = sprintf(buf, "< %d x %d >", sizePresets[sizePresetIndex].cols, sizePresets[sizePresetIndex].rows);
+    VDP_drawText(buf, (40 - len) / 2, 13);
+
+    VDP_drawText("PULSA START", 14, 18);
 }
 
 int main(bool hardReset)
@@ -22,32 +127,78 @@ int main(bool hardReset)
     SPR_init();
 
     Maze_loadGraphics();
+    GuideMap_loadGraphics();
 
     PAL_setPalette(PAL1, playerShip.palette->data, DMA);
     playerSprite = SPR_addSprite(&playerShip, 0, 0, TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
 
     JOY_init();
 
-    newGame();
+    gameState = STATE_MENU;
+    SPR_setVisibility(playerSprite, HIDDEN);
+    drawMenu();
 
     while (TRUE)
     {
         const u16 state = JOY_readJoypad(JOY_1);
 
-        // Edge-triggered: rotate once per press. A matches the keydown/SPACE
-        // handler in the original js13k game (counter-clockwise); B is the
-        // new opposite turn (clockwise).
-        if ((state & BUTTON_A) && !(prevState & BUTTON_A))
-            Player_rotateCCW(&player);
-        if ((state & BUTTON_B) && !(prevState & BUTTON_B))
-            Player_rotateCW(&player);
+        if (gameState == STATE_MENU)
+        {
+            if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
+            {
+                sizePresetIndex = (sizePresetIndex + SIZE_PRESET_COUNT - 1) % SIZE_PRESET_COUNT;
+                drawMenu();
+            }
+            if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
+            {
+                sizePresetIndex = (sizePresetIndex + 1) % SIZE_PRESET_COUNT;
+                drawMenu();
+            }
+            if ((state & BUTTON_START) && !(prevState & BUTTON_START))
+            {
+                gameState = STATE_PLAYING;
+                newGame();
+            }
+        }
+        else // STATE_PLAYING
+        {
+            // Edge-triggered: rotate once per press. A matches the keydown/SPACE
+            // handler in the original js13k game (counter-clockwise); B is the
+            // new opposite turn (clockwise).
+            if ((state & BUTTON_A) && !(prevState & BUTTON_A))
+                Player_rotateCCW(&player);
+            if ((state & BUTTON_B) && !(prevState & BUTTON_B))
+                Player_rotateCW(&player);
+            if ((state & BUTTON_C) && !(prevState & BUTTON_C))
+            {
+                mapViewOpen = !mapViewOpen;
+
+                if (mapViewOpen)
+                {
+                    GuideMap_drawOverlay(currentCol, currentRow);
+                    SPR_setVisibility(playerSprite, HIDDEN);
+                }
+                else
+                {
+                    Maze_draw();
+                    SPR_setVisibility(playerSprite, VISIBLE);
+                }
+            }
+
+            if (!mapViewOpen)
+            {
+                const MapCell cell = guideMap[currentRow][currentCol];
+                const u8 exitDir = Player_updateRoom(&player, cell.doorN, cell.doorE, cell.doorS, cell.doorW);
+
+                if (exitDir != EXIT_NONE)
+                    enterRoomFrom(exitDir);
+
+                SPR_setPosition(playerSprite, player.x, player.y);
+            }
+        }
 
         prevState = state;
 
-        if (Player_update(&player))
-            newGame();
-
-        SPR_setPosition(playerSprite, player.x, player.y);
         SPR_update();
 
         SYS_doVBlankProcess();
