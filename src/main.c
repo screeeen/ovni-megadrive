@@ -3,6 +3,8 @@
 #include "maze.h"
 #include "player.h"
 #include "guidemap.h"
+#include "enemy.h"
+#include "items.h"
 
 typedef enum { STATE_MENU, STATE_PLAYING } GameState;
 
@@ -16,8 +18,12 @@ static const SizePreset sizePresets[] = {
 #define SIZE_PRESET_COUNT 3
 #define SIZE_PRESET_DEFAULT 1 // 8x6, the size the spec settled on (§0)
 
+#define ENEMY_COUNT 2
+
 static Player player;
 static Sprite *playerSprite;
+static Enemy enemies[ENEMY_COUNT];
+static Sprite *enemySprites[ENEMY_COUNT];
 static u16 mapSeed;
 static u8 currentCol, currentRow;
 static bool mapViewOpen;
@@ -41,11 +47,25 @@ static u16 roomSeedFor(u8 col, u8 row)
 static void loadRoom(u8 col, u8 row)
 {
     const MapCell cell = guideMap[row][col];
+    const u16 seed = roomSeedFor(col, row);
+    u8 i;
 
-    Maze_generateRoom(cell.doorN, cell.doorE, cell.doorS, cell.doorW, roomSeedFor(col, row));
+    Maze_generateRoom(cell.doorN, cell.doorE, cell.doorS, cell.doorW, seed);
     Maze_draw();
+    Items_drawInRoom(col, row);
 
     guideMap[row][col].visited = TRUE;
+
+    // Same seed the room's maze uses, so the patrol routes are
+    // deterministic per room too (spec-equivalent persistence, see
+    // enemy.h). Each enemy draws further from the same reseeded stream,
+    // so the two land on different tiles in practice without needing to
+    // coordinate explicitly.
+    for (i = 0; i < ENEMY_COUNT; i++)
+    {
+        Enemy_spawnForRoom(&enemies[i], seed);
+        SPR_setPosition(enemySprites[i], enemies[i].x, enemies[i].y);
+    }
 }
 
 // Room transition (spec §7): move to the neighboring cell, regenerate its
@@ -93,14 +113,21 @@ static void newGame(void)
     mapRows = sizePresets[sizePresetIndex].rows;
 
     GuideMap_generate();
+    Items_reset();
 
     currentCol = startCol;
     currentRow = startRow;
 
     loadRoom(currentCol, currentRow);
+    Items_drawHud();
     Player_spawnAtRoomCenter(&player);
     SPR_setPosition(playerSprite, player.x, player.y);
     SPR_setVisibility(playerSprite, VISIBLE);
+    {
+        u8 i;
+        for (i = 0; i < ENEMY_COUNT; i++)
+            SPR_setVisibility(enemySprites[i], VISIBLE);
+    }
 }
 
 static void drawMenu(void)
@@ -132,10 +159,22 @@ int main(bool hardReset)
     PAL_setPalette(PAL1, playerShip.palette->data, DMA);
     playerSprite = SPR_addSprite(&playerShip, 0, 0, TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
 
+    PAL_setPalette(PAL2, enemyShip.palette->data, DMA);
+    {
+        u8 i;
+        for (i = 0; i < ENEMY_COUNT; i++)
+            enemySprites[i] = SPR_addSprite(&enemyShip, 0, 0, TILE_ATTR(PAL2, TRUE, FALSE, FALSE));
+    }
+
     JOY_init();
 
     gameState = STATE_MENU;
     SPR_setVisibility(playerSprite, HIDDEN);
+    {
+        u8 i;
+        for (i = 0; i < ENEMY_COUNT; i++)
+            SPR_setVisibility(enemySprites[i], HIDDEN);
+    }
     drawMenu();
 
     while (TRUE)
@@ -175,13 +214,21 @@ int main(bool hardReset)
 
                 if (mapViewOpen)
                 {
+                    u8 i;
+
                     GuideMap_drawOverlay(currentCol, currentRow);
                     SPR_setVisibility(playerSprite, HIDDEN);
+                    for (i = 0; i < ENEMY_COUNT; i++)
+                        SPR_setVisibility(enemySprites[i], HIDDEN);
                 }
                 else
                 {
+                    u8 i;
+
                     Maze_draw();
                     SPR_setVisibility(playerSprite, VISIBLE);
+                    for (i = 0; i < ENEMY_COUNT; i++)
+                        SPR_setVisibility(enemySprites[i], VISIBLE);
                 }
             }
 
@@ -194,6 +241,39 @@ int main(bool hardReset)
                     enterRoomFrom(exitDir);
 
                 SPR_setPosition(playerSprite, player.x, player.y);
+
+                // Physical contact pickup, order enforced (spec §13): does
+                // nothing unless (currentCol,currentRow) holds the next
+                // letter due AND the ship's box overlaps it.
+                if (Items_tryCollect(currentCol, currentRow, player.x, player.y))
+                {
+                    Maze_draw();           // wipes the now-collected letter's tile
+                    Items_drawInRoom(currentCol, currentRow); // no-op here, kept for symmetry with loadRoom
+                    Items_drawHud();
+                }
+
+                // Routine patrol, no player interaction yet.
+                {
+                    u8 i, j;
+
+                    for (i = 0; i < ENEMY_COUNT; i++)
+                        Enemy_update(&enemies[i]);
+
+                    // Bounce off each other: reverse both on overlap. A
+                    // brief 1-frame overlap before they separate is
+                    // imperceptible at 60fps and there's no damage/health
+                    // model yet to make it matter.
+                    for (i = 0; i < ENEMY_COUNT; i++)
+                        for (j = i + 1; j < ENEMY_COUNT; j++)
+                            if (Enemy_overlaps(&enemies[i], &enemies[j]))
+                            {
+                                enemies[i].dir = Enemy_opposite(enemies[i].dir);
+                                enemies[j].dir = Enemy_opposite(enemies[j].dir);
+                            }
+
+                    for (i = 0; i < ENEMY_COUNT; i++)
+                        SPR_setPosition(enemySprites[i], enemies[i].x, enemies[i].y);
+                }
             }
         }
 

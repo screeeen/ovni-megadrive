@@ -45,12 +45,22 @@ extern MapCell guideMap[MAX_MAP_ROWS][MAX_MAP_COLS];
 extern u8 startCol, startRow;
 extern u8 goalCol, goalRow;
 
+// Item rooms (spec §13): letters A..A+ITEM_COUNT-1, one per dead-end room
+// (exactly 1 door), picked by farthest-point sampling so they end up
+// spread apart from the start AND from each other, not clustered.
+// itemCol[n]/itemRow[n] is where letter n lives; items.c owns which ones
+// are collected.
+#define ITEM_COUNT 5
+extern u8 itemCol[ITEM_COUNT];
+extern u8 itemRow[ITEM_COUNT];
+
 // Carves a new room tree via randomized Prim's algorithm (spec §4.1), grown
 // from a random (startCol, startRow); prunes some leaves (spec §4.2); then
 // picks (goalCol, goalRow) at least GOAL_MIN_DISTANCE_PERCENT of the start
 // room's eccentricity away, reachable by construction since it's the same
-// spanning tree (spec §4.3). guideMap/startCol/startRow/goalCol/goalRow are
-// all valid once this returns.
+// spanning tree (spec §4.3); then picks itemCol[]/itemRow[] (spec §13).
+// guideMap/startCol/startRow/goalCol/goalRow/itemCol/itemRow are all valid
+// once this returns.
 void GuideMap_generate(void);
 
 bool GuideMap_hasDoor(u8 col, u8 row, u8 dir);
@@ -65,7 +75,10 @@ void GuideMap_loadGraphics(void);
 // Maze_draw() again to restore it when the overlay closes. Only cells with
 // visited==TRUE are drawn, each as a small room-shaped box (open side =
 // active door, closed side = wall) connected by corridor tiles; the
-// (curCol,curRow) room is highlighted in a different palette.
+// (curCol,curRow) room is highlighted in a different palette. Rooms
+// holding an uncollected item get their letter drawn on top (spec §13),
+// regardless of visited state -- that's the point, so the player can see
+// where to go.
 void GuideMap_drawOverlay(u8 curCol, u8 curRow);
 
 #endif

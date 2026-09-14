@@ -1,12 +1,14 @@
 #include "guidemap.h"
 #include "maze.h"
 #include "resources.h"
+#include "items.h"
 
 typedef struct { u8 col, row; } Coord;
 
 MapCell guideMap[MAX_MAP_ROWS][MAX_MAP_COLS];
 u8 startCol, startRow;
 u8 goalCol, goalRow;
+u8 itemCol[ITEM_COUNT], itemRow[ITEM_COUNT];
 u8 mapCols = 8, mapRows = 6; // sane default if a caller forgets to set these
 
 // Worst case: every CELL_EMPTY cell gets pushed once per already-carved
@@ -200,10 +202,11 @@ static void pruneLeaves(void)
     }
 }
 
-// BFS from (startCol,startRow) over the door graph. Fills `dist` (0xFF =
-// unreached) and returns the eccentricity (max distance found). Reuses
-// `frontier` as the queue -- the tree carve is done with it by this point.
-static u8 bfsFromStart(void)
+// BFS from an arbitrary room over the door graph. Fills `dist` (0xFF =
+// unreached) and returns the eccentricity (max distance found from that
+// room). Reuses `frontier` as the queue -- the tree carve is done with it
+// by this point.
+static u8 bfsFromRoom(u8 fromCol, u8 fromRow)
 {
     u16 qHead = 0, qTail = 0;
     u8 ecc = 0;
@@ -213,9 +216,9 @@ static u8 bfsFromStart(void)
         for (col = 0; col < mapCols; col++)
             dist[row][col] = 0xFF;
 
-    dist[startRow][startCol] = 0;
-    frontier[qTail].col = startCol;
-    frontier[qTail].row = startRow;
+    dist[fromRow][fromCol] = 0;
+    frontier[qTail].col = fromCol;
+    frontier[qTail].row = fromRow;
     qTail++;
 
     while (qHead < qTail)
@@ -248,6 +251,11 @@ static u8 bfsFromStart(void)
     }
 
     return ecc;
+}
+
+static u8 bfsFromStart(void)
+{
+    return bfsFromRoom(startCol, startRow);
 }
 
 // Picks (goalCol,goalRow) among rooms at >= GOAL_MIN_DISTANCE_PERCENT of the
@@ -295,6 +303,80 @@ static void selectGoal(void)
     }
 }
 
+// Picks itemCol[]/itemRow[] (spec §13): ITEM_COUNT dead-end rooms (exactly
+// 1 door, never the start room), spread apart from each other via greedy
+// farthest-point sampling -- each pick maximizes the MINIMUM door-graph
+// distance to every room already picked (seeded with distance-from-start
+// so item 0 isn't just an arbitrary first leaf). Needs one bfsFromRoom()
+// call per already-picked item (cheap: <=ITEM_COUNT passes over a map of
+// at most MAX_MAP_COLS*MAX_MAP_ROWS cells).
+static void selectItemRooms(void)
+{
+    static Coord candidates[MAX_MAP_COLS * MAX_MAP_ROWS];
+    static u16 minDistToChosen[MAX_MAP_COLS * MAX_MAP_ROWS];
+    u16 candidateCount = 0;
+    s16 col, row;
+    u8 n;
+    u16 i;
+
+    for (row = 0; row < mapRows; row++)
+    {
+        for (col = 0; col < mapCols; col++)
+        {
+            if ((guideMap[row][col].type == CELL_ROOM) &&
+                (doorCountAt((u8) col, (u8) row) == 1) &&
+                !((col == startCol) && (row == startRow)))
+            {
+                candidates[candidateCount].col = (u8) col;
+                candidates[candidateCount].row = (u8) row;
+                candidateCount++;
+            }
+        }
+    }
+
+    bfsFromStart();
+    for (i = 0; i < candidateCount; i++)
+        minDistToChosen[i] = dist[candidates[i].row][candidates[i].col];
+
+    for (n = 0; n < ITEM_COUNT; n++)
+    {
+        u16 bestIdx = 0;
+        u16 bestScore = 0;
+
+        if (candidateCount == 0)
+        {
+            // Not enough dead-end rooms (degenerate tiny/heavily-pruned
+            // map): fall back to the start room rather than crash. Not
+            // expected to trigger at the grid sizes in play (spec §0).
+            itemCol[n] = startCol;
+            itemRow[n] = startRow;
+            continue;
+        }
+
+        for (i = 0; i < candidateCount; i++)
+        {
+            if (minDistToChosen[i] >= bestScore)
+            {
+                bestScore = minDistToChosen[i];
+                bestIdx = i;
+            }
+        }
+
+        itemCol[n] = candidates[bestIdx].col;
+        itemRow[n] = candidates[bestIdx].row;
+
+        bfsFromRoom(itemCol[n], itemRow[n]);
+        for (i = 0; i < candidateCount; i++)
+        {
+            const u8 d = dist[candidates[i].row][candidates[i].col];
+
+            if (d < minDistToChosen[i])
+                minDistToChosen[i] = d;
+        }
+        minDistToChosen[bestIdx] = 0; // never picked again
+    }
+}
+
 void GuideMap_generate(void)
 {
     clearMap();
@@ -305,6 +387,7 @@ void GuideMap_generate(void)
     carveTree();
     pruneLeaves();
     selectGoal();
+    selectItemRooms();
 }
 
 // 320x224 screen = 40x28 tiles; center the (small) guide map within it.
@@ -422,6 +505,23 @@ void GuideMap_drawOverlay(u8 curCol, u8 curRow)
                 putTile(MAP_TILE_CORRIDOR_H, PAL0, rx + ROOM_BOX_W, ry);
             if (cell.doorS && (row + 1 < mapRows))
                 putTile(MAP_TILE_CORRIDOR_V, PAL0, rx + (ROOM_BOX_W / 2), ry + ROOM_BOX_H);
+
+            // Item letter (spec §13), regardless of visited state -- the
+            // whole point is helping the player find it before going
+            // there. Drawn on top of the box, centered in the middle
+            // column (same column the N/S corridor stub would use).
+            {
+                char letter;
+
+                if (Items_uncollectedAt((u8) col, (u8) row, &letter))
+                {
+                    char s[2];
+
+                    s[0] = letter;
+                    s[1] = '\0';
+                    VDP_drawText(s, rx + (ROOM_BOX_W / 2), ry);
+                }
+            }
         }
     }
 }

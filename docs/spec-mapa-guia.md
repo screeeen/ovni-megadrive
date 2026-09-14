@@ -616,3 +616,184 @@ Comprobaciones concretas antes de dar cada paso de §10 por cerrado.
       `VDP_clearPlane`, `SPR_setVisibility`). Recomendado: probar
       manualmente pulsando C en BlastEm antes de dar el paso por
       cerrado del todo.
+
+## 12. Enemigos con ruta rutinaria (fuera del alcance original de esta spec)
+
+Añadido tras completar el Mapa Guía: un enemigo por habitación,
+patrullando en línea recta y rebotando en las paredes del maze —
+sin colisión con la nave todavía (explícitamente pedido así).
+
+- **`enemy.h`/`enemy.c`**: struct `Enemy { x, y, dir }` y
+  `Enemy_update()` — misma colisión de caja de 16px contra el maze que
+  `player.c`'s `movePlayer` (duplicada, no compartida, para no tocar
+  código de player.c ya verificado extensamente).
+- **`Enemy_spawnForRoom(e, roomSeed)`**: aparece en el centro de la
+  habitación (mismo punto que `Player_spawnAtRoomCenter`) y la
+  dirección inicial sale de `roomSeed & 3` — la misma semilla que ya
+  usa `Maze_generateRoom` para esa celda, así que la ruta de patrulla
+  es determinista y persiste al re-entrar a la habitación, igual
+  filosofía que el propio layout del maze (spec §5).
+- **Sprite**: `res/sprite/enemy.png` (16x16, mismo duotono violeta/
+  fondo que el resto del juego — forma de "mina" con púas, distinta a
+  la nave redondeada, para que se distinga por silueta sin necesitar
+  otro color). Paleta propia (`PAL2`, libre desde que el Mapa Guía
+  pasó a un solo color).
+- **Fuera de alcance de este pase**: colisión nave-enemigo, tipos de
+  enemigo distintos, daño/vidas.
+- **Bordear bloques, no rebote aleatorio (feedback del usuario)**:
+  primer intento: al chocar, 50% de probabilidad de girar hacia un
+  lado al azar en vez de rebotar — el usuario lo rechazó explícitamente
+  ("que rodeen los bloques no que cambien de dirección aleatoriamente").
+  Se sustituyó por **wall-following determinista** (regla de la mano
+  derecha/izquierda): `Enemy` gana `preferRight` (fijado una vez en
+  `Enemy_spawnForRoom` desde `roomSeed`, nunca vuelto a sortear). Al
+  chocar, siempre intenta girar primero hacia esa misma mano fija; si
+  ese lado también está bloqueado, intenta el otro; si ambos lo están,
+  rebota (callejón sin salida). Esto sí traza el contorno completo de
+  un bloque en vez de zigzaguear.
+- **Bug real corregido por fuzzing** (independiente del giro, ya
+  existía en la versión de rebote simple): el enemigo podía salir por
+  un hueco de puerta y terminar con coordenadas fuera del mapa, porque
+  a diferencia de la nave no tiene lógica de transición de habitación.
+  Arreglado en `enemy.c`'s `wallAt()`: el anillo exterior de la
+  habitación siempre cuenta como pared para el enemigo, haya puerta o
+  no. Verificado con 3,75 millones de pasos simulados (15 combinaciones
+  de puertas × 50 semillas × 5000 pasos) — 0 fallos de límites o de
+  atravesar paredes, antes y después del cambio a wall-following.
+- **"Siempre un muro a la derecha" (feedback del usuario)**: el
+  wall-following anterior solo decidía al chocar (probar mano
+  preferida → la otra → rebote), lo cual no mantiene contacto
+  continuo con la pared. Se cambió a la regla real de la mano
+  derecha: **en cada paso**, no solo al chocar, prueba en orden girar
+  a la derecha → seguir recto → girar a la izquierda → dar la vuelta,
+  y toma la primera opción libre. Un hueco a la derecha se toma al
+  instante en vez de pasar de largo, que es lo que de verdad mantiene
+  un muro pegado al lado derecho de forma continua. Se quitó
+  `preferRight` (ya no hace falta, siempre es la derecha). Reverificado
+  con el mismo fuzzing de 3,75M de pasos — 0 fallos.
+- **Bug real: se quedaba parado (feedback del usuario)**: la versión
+  anterior, al decidir girar, solo cambiaba `dir` y esperaba al
+  siguiente frame para moverse (igual que un rebote normal). En una
+  zona abierta (como el punto de aparición, típicamente despejado),
+  "girar a la derecha" seguía siendo válido frame tras frame desde
+  cada nuevo rumbo, así que podía re-decidir girar indefinidamente sin
+  avanzar nunca — visualmente parado, girando sobre sí mismo. Arreglo:
+  `Enemy_update` ahora decide la dirección y **siempre** da un paso en
+  esa dirección en la misma llamada, sin excepción. Verificado con
+  1.500.000 llamadas simuladas: 0 casos de frame sin movimiento.
+- **Bug real más profundo: atrapado en bucles cerrados (feedback del
+  usuario)**: "a veces aparecen bloqueados" resultó ser un test de
+  fuzzing dedicado (`test_enemy3.c`, cuenta celdas únicas visitadas en
+  3000 pasos) confirmando que el 72% de las salas dejaban al enemigo
+  dando vueltas en solo 1-4 celdas para siempre. Causa raíz: **cada
+  habitación genera, por construcción, un bloque 2x2 totalmente abierto
+  justo en el punto de aparición** (`carve()` en `maze.c` marca ese
+  bloque como camino como primer paso, antes de tallar nada más) — es
+  un bucle cerrado garantizado. Con "siempre intenta la derecha
+  primero" en cada casilla, el enemigo queda atrapado ahí desde el
+  frame 1: es una propiedad matemática del algoritmo de la mano en la
+  pared (no puede salir de un anillo cerrado una vez dentro), no un
+  bug de implementación. Además, la decisión se re-evaluaba a nivel de
+  píxel (1px de holgura), lo cual en cualquier zona 2D abierta hacía
+  que "girar a la derecha" pareciera libre en casi todos los frames,
+  produciendo un giro de 4 pasos que se cancela a sí mismo
+  (arriba-derecha-abajo-izquierda vuelve exactamente al píxel de
+  partida) — doble causa del mismo síntoma.
+  - Arreglo de granularidad: las decisiones de giro solo se toman al
+    estar exactamente centrado en una casilla (`x`/`y` múltiplos de
+    `MAZE_TILE_PX`), comprobando la **casilla completa** vecina
+    (`tileBlockedInDir`), no solo 1px de holgura.
+  - Arreglo de comportamiento: se preguntó al usuario el trade-off
+    real (mano derecha estricta = atrapado en cualquier bucle cerrado,
+    frente a recto por defecto = patrulla más la sala). Eligió
+    **recto por defecto, gira solo si choca** (derecha → izquierda →
+    vuelta atrás, determinista, sin aleatoriedad) — ya no es "mano
+    pegada a la pared" continua, pero si bordea obstáculos reales
+    cuando los encuentra.
+  - Resultado tras el cambio: de 323/450 salas atrapadas (72%,
+    típicamente en las 1-4 celdas del bloque de aparición) a
+    **37/450 (8%)**, y esas pocas ahora son bucles reales de 8-14
+    celdas propios de la geometría de esa sala concreta, no el bloque
+    de aparición — una limitación aceptable y esperada del algoritmo
+    con mapas que tienen ciclos, no un fallo sistemático.
+- **Segundo enemigo, spawn aleatorio y colisión entre ellos (feedback
+  del usuario)**: `ENEMY_COUNT=2` en `main.c` (array de `Enemy`/
+  `Sprite*` en vez de una sola instancia). `Enemy_spawnForRoom` ya no
+  aparece siempre en el centro de la sala — prueba hasta 32 casillas
+  aleatorias (contra el stream de `random()` ya sembrado con
+  `roomSeed` por `Maze_generateRoom`, así que sigue siendo
+  determinista por sala) hasta encontrar una abierta, con el centro
+  como respaldo si todas fallan. Cada frame se comprueba solape AABB
+  16x16 entre cada par de enemigos (`Enemy_overlaps`); si se tocan,
+  ambos invierten dirección (`Enemy_opposite`) — igual que rebotar en
+  una pared, sin modelo de daño/vidas. Verificado: 0/1500 apariciones
+  dentro de una pared; 12/1500 coincidencias de spawn en la misma
+  casilla (raro pero inofensivo, el chequeo de colisión los separa en
+  el primer frame).
+- **Vuelta a mano derecha estricta (feedback del usuario, quería
+  probarla)**: revertido `Enemy_update` a comprobar la derecha primero
+  en cada casilla, antes de preguntar si el camino recto está
+  bloqueado — el trade-off aceptado explícitamente sabiendo el riesgo.
+  Remedido con el spawn aleatorio ya en su sitio (no el centro fijo de
+  antes): **297/450 salas (66%)** siguen quedando atrapadas en un
+  bucle pequeño en 3000 pasos — el spawn aleatorio apenas cambia el
+  resultado (72%→66%) porque el problema no es solo el bloque 2x2 de
+  aparición, sino que esta rejilla suele tener varios bucles pequeños
+  alcanzables cerca de cualquier punto. Sin fallos de límites/paredes
+  ni de "frame sin mover" — el riesgo aceptado es solo de patrulla
+  limitada a una zona pequeña, no de un bug que rompa el juego.
+- **Vuelta definitiva a "recto por defecto" (feedback del usuario)**:
+  el 66% de salas atrapadas con mano derecha estricta no compensaba.
+  Revertido a `Enemy_update` recto-por-defecto/gira-solo-si-choca.
+  Con spawn aleatorio: 68/450 (15%) siguen quedando atrapadas en 3000
+  pasos — más que el 8% medido antes de añadir el spawn aleatorio
+  (algo esperable, más puntos de partida posibles rondando bucles
+  pequeños), pero muy por debajo del 66-72% de la mano derecha
+  estricta. Este es el estado final: `Enemy_update` en `enemy.c` no
+  debería volver a tocarse sin repetir este mismo fuzzing antes.
+
+## 13. Sistema de objetos (letras A-E)
+
+Decisiones confirmadas con el usuario: 5 letras fijas (no escala con
+el tamaño de mapa), orden de recogida forzado (no se puede coger la
+letra N+1 sin haber recogido la N), recogida por contacto físico
+(primera colisión jugador-objeto real del juego), HUD fijo en
+pantalla durante toda la partida.
+
+- **Selección de habitaciones** (`guidemap.c`, `selectItemRooms`,
+  llamada al final de `GuideMap_generate` tras `selectGoal`): candidatas
+  = habitaciones con exactamente 1 puerta ("sin salidas" = callejón sin
+  salida), excluyendo la sala de inicio. Muestreo por dispersión de
+  puntos más lejanos (farthest-point sampling): la letra 0 es la
+  candidata más lejana del inicio; cada letra siguiente maximiza la
+  distancia MÍNIMA a todas las ya elegidas (`minDistToChosen[]`,
+  actualizado con un `bfsFromRoom()` extra por cada letra ya colocada —
+  el BFS se generalizó de `bfsFromStart()` a un punto de partida
+  arbitrario para esto). Verificado con 600 semillas (3 tamaños × 200):
+  0 fallos — todas son callejones reales, ninguna coincide con el
+  inicio ni entre sí, distancia mínima entre pares crece con el tamaño
+  del mapa (peor caso 2 en 6x4, 6 en 10x8).
+- **Estado de recogida** (`items.c`, nuevo módulo): `collected[]` +
+  `nextIndex` (índice de la única letra recogible ahora mismo).
+  `Items_tryCollect(col,row,playerX,playerY)` solo actúa si la
+  habitación actual contiene la letra `nextIndex` Y la caja de 16x16
+  de la nave se solapa con la posición fija del objeto (el mismo
+  punto — `MAZE_DOOR_COL`/`MAZE_DOOR_ROW` — que usa el spawn del
+  jugador en la sala de inicio, siempre camino garantizado). Tocar una
+  letra futura antes de tiempo no hace nada — se queda ahí, visible,
+  inerte.
+- **Renderizado en la habitación**: `Items_drawInRoom` dibuja la letra
+  con `VDP_drawText` (plano por defecto, `BG_A`, mismo plano que el
+  maze) en la posición fija del objeto, solo si sigue sin recoger.
+  Llamado tras cada `Maze_draw()` (en `loadRoom` y tras una recogida,
+  para borrar la letra ya recogida redibujando el maze completo).
+- **Marcado en el Mapa Guía**: `GuideMap_drawOverlay` dibuja la letra
+  de cualquier objeto sin recoger sobre la caja de su habitación,
+  **independientemente de si está visitada o no** — es la forma en
+  que el jugador sabe dónde ir, tal como pidió.
+- **HUD persistente**: `Items_drawHud` dibuja "A B _ _ _" en `BG_B`
+  (plano separado del maze, que vive en `BG_A`) con prioridad alta
+  (`VDP_setTextPriority(1)`) para que se vea por encima de los tiles
+  de baja prioridad del maze en `BG_A` — sin esto, al ser planos
+  opacos en Genesis, el maze taparía el HUD por completo. Se
+  actualiza en `newGame()` y tras cada recogida exitosa.
