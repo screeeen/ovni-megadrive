@@ -797,3 +797,208 @@ pantalla durante toda la partida.
   de baja prioridad del maze en `BG_A` — sin esto, al ser planos
   opacos en Genesis, el maze taparía el HUD por completo. Se
   actualiza en `newGame()` y tras cada recogida exitosa.
+
+## 14. Nave orientada hacia la dirección de movimiento ("patas primero")
+
+El VDP del Genesis solo permite espejar sprites (flip horizontal/
+vertical), no rotarlos — así que las 4 orientaciones "patas primero"
+necesitan 2 artes dibujadas a mano, no 4:
+
+- `res/sprite/player.png` (patas abajo, ya existente): sirve tal cual
+  para `DIR_DOWN`, y con flip vertical (`SPR_setVFlip`) para
+  `DIR_UP` — el arte no es simétrico arriba/abajo (el cuerpo ovalado
+  se ensancha hacia abajo antes de las patas), así que el flip
+  produce una orientación realmente distinta, no un no-op.
+- `res/sprite/player_side.png` (patas a la derecha): generado
+  rotando 90° el arte existente con ImageMagick (`-rotate -90`,
+  sin antialiasing) en vez de dibujarlo desde cero, para mantener
+  exactamente el mismo estilo y paleta. Sirve tal cual para
+  `DIR_RIGHT`, y con flip horizontal para `DIR_LEFT`.
+- `main.c`'s `syncPlayerSpriteOrientation()`: cambia de arte
+  (`SPR_setDefinition`) y aplica el flip correspondiente solo cuando
+  `player.dir` cambia respecto al frame anterior (evita llamadas
+  redundantes). Se resetea (`playerVisualDir = 255`) en cada
+  `newGame()` para forzar una sincronización inicial correcta.
+- Confirmado en la compilación: `playerShipSide_palette_data` tiene
+  el mismo contenido que `playerShip_palette_data` (misma paleta,
+  como se esperaba de rotar el mismo arte) — no hace falta cargar
+  paleta aparte para el sprite lateral, sigue usando `PAL1`.
+- **Revertido (feedback del usuario)**: se quitó `syncPlayerSpriteOrientation`
+  de `main.c`, la entrada `playerShipSide` de `resources.res`, y se
+  borró `res/sprite/player_side.png` (sin uso). La nave vuelve a
+  usar siempre el sprite original sin rotar. Nota de mantenimiento:
+  al borrar el `.png`, `make` falló en seco (exit 2, sin mensaje)
+  porque el `.d` de dependencias generado seguía listando el archivo
+  borrado como prerequisito — hizo falta `make clean` antes de
+  reconstruir. Si se vuelve a borrar un asset referenciado en un
+  build anterior, repetir `make clean` primero.
+
+## 15. Mapa Guía: intento de vista "solo la ruta", revertido (feedback del usuario)
+
+Iteración 1 (rechazada): `GuideMap_drawOverlay` seguía mostrando el
+mapa completo explorado, solo cambiando qué letras se revelaban
+(`Items_revealedOnMap`, índices `<= nextIndex`). El usuario aclaró que
+no era eso: quería que se pintase **solo la ruta** (el camino de
+habitaciones/pasillos) hasta la letra desbloqueada, no el mapa
+completo con más o menos letras visibles.
+
+Iteración 2 (implementada y luego revertida): se probó una vista de
+"solo la ruta", con estas decisiones confirmadas antes de
+implementar — ruta trazada desde la posición actual de la nave (no
+desde el inicio), solo se muestra la ruta y el resto del mapa se
+oculta por completo, y los tramos de pasillo de la ruta usan la misma
+forma sólida (`MAP_TILE_FILL`) que la sala actual. Se implementó vía
+`tracePathTo()` (reconstrucción de camino único en el árbol de
+habitaciones, caminando del destino al origen por `dist` decreciente
+de `bfsFromRoom`) e `Items_currentTarget()` en lugar de
+`Items_revealedOnMap`.
+
+**Revertido (feedback del usuario: "revierte, enseña todo el
+mapa")**: se volvió a la vista de mapa completo, con revelado
+progresivo de letras, que es el comportamiento final/actual:
+
+- `GuideMap_drawOverlay` vuelve a iterar sobre toda la rejilla
+  (`mapCols` × `mapRows`), dibujando cada `CELL_ROOM` según su estado
+  (relleno sólido si es la sala actual, dithering si está visitada,
+  borde hueco si no) más los tramos de pasillo finos normales
+  (`MAP_TILE_CORRIDOR_H`/`_V`) por cada puerta abierta — ya no hay
+  filtrado por ruta. `tracePathTo()` y sus estáticos auxiliares
+  (`pathEastSolid[][]`, `pathSouthSolid[][]`) se eliminaron del todo.
+- `items.c` vuelve a exponer `Items_revealedOnMap(col,row,&letter)`
+  (letras con índice `<= nextIndex`: las ya recogidas quedan como
+  rastro, la actual pendiente se revela, las futuras siguen ocultas).
+  `Items_currentTarget()` se eliminó (ya no tiene uso).
+- Verificado: build limpio (`make`) y arranque limpio en BlastEm sin
+  errores en el log tras el revert.
+
+## 16. Bloqueo físico de zonas no accesibles
+
+Petición del usuario: si toca buscar C, las ramas que solo llevan a D y
+E deben estar bloqueadas (no solo el mapa lo indica — no se puede
+caminar hasta allí), mientras que A y B (ya desbloqueadas antes) siguen
+abiertas. A está desbloqueada desde el principio.
+
+Decisiones confirmadas (preguntadas antes de implementar):
+- **Alcance**: se bloquea toda la rama del árbol hacia una letra, no
+  solo la puerta de su propia sala sin salida — si una sala
+  intermedia solo lleva a letras aún no debidas, esa sala entera
+  (y todo lo que cuelgue de ella) queda sellada, no solo el último
+  tramo.
+- **Percepción física**: la puerta bloqueada se ve distinta (tile de
+  "puerta cerrada", no un muro genérico indistinguible) y colisiona
+  exactamente como un muro — la nave rebota al chocar.
+- **Mapa Guía**: las salas bloqueadas también se marcan de forma
+  distinta en el overlay del botón C, no solo en el juego.
+
+Implementación:
+- **`res/sprite/maze_tiles.png`** pasa de 160x16 (10 celdas) a 176x16
+  (11 celdas): se añade la celda 10, un patrón de reloj de arena/X en
+  las mismas dos únicas colores del resto del tileset (`#252525` fondo,
+  `#987DFA` violeta) — distinto a propósito de los 9 patrones de
+  dithering ya existentes, para que se lea como "bloqueado" y no como
+  "otra textura de muro más". `MAZE_TILE_COUNT` (maze.h) sube de 40 a
+  44 (11 celdas × 4 subtiles) — desplaza automáticamente
+  `MAP_TILE_BASE` en guidemap.c, que ya se calcula a partir de esa
+  constante.
+- **`maze.c`**: `Maze_generateRoom` gana 4 parámetros nuevos
+  (`lockedN/E/S/W`, paralelos a `doorN/E/S/W`, solo válidos donde el
+  `doorX` correspondiente es TRUE). El carving interior no cambia; solo
+  el punch-through del borde de una puerta bloqueada usa la nueva celda
+  `LOCKED_DOOR` (10) en vez de `PATH` (0). Como `Maze_isWall()` ya
+  devuelve TRUE para cualquier celda `!= PATH`, la colisión del muro
+  bloqueado sale gratis del código existente — no hizo falta tocar
+  `player.c` en absoluto: el jugador nunca llega a pisar el tile
+  límite que dispara `EXIT_NORTH/EAST/SOUTH/WEST` en
+  `Player_updateRoom`, porque el movimiento ya se frena antes por
+  colisión normal.
+- **`guidemap.c`** (spec central de este bloqueo): `GuideMap_recomputeLocks()`
+  recorre el árbol de habitaciones en dos pasadas —
+  `computeContainsUnlocked()` (post-orden: ¿la subrama de esta sala
+  contiene algún ítem con índice `<= nextIndex`?) y `markLocked()` /
+  `markSubtreeLocked()` (pre-orden desde el inicio: si la subrama de
+  un hijo no contiene nada debido, esa subrama entera se marca
+  `roomLocked`, si sí lo contiene se sigue bajando por ahí). Como el
+  grafo de habitaciones es un árbol, cada rama bloqueada solo toca el
+  resto por una única arista — bloquear esa arista ya sella todo lo
+  que cuelga de ella, sin necesitar guardar qué arista es
+  explícitamente. `Items_isUnlocked(index)` (items.c/.h, nuevo) expone
+  el mismo umbral `index <= nextIndex` que ya usaba
+  `Items_revealedOnMap`, para que guidemap.c no dependa de
+  `collected[]`/`nextIndex` directamente.
+- **`main.c`**: `GuideMap_recomputeLocks()` se llama en `newGame()`
+  (tras `GuideMap_generate()` + `Items_reset()`, así A queda
+  desbloqueada desde el principio) y de nuevo cada vez que
+  `Items_tryCollect()` devuelve TRUE. `loadRoom()` calcula
+  `lockedN/E/S/W` de la sala que va a generar consultando
+  `GuideMap_isRoomLocked()` sobre cada vecino con puerta, y se lo pasa
+  a `Maze_generateRoom()`.
+- **Overlay del Mapa Guía**: `GuideMap_drawOverlay` añade un tercer
+  estado (entre "sala actual" y "visitada") para
+  `GuideMap_isRoomLocked() == TRUE`: relleno con la misma textura de
+  puerta bloqueada (`MAZE_LOCKED_DOOR_TILE`, la subtile representativa
+  de la celda 10, reutilizada igual que `MAZE_WALL_DITHER_TILE` ya se
+  reutilizaba para "visitada"). Una sala bloqueada nunca puede estar
+  visitada a la vez (el desbloqueo es monótono: `nextIndex` solo
+  avanza), así que no hay conflicto de prioridad entre ramas.
+- **Verificado en el host** (`test_locks.c`, ~6000 generaciones válidas
+  entre semillas 1-2000 × 3 tamaños de preset): para cada paso de
+  `nextIndex` de 0 a `ITEM_COUNT-1`, el ítem actualmente debido nunca
+  está bloqueado, todos los posteriores sí, la sala de inicio nunca
+  está bloqueada, y el desbloqueo es estrictamente monótono (ninguna
+  sala vuelve a bloquearse tras desbloquearse) — 0 fallos. Se
+  descubrió (y se excluyó del test, no es un bug de este bloqueo) un
+  problema preexistente en `selectItemRooms`: en el preset más pequeño
+  (6x4), su fallback de "no hay suficientes salas sin salida" puede
+  asignar dos letras a la misma sala (normalmente la de inicio) en
+  ~0.5% de las semillas, lo que ya rompía la recogida en orden estricto
+  antes de esta feature — no se ha tocado, queda anotado aquí por si se
+  quiere arreglar en otra sesión.
+- Verificado en BlastEm: build limpio, arranque limpio sin errores en
+  el log tras el rebuild.
+
+## 17. Fog of war estricto: solo se ve lo que la nave ha visitado
+
+Petición del usuario: el Mapa Guía (botón C) debe ocultar las salas en
+las que la nave no ha estado — el mapa se va abriendo a medida que se
+avanza, no se muestra de golpe. Esto sustituye la vista de "mapa
+completo" del §15 (que mostraba toda sala conocida, visitada o no, con
+un borde hueco para las no visitadas) por una niebla de guerra real.
+
+Decisiones confirmadas (preguntadas antes de implementar):
+- **Letras (spec §13)**: también se ocultan hasta visitar la sala —
+  dejan de actuar como baliza a través de la niebla; encontrarlas es
+  parte de explorar.
+- **Pasillos**: un pasillo solo se dibuja si **ambas** salas que
+  conecta han sido visitadas — no se insinúan salidas hacia salas aún
+  no vistas.
+
+Implementación (`guidemap.c`, `GuideMap_drawOverlay`):
+- Se añade `if (!cell.visited) continue;` justo después del filtro de
+  `CELL_ROOM`, antes de decidir nada más — una sala no visitada no
+  dibuja ni caja, ni pasillos hacia ella, ni su letra si la tuviera.
+- Como consecuencia, el estado de 4 ramas que había quedado tras el
+  §16 (actual / bloqueada / visitada / conocida-sin-visitar) se
+  reduce a 2 (actual / visitada): una sala bloqueada (spec §16) nunca
+  puede estar visitada — el desbloqueo es monótono — así que ya está
+  cubierta por el mismo `continue`, y la rama que dibujaba
+  `MAZE_LOCKED_DOOR_TILE` en el overlay se ha quitado por
+  inalcanzable. La rama de borde hueco para "conocida pero no
+  visitada" (`MAP_TILE_CORNER_TL` etc.) también se quita por el mismo
+  motivo — ya no existe ese estado. El bloqueo físico en la propia
+  habitación (§16: puerta con textura de candado, colisión de muro)
+  no cambia en absoluto, esto es puramente sobre qué se ve en el
+  overlay del mapa.
+- Los tramos de pasillo (`MAP_TILE_CORRIDOR_H`/`_V`) ganan una
+  condición extra: `guideMap[row][col+1].visited` /
+  `guideMap[row+1][col].visited` sobre el vecino, además de la
+  puerta y el límite de la rejilla que ya comprobaban.
+- La letra del ítem (`Items_revealedOnMap`) no necesitó cambiar su
+  propia condición — ya queda cubierta por el `continue` de arriba,
+  puesto que para cuando el código llega a esa comprobación
+  `cell.visited` ya es TRUE por construcción.
+- Los tiles de borde hueco (`MAP_TILE_CORNER_TL/EDGE_T/CORNER_TR/CORNER_BL/EDGE_B/CORNER_BR`)
+  se dejan definidos en `guidemap.c` y presentes en `map_tiles.png`
+  aunque ya no se dibujen — es arte de tileset compartido, no vale la
+  pena tocar la imagen ni el rescomp para esto.
+- Verificado: build limpio (`make`, sin warnings) y arranque limpio en
+  BlastEm sin errores en el log tras el rebuild.

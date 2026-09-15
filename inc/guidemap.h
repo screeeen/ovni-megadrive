@@ -65,20 +65,32 @@ void GuideMap_generate(void);
 
 bool GuideMap_hasDoor(u8 col, u8 row, u8 dir);
 
+// Recomputes which rooms are locked (spec §16): a room is locked if every
+// path from the start to it crosses at least one door whose entire far
+// side (the whole branch beyond it, not just the immediate room) contains
+// no item at or before the one currently due (Items_isUnlocked). Call once
+// after GuideMap_generate()+Items_reset() (newGame) and again every time
+// Items_tryCollect() returns TRUE -- locking only ever loosens as
+// nextIndex advances, never the reverse, so a room already visited can
+// never become locked later. Read back via GuideMap_isRoomLocked().
+void GuideMap_recomputeLocks(void);
+
+bool GuideMap_isRoomLocked(u8 col, u8 row);
+
 // Uploads the overlay tileset to VRAM (right after maze.c's tileset --
 // see MAZE_TILE_COUNT) and sets up PAL2 for the current-room highlight.
 // Call once at boot, alongside Maze_loadGraphics().
 void GuideMap_loadGraphics(void);
 
-// Draws the fog-of-war overlay (spec §6) to BG_A, replacing whatever was
-// there (the current room's maze) -- caller is responsible for calling
-// Maze_draw() again to restore it when the overlay closes. Only cells with
-// visited==TRUE are drawn, each as a small room-shaped box (open side =
-// active door, closed side = wall) connected by corridor tiles; the
-// (curCol,curRow) room is highlighted in a different palette. Rooms
-// holding an uncollected item get their letter drawn on top (spec §13),
-// regardless of visited state -- that's the point, so the player can see
-// where to go.
+// Draws the fog-of-war overlay (spec §6, tightened by spec §17) to BG_A,
+// replacing whatever was there (the current room's maze) -- caller is
+// responsible for calling Maze_draw() again to restore it when the
+// overlay closes. A cell is drawn -- box, corridor stubs into it, and any
+// item letter it holds -- only if visited==TRUE; everything else (never
+// entered, including every locked room, spec §16, since a locked room can
+// never be visited) is fully omitted, not shown differently. The
+// (curCol,curRow) room is highlighted with a solid fill instead of the
+// dither used for other visited rooms.
 void GuideMap_drawOverlay(u8 curCol, u8 curRow);
 
 #endif

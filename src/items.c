@@ -37,6 +37,28 @@ bool Items_uncollectedAt(u8 col, u8 row, char *outLetter)
     return TRUE;
 }
 
+bool Items_revealedOnMap(u8 col, u8 row, char *outLetter)
+{
+    const s16 i = findItemAt(col, row);
+
+    // Only the letters up to and including the one currently due (order
+    // enforced, spec §13) are on the map -- collected ones stay marked as
+    // a breadcrumb of the path so far, the current target is shown so the
+    // player knows where to go next, but anything further ahead is not
+    // revealed yet (there's no point showing where D and E are while B is
+    // still due).
+    if ((i < 0) || (i > (s16) nextIndex))
+        return FALSE;
+
+    *outLetter = (char) ('A' + i);
+    return TRUE;
+}
+
+bool Items_isUnlocked(u8 index)
+{
+    return index <= nextIndex;
+}
+
 bool Items_tryCollect(u8 col, u8 row, s16 playerX, s16 playerY)
 {
     s16 i;

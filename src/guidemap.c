@@ -22,6 +22,12 @@ static u16 frontierCount;
 // dist[][] from the most recent bfsFromStart() call. 0xFF = unreached.
 static u8 dist[MAX_MAP_ROWS][MAX_MAP_COLS];
 
+// roomLocked[][] from the most recent GuideMap_recomputeLocks() call (spec
+// §16). containsUnlockedScratch[][] is scratch space live only during that
+// call's own recursion, not meant to be read afterwards.
+static bool roomLocked[MAX_MAP_ROWS][MAX_MAP_COLS];
+static bool containsUnlockedScratch[MAX_MAP_ROWS][MAX_MAP_COLS];
+
 static bool inBounds(s16 col, s16 row)
 {
     return (col >= 0) && (col < mapCols) && (row >= 0) && (row < mapRows);
@@ -258,6 +264,108 @@ static u8 bfsFromStart(void)
     return bfsFromRoom(startCol, startRow);
 }
 
+static s16 itemIndexAtRoom(u8 col, u8 row)
+{
+    u8 i;
+
+    for (i = 0; i < ITEM_COUNT; i++)
+        if ((itemCol[i] == col) && (itemRow[i] == row))
+            return i;
+
+    return -1;
+}
+
+static bool roomHasUnlockedItem(u8 col, u8 row)
+{
+    const s16 i = itemIndexAtRoom(col, row);
+
+    return (i >= 0) && Items_isUnlocked((u8) i);
+}
+
+// Post-order over the room tree (spec §16): does the subtree rooted at
+// (col,row) -- excluding the edge back to parentDir, -1 for the root call
+// -- contain a room whose item is at or before the one currently due?
+// Fills containsUnlockedScratch[][] for every room visited along the way,
+// which markLocked() below then reads top-down.
+static bool computeContainsUnlocked(u8 col, u8 row, s8 parentDir)
+{
+    bool result = roomHasUnlockedItem(col, row);
+    u8 d;
+
+    for (d = 0; d < 4; d++)
+    {
+        s16 ncol, nrow;
+
+        if (((s8) d) == parentDir) continue;
+        if (!GuideMap_hasDoor(col, row, d)) continue;
+
+        neighborInDir(col, row, d, &ncol, &nrow);
+        if (computeContainsUnlocked((u8) ncol, (u8) nrow, (s8) opposite(d)))
+            result = TRUE;
+    }
+
+    containsUnlockedScratch[row][col] = result;
+    return result;
+}
+
+// Marks every room in the subtree rooted at (col,row) as locked -- called
+// once the parent's side has already decided nothing due lives past this
+// edge, so the whole branch behind it seals (not just the door itself).
+static void markSubtreeLocked(u8 col, u8 row, s8 parentDir)
+{
+    u8 d;
+
+    roomLocked[row][col] = TRUE;
+
+    for (d = 0; d < 4; d++)
+    {
+        s16 ncol, nrow;
+
+        if (((s8) d) == parentDir) continue;
+        if (!GuideMap_hasDoor(col, row, d)) continue;
+
+        neighborInDir(col, row, d, &ncol, &nrow);
+        markSubtreeLocked((u8) ncol, (u8) nrow, (s8) opposite(d));
+    }
+}
+
+// Pre-order from the start (already known accessible): for each child
+// edge, either its subtree contains something due (recurse, stays open)
+// or it doesn't (markSubtreeLocked seals the whole branch) -- this finds
+// exactly the edge closest to the start where a locked branch begins.
+static void markLocked(u8 col, u8 row, s8 parentDir)
+{
+    u8 d;
+
+    roomLocked[row][col] = FALSE;
+
+    for (d = 0; d < 4; d++)
+    {
+        s16 ncol, nrow;
+
+        if (((s8) d) == parentDir) continue;
+        if (!GuideMap_hasDoor(col, row, d)) continue;
+
+        neighborInDir(col, row, d, &ncol, &nrow);
+
+        if (containsUnlockedScratch[nrow][ncol])
+            markLocked((u8) ncol, (u8) nrow, (s8) opposite(d));
+        else
+            markSubtreeLocked((u8) ncol, (u8) nrow, (s8) opposite(d));
+    }
+}
+
+void GuideMap_recomputeLocks(void)
+{
+    computeContainsUnlocked(startCol, startRow, -1);
+    markLocked(startCol, startRow, -1);
+}
+
+bool GuideMap_isRoomLocked(u8 col, u8 row)
+{
+    return roomLocked[row][col];
+}
+
 // Picks (goalCol,goalRow) among rooms at >= GOAL_MIN_DISTANCE_PERCENT of the
 // start's eccentricity, chosen at random among the qualifying candidates
 // (reuses `frontier`, idle after bfsFromStart's queue use) for variety
@@ -462,6 +570,14 @@ void GuideMap_drawOverlay(u8 curCol, u8 curRow)
             if (cell.type != CELL_ROOM)
                 continue; // not a room at all -- nothing drawn here
 
+            if (!cell.visited)
+                continue; // fog of war (spec §17): never-visited rooms are
+                          // fully hidden -- box, corridors and letter alike
+                          // -- not just shown differently. A locked room
+                          // (spec §16) can never be visited either (the
+                          // unlock is monotonic), so this also covers it;
+                          // no separate "locked" look is drawn on the map.
+
             if ((col == curCol) && (row == curRow))
             {
                 // Current room: fully solid -- shape marks position since
@@ -472,12 +588,11 @@ void GuideMap_drawOverlay(u8 curCol, u8 curRow)
                     for (x = 0; x < ROOM_BOX_W; x++)
                         putTile(MAP_TILE_FILL, pal, rx + x, ry + y);
             }
-            else if (cell.visited)
+            else
             {
                 // Visited (not current): filled with the maze's own wall
                 // dither pattern (MAZE_WALL_DITHER_TILE, maze.h) instead of
-                // a flat fill -- a third distinct look between "hollow
-                // outline" (known, unvisited) and "fully solid" (current),
+                // a flat fill -- distinct from "fully solid" (current),
                 // still one color throughout.
                 s16 x, y;
 
@@ -485,35 +600,27 @@ void GuideMap_drawOverlay(u8 curCol, u8 curRow)
                     for (x = 0; x < ROOM_BOX_W; x++)
                         putTile(MAZE_WALL_DITHER_TILE, pal, rx + x, ry + y);
             }
-            else
-            {
-                // Known, unvisited: 3x2 outline (top row: corner/edge/corner,
-                // bottom row: corner/edge/corner), hollow in the middle.
-                putTile(MAP_TILE_CORNER_TL, pal, rx,     ry);
-                putTile(MAP_TILE_EDGE_T,    pal, rx + 1, ry);
-                putTile(MAP_TILE_CORNER_TR, pal, rx + 2, ry);
-                putTile(MAP_TILE_CORNER_BL, pal, rx,     ry + 1);
-                putTile(MAP_TILE_EDGE_B,    pal, rx + 1, ry + 1);
-                putTile(MAP_TILE_CORNER_BR, pal, rx + 2, ry + 1);
-            }
 
-            // Corridors are always shown between two rooms with a door
-            // between them (doors only ever exist between two CELL_ROOM
-            // cells by construction) -- unvisited rooms are shown too now,
-            // so hiding the corridor to one would look inconsistent.
-            if (cell.doorE && (col + 1 < mapCols))
+            // Corridors only between two VISITED rooms (spec §17) -- a
+            // stub pointing into an unvisited neighbor would give away its
+            // existence/position through the fog, which is exactly what's
+            // being hidden now.
+            if (cell.doorE && (col + 1 < mapCols) && guideMap[row][col + 1].visited)
                 putTile(MAP_TILE_CORRIDOR_H, PAL0, rx + ROOM_BOX_W, ry);
-            if (cell.doorS && (row + 1 < mapRows))
+            if (cell.doorS && (row + 1 < mapRows) && guideMap[row + 1][col].visited)
                 putTile(MAP_TILE_CORRIDOR_V, PAL0, rx + (ROOM_BOX_W / 2), ry + ROOM_BOX_H);
 
-            // Item letter (spec §13), regardless of visited state -- the
-            // whole point is helping the player find it before going
-            // there. Drawn on top of the box, centered in the middle
-            // column (same column the N/S corridor stub would use).
+            // Item letter (spec §13/§17): also gated on cell.visited now
+            // (guaranteed true here by the `continue` above) -- letters no
+            // longer act as a beacon through the fog, discovering one is
+            // part of exploring. Only the letters up to the one currently
+            // due are revealed (Items_revealedOnMap) once the room itself
+            // has been seen. Drawn on top of the box, centered in the
+            // middle column (same column the N/S corridor stub would use).
             {
                 char letter;
 
-                if (Items_uncollectedAt((u8) col, (u8) row, &letter))
+                if (Items_revealedOnMap((u8) col, (u8) row, &letter))
                 {
                     char s[2];
 

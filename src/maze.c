@@ -1,20 +1,23 @@
 #include "maze.h"
 #include "resources.h"
 
-// mazeTiles.png is a 160x16 source image: 10 logical 16x16 cells in a row
+// mazeTiles.png is a 176x16 source image: 11 logical 16x16 cells in a row
 // (cell 0 = floor, cells 1-9 = the dither wall variants from ovni's
 // image_edit.png, matching the original's random getRandomValue() 2-10
-// look). Rescomp slices it into 8x8 VDP tiles in raster order (TILESET
-// ... NONE NONE ROW keeps that order untouched, no dedup):
+// look; cell 10 = locked-door cell, spec §16, an hourglass/X shape never
+// chosen by randomWallVariant(), only placed explicitly at a sealed
+// door's border span). Rescomp slices it into 8x8 VDP tiles in raster
+// order (TILESET ... NONE NONE ROW keeps that order untouched, no dedup):
 //   row0 (y0-7):  cell0.TL cell0.TR cell1.TL cell1.TR cell2.TL cell2.TR ...
 //   row1 (y8-15): cell0.BL cell0.BR cell1.BL cell1.BR cell2.BL cell2.BR ...
 // so for a cell value c, its four subtiles are at BASE+2c, BASE+2c+1 (top)
 // and BASE+20+2c, BASE+21+2c (bottom).
 #define BASE_TILE       TILE_USER_INDEX
-#define CELL_ROW_TILES  20 // (160px / 8px) tiles per 8px-tall row of the atlas
+#define CELL_ROW_TILES  22 // (176px / 8px) tiles per 8px-tall row of the atlas
 
 #define PATH 0
 #define WALL_VARIANTS 9 // cells 1..9, one per dither pattern
+#define LOCKED_DOOR 10  // cell 10: hourglass/X shape, never picked by randomWallVariant
 
 static u8 grid[MAZE_H][MAZE_W];
 
@@ -190,7 +193,9 @@ static void bridgeToSeed(s16 x, s16 y)
     }
 }
 
-void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW, u16 roomSeed)
+void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
+                        bool lockedN, bool lockedE, bool lockedS, bool lockedW,
+                        u16 roomSeed)
 {
     s16 x, y;
 
@@ -226,23 +231,27 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW, u16 roomS
 
     if (doorN)
     {
-        grid[0][ANCHOR_N_X] = PATH; grid[0][ANCHOR_N_X + 1] = PATH;
-        grid[1][ANCHOR_N_X] = PATH; grid[1][ANCHOR_N_X + 1] = PATH;
+        const u8 v = lockedN ? LOCKED_DOOR : PATH;
+        grid[0][ANCHOR_N_X] = v; grid[0][ANCHOR_N_X + 1] = v;
+        grid[1][ANCHOR_N_X] = v; grid[1][ANCHOR_N_X + 1] = v;
     }
     if (doorS)
     {
-        grid[MAZE_H - 1][ANCHOR_S_X] = PATH; grid[MAZE_H - 1][ANCHOR_S_X + 1] = PATH;
-        grid[MAZE_H - 2][ANCHOR_S_X] = PATH; grid[MAZE_H - 2][ANCHOR_S_X + 1] = PATH;
+        const u8 v = lockedS ? LOCKED_DOOR : PATH;
+        grid[MAZE_H - 1][ANCHOR_S_X] = v; grid[MAZE_H - 1][ANCHOR_S_X + 1] = v;
+        grid[MAZE_H - 2][ANCHOR_S_X] = v; grid[MAZE_H - 2][ANCHOR_S_X + 1] = v;
     }
     if (doorE)
     {
-        grid[ANCHOR_E_Y][MAZE_W - 1] = PATH; grid[ANCHOR_E_Y + 1][MAZE_W - 1] = PATH;
-        grid[ANCHOR_E_Y][MAZE_W - 2] = PATH; grid[ANCHOR_E_Y + 1][MAZE_W - 2] = PATH;
+        const u8 v = lockedE ? LOCKED_DOOR : PATH;
+        grid[ANCHOR_E_Y][MAZE_W - 1] = v; grid[ANCHOR_E_Y + 1][MAZE_W - 1] = v;
+        grid[ANCHOR_E_Y][MAZE_W - 2] = v; grid[ANCHOR_E_Y + 1][MAZE_W - 2] = v;
     }
     if (doorW)
     {
-        grid[ANCHOR_W_Y][0] = PATH; grid[ANCHOR_W_Y + 1][0] = PATH;
-        grid[ANCHOR_W_Y][1] = PATH; grid[ANCHOR_W_Y + 1][1] = PATH;
+        const u8 v = lockedW ? LOCKED_DOOR : PATH;
+        grid[ANCHOR_W_Y][0] = v; grid[ANCHOR_W_Y + 1][0] = v;
+        grid[ANCHOR_W_Y][1] = v; grid[ANCHOR_W_Y + 1][1] = v;
     }
 }
 

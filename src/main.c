@@ -48,9 +48,18 @@ static void loadRoom(u8 col, u8 row)
 {
     const MapCell cell = guideMap[row][col];
     const u16 seed = roomSeedFor(col, row);
+    // Locked branches (spec §16): a door that exists in the room graph but
+    // leads only to letters not due yet gets sealed -- short-circuit skips
+    // GuideMap_isRoomLocked when there's no door at all in that direction,
+    // so out-of-range neighbor coords are never read.
+    const bool lockedN = cell.doorN && GuideMap_isRoomLocked(col, row - 1);
+    const bool lockedE = cell.doorE && GuideMap_isRoomLocked(col + 1, row);
+    const bool lockedS = cell.doorS && GuideMap_isRoomLocked(col, row + 1);
+    const bool lockedW = cell.doorW && GuideMap_isRoomLocked(col - 1, row);
     u8 i;
 
-    Maze_generateRoom(cell.doorN, cell.doorE, cell.doorS, cell.doorW, seed);
+    Maze_generateRoom(cell.doorN, cell.doorE, cell.doorS, cell.doorW,
+                       lockedN, lockedE, lockedS, lockedW, seed);
     Maze_draw();
     Items_drawInRoom(col, row);
 
@@ -114,6 +123,7 @@ static void newGame(void)
 
     GuideMap_generate();
     Items_reset();
+    GuideMap_recomputeLocks(); // A is unlocked from the start, B..E sealed (spec §16)
 
     currentCol = startCol;
     currentRow = startRow;
@@ -250,6 +260,12 @@ int main(bool hardReset)
                     Maze_draw();           // wipes the now-collected letter's tile
                     Items_drawInRoom(currentCol, currentRow); // no-op here, kept for symmetry with loadRoom
                     Items_drawHud();
+                    // Unlocks the next branch (spec §16); the current
+                    // room's own doors never change from this (items only
+                    // live in dead ends), it only affects rooms not yet
+                    // loaded -- they pick up the new lock state next time
+                    // loadRoom() regenerates them.
+                    GuideMap_recomputeLocks();
                 }
 
                 // Routine patrol, no player interaction yet.
