@@ -7,5 +7,6 @@ extern const TileSet mazeTiles;
 extern const TileSet mapTiles;
 extern const SpriteDefinition playerShip;
 extern const SpriteDefinition enemyShip;
+extern const SpriteDefinition mapShip;
 
 #endif // _RES_RESOURCES_H_

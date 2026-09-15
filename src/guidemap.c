@@ -607,12 +607,35 @@ static void putTile(u16 tileIndex, u16 pal, u16 x, u16 y)
     VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tileIndex), x, y);
 }
 
-void GuideMap_drawOverlay(u8 curCol, u8 curRow)
+// Top-left corner of (col,row)'s 3x2 room box, in BG_A tile units --
+// single source of truth for the centering math, shared by
+// GuideMap_drawOverlay's two passes and GuideMap_roomBoxPixelPos below.
+static void roomBoxOriginTiles(u8 col, u8 row, u16 *outRx, u16 *outRy)
 {
     const u16 totalW = (mapCols * ROOM_STRIDE_W) - 1;
     const u16 totalH = (mapRows * ROOM_STRIDE_H) - 1;
     const u16 offsetX = (TEXT_COLS - totalW) / 2;
     const u16 offsetY = (TEXT_ROWS - totalH) / 2;
+
+    *outRx = offsetX + (col * ROOM_STRIDE_W);
+    *outRy = offsetY + (row * ROOM_STRIDE_H);
+}
+
+// Pixel position of (col,row)'s room box top-left on the guide-map
+// overlay (spec §22) -- main.c uses this to place the ship sprite over
+// the current room instead of drawing new map art for it. BG_A tiles are
+// 8x8px, so this is just roomBoxOriginTiles() scaled up.
+void GuideMap_roomBoxPixelPos(u8 col, u8 row, u16 *outX, u16 *outY)
+{
+    u16 rx, ry;
+
+    roomBoxOriginTiles(col, row, &rx, &ry);
+    *outX = rx * 8;
+    *outY = ry * 8;
+}
+
+void GuideMap_drawOverlay(void)
+{
     s16 col, row;
 
     VDP_clearPlane(BG_A, TRUE);
@@ -622,9 +645,10 @@ void GuideMap_drawOverlay(u8 curCol, u8 curRow)
         for (col = 0; col < mapCols; col++)
         {
             const MapCell cell = guideMap[row][col];
-            const u16 rx = offsetX + (col * ROOM_STRIDE_W);
-            const u16 ry = offsetY + (row * ROOM_STRIDE_H);
             const u16 pal = PAL0; // only the tilemap's own violet (0x987DFA), no other colors
+            u16 rx, ry;
+
+            roomBoxOriginTiles((u8) col, (u8) row, &rx, &ry);
 
             if (cell.type != CELL_ROOM)
                 continue; // not a room at all -- nothing drawn here
@@ -634,33 +658,21 @@ void GuideMap_drawOverlay(u8 curCol, u8 curRow)
                           // fully hidden -- box, corridors and letter alike
                           // -- not just shown differently. A locked room
                           // (spec §16) can never be visited either (the
-                          // unlock is monotonic), so this also covers it;
-                          // no separate "locked" look is drawn on the map.
+                          // unlock is monotonic), so this also covers it.
+                          // The 5 item rooms are the one exception, drawn
+                          // in a separate pass below (spec §21) regardless
+                          // of visited state.
 
-            if ((col == curCol) && (row == curRow))
+            // Every visited room (current or not) is fully solid (spec
+            // §23) -- the blinking white ship sprite (main.c) is what
+            // marks the current room now, so the box itself no longer
+            // needs to distinguish "current" from "visited" by shape.
             {
-                // Current room: fully solid -- shape marks position since
-                // color no longer does.
                 s16 x, y;
 
                 for (y = 0; y < ROOM_BOX_H; y++)
                     for (x = 0; x < ROOM_BOX_W; x++)
                         putTile(MAP_TILE_FILL, pal, rx + x, ry + y);
-            }
-            else
-            {
-                // Visited (not current): filled with the maze's own wall
-                // dither pattern (MAZE_WALL_DITHER_TILE, maze.h) instead of
-                // a flat fill -- distinct from "fully solid" (current).
-                // Always hue 0 (the original violet) regardless of the
-                // room's actual section color (spec §18): the per-section
-                // wall tint is a gameplay-view-only feature, this overlay
-                // stays single-color on purpose.
-                s16 x, y;
-
-                for (y = 0; y < ROOM_BOX_H; y++)
-                    for (x = 0; x < ROOM_BOX_W; x++)
-                        putTile(MAZE_WALL_DITHER_TILE(0), pal, rx + x, ry + y);
             }
 
             // Corridors only between two VISITED rooms (spec §17) -- a
@@ -691,6 +703,42 @@ void GuideMap_drawOverlay(u8 curCol, u8 curRow)
                     VDP_drawText(s, rx + (ROOM_BOX_W / 2), ry);
                 }
             }
+        }
+    }
+
+    // All 5 item rooms (spec §21, replaces §20's single-letter beacon):
+    // regardless of visited/locked state, show that room's letter AND a
+    // hollow-border box -- the "known, unvisited" look the map used
+    // before the §17 fog-of-war tightened things, now scoped to only
+    // these 5 rooms instead of every explored-but-unvisited cell. A room
+    // already drawn by the main pass above (visited, including the
+    // current room) is skipped here -- it already shows its letter via
+    // Items_revealedOnMap and keeps its normal solid/dither look.
+    {
+        u8 n;
+
+        for (n = 0; n < ITEM_COUNT; n++)
+        {
+            const u8 icol = itemCol[n];
+            const u8 irow = itemRow[n];
+            u16 rx, ry;
+            char s[2];
+
+            if (guideMap[irow][icol].visited)
+                continue;
+
+            roomBoxOriginTiles(icol, irow, &rx, &ry);
+
+            putTile(MAP_TILE_CORNER_TL, PAL0, rx,     ry);
+            putTile(MAP_TILE_EDGE_T,    PAL0, rx + 1, ry);
+            putTile(MAP_TILE_CORNER_TR, PAL0, rx + 2, ry);
+            putTile(MAP_TILE_CORNER_BL, PAL0, rx,     ry + 1);
+            putTile(MAP_TILE_EDGE_B,    PAL0, rx + 1, ry + 1);
+            putTile(MAP_TILE_CORNER_BR, PAL0, rx + 2, ry + 1);
+
+            s[0] = (char) ('A' + n);
+            s[1] = '\0';
+            VDP_drawText(s, rx + (ROOM_BOX_W / 2), ry);
         }
     }
 }

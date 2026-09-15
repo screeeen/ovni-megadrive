@@ -20,13 +20,30 @@ static const SizePreset sizePresets[] = {
 
 #define ENEMY_COUNT 2
 
+// playerShip's palette (spec §13bis) is 2 colors: index0 (never rendered
+// -- Genesis sprite hardware always treats palette index0 as transparent)
+// and index1, the ship's actual visible color. mapShip (spec §24, an 8x8
+// single-tile silhouette, same size as a guide-map letter) shares PAL1
+// too -- same 2 colors, so no separate palette load needed for it.
+// Absolute CRAM index of PAL1's index1 (spec §23): used to flash
+// whichever of the two sprites is showing white on the guide map,
+// without touching shape/tiles or any other palette.
+#define PLAYER_SHIP_INK_INDEX ((PAL1 * 16) + 1)
+
+// Blink period while the guide map is open (spec §23, slowed down for
+// spec §24): toggled every this many frames, so a full on/off cycle is
+// 2x this at 60fps.
+#define MAP_BLINK_FRAMES 30
+
 static Player player;
 static Sprite *playerSprite;
+static Sprite *mapShipSprite;
 static Enemy enemies[ENEMY_COUNT];
 static Sprite *enemySprites[ENEMY_COUNT];
 static u16 mapSeed;
 static u8 currentCol, currentRow;
 static bool mapViewOpen;
+static u16 mapBlinkTimer;
 static GameState gameState;
 static u8 sizePresetIndex = SIZE_PRESET_DEFAULT;
 
@@ -169,6 +186,10 @@ int main(bool hardReset)
 
     PAL_setPalette(PAL1, playerShip.palette->data, DMA);
     playerSprite = SPR_addSprite(&playerShip, 0, 0, TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
+    // mapShip (spec §24): same PAL1, same 2 colors as playerShip, so no
+    // separate palette load -- just a smaller (1 tile, 8x8) silhouette
+    // shown instead of playerShip while the guide map is open.
+    mapShipSprite = SPR_addSprite(&mapShip, 0, 0, TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
 
     PAL_setPalette(PAL2, enemyShip.palette->data, DMA);
     {
@@ -181,6 +202,7 @@ int main(bool hardReset)
 
     gameState = STATE_MENU;
     SPR_setVisibility(playerSprite, HIDDEN);
+    SPR_setVisibility(mapShipSprite, HIDDEN);
     {
         u8 i;
         for (i = 0; i < ENEMY_COUNT; i++)
@@ -226,9 +248,25 @@ int main(bool hardReset)
                 if (mapViewOpen)
                 {
                     u8 i;
+                    u16 mx, my;
 
-                    GuideMap_drawOverlay(currentCol, currentRow);
+                    GuideMap_drawOverlay();
+
+                    // mapShip (spec §24, 8x8, same size as a map letter)
+                    // marks the current room instead of playerSprite
+                    // (which hides, same as the enemies) -- centered in
+                    // the 24x16px room box: (24-8)/2=8 horizontally,
+                    // (16-8)/2=4 vertically. White and blinking (spec
+                    // §23): flip the shared ink color, start visible,
+                    // reset the blink timer -- the per-frame toggle below
+                    // picks it up from here.
+                    GuideMap_roomBoxPixelPos(currentCol, currentRow, &mx, &my);
+                    SPR_setPosition(mapShipSprite, mx + 8, my + 4);
+                    PAL_setColor(PLAYER_SHIP_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF));
                     SPR_setVisibility(playerSprite, HIDDEN);
+                    SPR_setVisibility(mapShipSprite, VISIBLE);
+                    mapBlinkTimer = 0;
+
                     for (i = 0; i < ENEMY_COUNT; i++)
                         SPR_setVisibility(enemySprites[i], HIDDEN);
                 }
@@ -237,13 +275,31 @@ int main(bool hardReset)
                     u8 i;
 
                     Maze_draw();
+                    // Restores the ship's normal color (spec §23) -- only
+                    // the one word that PLAYER_SHIP_INK_INDEX touched,
+                    // the transparent index0 was never changed.
+                    PAL_setColor(PLAYER_SHIP_INK_INDEX, playerShip.palette->data[1]);
                     SPR_setVisibility(playerSprite, VISIBLE);
+                    SPR_setVisibility(mapShipSprite, HIDDEN);
                     for (i = 0; i < ENEMY_COUNT; i++)
                         SPR_setVisibility(enemySprites[i], VISIBLE);
                 }
             }
 
-            if (!mapViewOpen)
+            if (mapViewOpen)
+            {
+                // Blink mapShip on the map (spec §23/§24): flip
+                // visibility every MAP_BLINK_FRAMES frames while the
+                // overlay stays open. Position doesn't need re-setting
+                // each frame -- it's static while viewing the map.
+                mapBlinkTimer++;
+                if (mapBlinkTimer >= MAP_BLINK_FRAMES)
+                {
+                    mapBlinkTimer = 0;
+                    SPR_setVisibility(mapShipSprite, SPR_isVisible(mapShipSprite, FALSE) ? HIDDEN : VISIBLE);
+                }
+            }
+            else
             {
                 const MapCell cell = guideMap[currentRow][currentCol];
                 const u8 exitDir = Player_updateRoom(&player, cell.doorN, cell.doorE, cell.doorS, cell.doorW);
@@ -292,6 +348,21 @@ int main(bool hardReset)
                         SPR_setPosition(enemySprites[i], enemies[i].x, enemies[i].y);
                 }
             }
+        }
+
+        // FPS debug readout (user request), top-right corner on BG_B --
+        // same plane/high-priority trick Items_drawHud uses, so it stays
+        // visible over BG_A's low-priority maze/menu tiles without those
+        // needing to coordinate with it. SYS_getFPS() must be called
+        // exactly once per frame (its own doc comment) -- this is that
+        // one call, unconditional regardless of gameState.
+        {
+            char buf[8];
+            int len = sprintf(buf, "FPS%lu", SYS_getFPS());
+
+            VDP_setTextPriority(1);
+            VDP_drawTextBG(BG_B, buf, 40 - len - 1, 0);
+            VDP_setTextPriority(0);
         }
 
         prevState = state;

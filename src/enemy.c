@@ -2,27 +2,16 @@
 #include "maze.h"
 #include "player.h"
 
+// Unlike the player, the enemy never transitions rooms -- treat the outer
+// ring as always solid regardless of whether that cell is punched open as
+// a door, or it can walk out through one and end up with out-of-range
+// coordinates (found by fuzzing, spec §12).
 static bool tileWall(s16 tx, s16 ty)
 {
-    // Unlike the player, the enemy never transitions rooms -- treat the
-    // outer ring as always solid regardless of whether that cell is
-    // punched open as a door, or it can walk out through one and end up
-    // with out-of-range coordinates (found by fuzzing, spec §12).
     if ((tx <= 0) || (ty <= 0) || (tx >= MAZE_W - 1) || (ty >= MAZE_H - 1))
         return TRUE;
 
     return Maze_isWall(tx, ty);
-}
-
-static bool tileBlockedInDir(s16 tx, s16 ty, u8 dir)
-{
-    switch (dir)
-    {
-        case DIR_UP:    return tileWall(tx, ty - 1);
-        case DIR_DOWN:  return tileWall(tx, ty + 1);
-        case DIR_LEFT:  return tileWall(tx - 1, ty);
-        default:        return tileWall(tx + 1, ty); // DIR_RIGHT
-    }
 }
 
 u8 Enemy_opposite(u8 dir)
@@ -35,12 +24,6 @@ u8 Enemy_opposite(u8 dir)
         default:        return DIR_LEFT; // DIR_RIGHT
     }
 }
-
-// Turning right relative to a heading is the same rotation Player_rotateCW
-// does ((dir+3)&3 == dir-1 mod4); left is Player_rotateCCW's (dir+1)&3.
-// DIR_UP=0/LEFT=1/DOWN=2/RIGHT=3 (player.h) makes +1 a CCW step.
-static u8 turnRight(u8 dir) { return (dir + 3) & 3; }
-static u8 turnLeft(u8 dir)  { return (dir + 1) & 3; }
 
 // Interior tiles only (spec's border-always-solid rule above already keeps
 // the enemy off the outer ring anyway). Retries a bounded number of times
@@ -74,7 +57,7 @@ void Enemy_spawnForRoom(Enemy *e, u16 roomSeed)
 {
     s16 tx, ty;
 
-    e->dir = roomSeed & 3; // DIR_UP..DIR_RIGHT are 0..3 (player.h)
+    e->dir = roomSeed & 3; // DIR_UP..DIR_RIGHT are 0..3 (player.h) -- also fixes the enemy's axis for the room (spec §25)
 
     if (randomOpenTile(&tx, &ty))
     {
@@ -94,51 +77,60 @@ bool Enemy_overlaps(const Enemy *a, const Enemy *b)
            (a->y < b->y + MAZE_TILE_PX) && (b->y < a->y + MAZE_TILE_PX);
 }
 
-static void step(Enemy *e, u8 dir)
+// Same pixel-level box collision player.c's movePlayer() uses -- straight
+// travel along a single fixed axis, reversing on collision instead of
+// turning (spec §25, user request: "simple, up-down or left-right,
+// bouncing off collision"). The axis is set once at spawn (Enemy_dir's
+// initial UP/DOWN vs LEFT/RIGHT, spec §12) and never changes afterwards:
+// DIR_UP only ever flips to DIR_DOWN and back, DIR_LEFT only to DIR_RIGHT
+// and back -- there's no turning logic left to cross axes.
+#define BOX (MAZE_TILE_PX - 2)
+
+static bool wallAt(s16 px, s16 py)
 {
-    switch (dir)
-    {
-        case DIR_UP:    e->y--; break;
-        case DIR_DOWN:  e->y++; break;
-        case DIR_LEFT:  e->x--; break;
-        default:        e->x++; break; // DIR_RIGHT
-    }
+    return tileWall(px / MAZE_TILE_PX, py / MAZE_TILE_PX);
 }
+
+static bool collideUp(s16 newY, s16 x)    { return wallAt(x, newY) || wallAt(x + BOX, newY); }
+static bool collideDown(s16 newY, s16 x)  { return wallAt(x, newY + BOX) || wallAt(x + BOX, newY + BOX); }
+static bool collideLeft(s16 newX, s16 y)  { return wallAt(newX, y) || wallAt(newX, y + BOX); }
+static bool collideRight(s16 newX, s16 y) { return wallAt(newX + BOX, y) || wallAt(newX + BOX, y + BOX); }
 
 void Enemy_update(Enemy *e)
 {
-    // Only re-decide direction when centered on a tile (crossing a tile
-    // boundary); between boundaries it just keeps moving straight, already
-    // committed to crossing the tile it's on.
-    //
-    // Straight-line travel is the default; a turn is only considered when
-    // straight ahead is actually blocked (right, then left, then reverse --
-    // deterministic, no randomness). Strict "always prefer right" was
-    // tried and reverted twice (spec §12): every room's carve seeds a
-    // guaranteed fully-open 2x2 block right at the enemy's spawn point,
-    // itself a closed loop, and "always prefer right" mathematically
-    // cannot ever leave a closed loop it's dropped into -- fuzzing found
-    // ~66-72% of rooms trapped the enemy there. Only turning when actually
-    // blocked lets it travel the room broadly and still deterministically
-    // route around real obstacles it runs into along the way.
-    if (((e->x % MAZE_TILE_PX) == 0) && ((e->y % MAZE_TILE_PX) == 0))
+    switch (e->dir)
     {
-        const s16 tx = e->x / MAZE_TILE_PX;
-        const s16 ty = e->y / MAZE_TILE_PX;
-
-        if (tileBlockedInDir(tx, ty, e->dir))
+        case DIR_UP:
         {
-            const u8 right = turnRight(e->dir);
-            const u8 left  = turnLeft(e->dir);
+            const s16 newY = e->y - 1;
 
-            if (!tileBlockedInDir(tx, ty, right))
-                e->dir = right;
-            else if (!tileBlockedInDir(tx, ty, left))
-                e->dir = left;
-            else
-                e->dir = Enemy_opposite(e->dir); // walled ahead, right, and left: dead end, reverse
+            if (!collideUp(newY, e->x)) e->y = newY;
+            else e->dir = DIR_DOWN;
+            break;
+        }
+        case DIR_DOWN:
+        {
+            const s16 newY = e->y + 1;
+
+            if (!collideDown(newY, e->x)) e->y = newY;
+            else e->dir = DIR_UP;
+            break;
+        }
+        case DIR_LEFT:
+        {
+            const s16 newX = e->x - 1;
+
+            if (!collideLeft(newX, e->y)) e->x = newX;
+            else e->dir = DIR_RIGHT;
+            break;
+        }
+        default: // DIR_RIGHT
+        {
+            const s16 newX = e->x + 1;
+
+            if (!collideRight(newX, e->y)) e->x = newX;
+            else e->dir = DIR_LEFT;
+            break;
         }
     }
-
-    step(e, e->dir);
 }

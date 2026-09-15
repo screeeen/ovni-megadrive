@@ -99,9 +99,25 @@ void GuideMap_loadGraphics(void);
 // overlay closes. A cell is drawn -- box, corridor stubs into it, and any
 // item letter it holds -- only if visited==TRUE; everything else (never
 // entered, including every locked room, spec §16, since a locked room can
-// never be visited) is fully omitted, not shown differently. The
-// (curCol,curRow) room is highlighted with a solid fill instead of the
-// dither used for other visited rooms.
-void GuideMap_drawOverlay(u8 curCol, u8 curRow);
+// never be visited) is fully omitted, not shown differently. Every
+// visited room, current or not, is drawn fully solid (spec §23) -- no
+// longer takes a (curCol,curRow) parameter, since marking the current
+// room is now main.c's job (the blinking white ship sprite, positioned
+// via GuideMap_roomBoxPixelPos), not this function's. The 5 item rooms
+// are the one exception (spec §21): each always gets its letter and a
+// hollow-border box drawn, regardless of visited/locked state -- unless
+// it was already drawn by the main pass (visited), in which case that
+// normal look (plus its letter, same as before) is left alone instead
+// of doubled up.
+void GuideMap_drawOverlay(void);
+
+// Pixel position (BG_A tile units x8) of (col,row)'s room box top-left on
+// the guide-map overlay (spec §22) -- main.c uses this to reposition the
+// ship sprite over the current room's box instead of hiding it while the
+// overlay is open, so the sprite itself marks the player's position on
+// the map (no new art -- the existing 16x16 playerShip sprite is reused
+// as-is; it fits within the box's 24x16px footprint with a small
+// centering offset the caller applies).
+void GuideMap_roomBoxPixelPos(u8 col, u8 row, u16 *outX, u16 *outY);
 
 #endif

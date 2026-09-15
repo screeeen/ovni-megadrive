@@ -17,13 +17,16 @@ typedef struct
 // §5) and picks a starting direction from roomSeed.
 void Enemy_spawnForRoom(Enemy *e, u16 roomSeed);
 
-// Advances the enemy one step. Straight-line travel is the default; only
-// when blocked does it consider turning -- right, then left, then
-// reversing, deterministic, no randomness (spec §12: strict "always turn
-// right" was tried and reverted twice, it provably traps the enemy
-// forever in any closed loop it meets, including the guaranteed 2x2
-// block every room's maze carve starts from -- fuzzing found ~66-72% of
-// rooms trapped). No player interaction yet (collision with the ship is
+// Advances the enemy one step along its fixed axis (spec §25): straight
+// travel either vertical (UP/DOWN) or horizontal (LEFT/RIGHT), whichever
+// Enemy_spawnForRoom happened to pick, bouncing back the way it came the
+// instant it hits a wall -- same pixel-level box collision player.c's
+// movePlayer() uses. Never turns onto the other axis; DIR_UP only ever
+// flips to DIR_DOWN and back, DIR_LEFT only to DIR_RIGHT and back. This
+// replaces the earlier "turn right, then left, then reverse" pathing
+// (spec §12) -- simpler by request, and sidesteps that whole family of
+// stuck-in-a-loop concerns since there's no turning decision left to get
+// stuck in. No player interaction yet (collision with the ship is
 // explicitly out of scope for now).
 void Enemy_update(Enemy *e);
 

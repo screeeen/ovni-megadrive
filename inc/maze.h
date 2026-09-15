@@ -18,13 +18,14 @@
 #define MAZE_DOOR_ROW ((MAZE_H / 2) & ~1)
 
 // mazeTiles occupies this many contiguous VRAM tiles starting at
-// TILE_USER_INDEX (see maze.c's BASE_TILE/CELL_ROW_TILES comment: 76
-// cols x 2 rows of 8x8 subtiles -- 38 logical 16x16 cells: floor, 9 wall
-// dither variants x 4 section hues (spec §18, cells 1-36), 1 locked-door
-// cell (cell 37, always last regardless of hue). Anything else built on
-// TILE_USER_INDEX (e.g. guidemap.c's overlay tiles) must start after this
-// to avoid overlapping maze.c's tileset in VRAM.
-#define MAZE_TILE_COUNT 152
+// TILE_USER_INDEX (see maze.c's BASE_TILE/CELL_ROW_TILES comment: 74
+// cols x 2 rows of 8x8 subtiles -- 37 logical 16x16 cells: floor, 9 wall
+// dither variants x 4 section hues (spec §18, cells 1-36) -- no separate
+// locked-door cell (spec §19: a sealed door now reuses an ordinary wall
+// cell from the room's own hue instead of a distinct shape). Anything
+// else built on TILE_USER_INDEX (e.g. guidemap.c's overlay tiles) must
+// start after this to avoid overlapping maze.c's tileset in VRAM.
+#define MAZE_TILE_COUNT 148
 
 // Number of section hues (spec §18) -- a room has at most 4 doors, so at
 // most 4 branches ever grow directly out of the start room, which caps
@@ -42,14 +43,6 @@
 // feature (spec §18).
 #define MAZE_WALL_DITHER_TILE(hue) (TILE_USER_INDEX + (2 * (((hue) * 9) + 5)))
 
-// Representative subtile (top-left quarter) of the locked-door cell
-// (absolute cell 37, always last in maze_tiles.png regardless of section
-// hue -- an hourglass/X shape distinct from every dither wall variant).
-// guidemap.c reuses it the same way it reuses MAZE_WALL_DITHER_TILE, to
-// mark locked rooms on the guide map overlay with the same visual
-// language as the in-room blocked doors (spec §16).
-#define MAZE_LOCKED_DOOR_TILE (TILE_USER_INDEX + (2 * 37))
-
 // Uploads the maze tileset to VRAM and sets its palette. Call once at boot.
 void Maze_loadGraphics(void);
 
@@ -65,9 +58,10 @@ void Maze_generate(void);
 // open on every side passed as TRUE.
 // lockedN/E/S/W (spec §16) mark which of those doors, despite existing in
 // the room graph, are sealed for now: the interior carve is unaffected,
-// but the border span is filled with the locked-door cell instead of
-// punched open, so Maze_isWall() blocks it exactly like a wall -- must
-// only be TRUE where the matching doorX is also TRUE.
+// but the border span is filled with an ordinary wall cell (spec §19:
+// same randomWallVariant() as any other wall, not a distinct shape)
+// instead of punched open, so Maze_isWall() blocks it exactly like a
+// wall -- must only be TRUE where the matching doorX is also TRUE.
 // sectionHue (spec §18, 0..MAZE_SECTION_COUNT-1) picks which of the 4
 // wall-dither hue blocks every wall cell in this room is drawn from --
 // same dither shapes/density either way, just a different accent color,

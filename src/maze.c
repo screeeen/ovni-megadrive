@@ -1,27 +1,30 @@
 #include "maze.h"
 #include "resources.h"
 
-// mazeTiles.png is a 608x16 source image: 38 logical 16x16 cells in a row
+// mazeTiles.png is a 592x16 source image: 37 logical 16x16 cells in a row
 // -- cell 0 = floor; cells 1-36 = the dither wall variants from ovni's
 // image_edit.png (matching the original's random getRandomValue() 2-10
 // look), repeated once per section hue (spec §18): hue h's 9 variants
 // live at cells h*9+1 .. h*9+9, same dither shapes every time, just the
 // accent color swapped (violet/teal/orange/pink) -- only the background
 // color (0x252525) and hue accent are used across all of them, keeping
-// every hue a strict duotone; cell 37 = locked-door cell (spec §16, an
-// hourglass/X shape), always last and never re-hued, never chosen by
-// randomWallVariant(). Rescomp slices it into 8x8 VDP tiles in raster
-// order (TILESET ... NONE NONE ROW keeps that order untouched, no dedup):
+// every hue a strict duotone. There used to be a 38th "locked door" cell
+// (an hourglass/X shape, spec §16) but it was removed (spec §19, user
+// feedback): a sealed door now renders as an ordinary wall cell from the
+// room's own hue block -- randomWallVariant() picks it the same as any
+// other wall cell, no separate value or art needed, so a locked door
+// looks exactly like the rest of that room's walls. Rescomp slices it
+// into 8x8 VDP tiles in raster order (TILESET ... NONE NONE ROW keeps
+// that order untouched, no dedup):
 //   row0 (y0-7):  cell0.TL cell0.TR cell1.TL cell1.TR cell2.TL cell2.TR ...
 //   row1 (y8-15): cell0.BL cell0.BR cell1.BL cell1.BR cell2.BL cell2.BR ...
 // so for a cell value c, its four subtiles are at BASE+2c, BASE+2c+1 (top)
-// and BASE+76+2c, BASE+77+2c (bottom).
+// and BASE+74+2c, BASE+75+2c (bottom).
 #define BASE_TILE       TILE_USER_INDEX
-#define CELL_ROW_TILES  76 // (608px / 8px) tiles per 8px-tall row of the atlas
+#define CELL_ROW_TILES  74 // (592px / 8px) tiles per 8px-tall row of the atlas
 
 #define PATH 0
 #define WALL_VARIANTS 9 // 9 dither patterns per hue
-#define LOCKED_DOOR 37  // cell 37: hourglass/X shape, never picked by randomWallVariant
 
 static u8 grid[MAZE_H][MAZE_W];
 
@@ -241,29 +244,30 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
         grid[y][MAZE_W - 1] = randomWallVariant();
     }
 
+    // A sealed door (spec §16) is punched with independent
+    // randomWallVariant() calls per cell instead of PATH -- same as any
+    // other wall cell in this room (spec §19), so it blends in with the
+    // room's own hue and dither noise instead of standing out as its own
+    // fixed-color shape.
     if (doorN)
     {
-        const u8 v = lockedN ? LOCKED_DOOR : PATH;
-        grid[0][ANCHOR_N_X] = v; grid[0][ANCHOR_N_X + 1] = v;
-        grid[1][ANCHOR_N_X] = v; grid[1][ANCHOR_N_X + 1] = v;
+        grid[0][ANCHOR_N_X] = lockedN ? randomWallVariant() : PATH; grid[0][ANCHOR_N_X + 1] = lockedN ? randomWallVariant() : PATH;
+        grid[1][ANCHOR_N_X] = lockedN ? randomWallVariant() : PATH; grid[1][ANCHOR_N_X + 1] = lockedN ? randomWallVariant() : PATH;
     }
     if (doorS)
     {
-        const u8 v = lockedS ? LOCKED_DOOR : PATH;
-        grid[MAZE_H - 1][ANCHOR_S_X] = v; grid[MAZE_H - 1][ANCHOR_S_X + 1] = v;
-        grid[MAZE_H - 2][ANCHOR_S_X] = v; grid[MAZE_H - 2][ANCHOR_S_X + 1] = v;
+        grid[MAZE_H - 1][ANCHOR_S_X] = lockedS ? randomWallVariant() : PATH; grid[MAZE_H - 1][ANCHOR_S_X + 1] = lockedS ? randomWallVariant() : PATH;
+        grid[MAZE_H - 2][ANCHOR_S_X] = lockedS ? randomWallVariant() : PATH; grid[MAZE_H - 2][ANCHOR_S_X + 1] = lockedS ? randomWallVariant() : PATH;
     }
     if (doorE)
     {
-        const u8 v = lockedE ? LOCKED_DOOR : PATH;
-        grid[ANCHOR_E_Y][MAZE_W - 1] = v; grid[ANCHOR_E_Y + 1][MAZE_W - 1] = v;
-        grid[ANCHOR_E_Y][MAZE_W - 2] = v; grid[ANCHOR_E_Y + 1][MAZE_W - 2] = v;
+        grid[ANCHOR_E_Y][MAZE_W - 1] = lockedE ? randomWallVariant() : PATH; grid[ANCHOR_E_Y + 1][MAZE_W - 1] = lockedE ? randomWallVariant() : PATH;
+        grid[ANCHOR_E_Y][MAZE_W - 2] = lockedE ? randomWallVariant() : PATH; grid[ANCHOR_E_Y + 1][MAZE_W - 2] = lockedE ? randomWallVariant() : PATH;
     }
     if (doorW)
     {
-        const u8 v = lockedW ? LOCKED_DOOR : PATH;
-        grid[ANCHOR_W_Y][0] = v; grid[ANCHOR_W_Y + 1][0] = v;
-        grid[ANCHOR_W_Y][1] = v; grid[ANCHOR_W_Y + 1][1] = v;
+        grid[ANCHOR_W_Y][0] = lockedW ? randomWallVariant() : PATH; grid[ANCHOR_W_Y + 1][0] = lockedW ? randomWallVariant() : PATH;
+        grid[ANCHOR_W_Y][1] = lockedW ? randomWallVariant() : PATH; grid[ANCHOR_W_Y + 1][1] = lockedW ? randomWallVariant() : PATH;
     }
 }
 

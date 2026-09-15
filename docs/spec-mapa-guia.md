@@ -1085,3 +1085,339 @@ Implementación:
 - Verificado en BlastEm: build limpio (`make`, sin warnings), orden de
   colores confirmado contra la imagen final compilada, arranque limpio
   sin errores en el log tras el rebuild.
+
+## 19. Diagnóstico "sigue todo violeta" y puertas bloqueadas sin icono propio
+
+El usuario reportó, tras probar el §18, que el mapa seguía viéndose
+todo violeta incluso explorando varias salas. Antes de tocar código
+se verificó exhaustivamente que la implementación del §18 era
+correcta: se decodificaron a mano los bytes de paleta compilados en
+`out/release/res/resources.s` para las celdas de cada hue (índices
+0/2, 0/3, 0/4 confirmados para teal/naranja/rosa respectivamente,
+justo lo esperado) y se re-ejecutó `test_sections.c` (0 fallos). Se
+añadió temporalmente un texto de depuración (`"col,row SECn"` en la
+esquina superior izquierda de cada sala) para descartar a ciegas un
+problema de percepción de color frente a un bug real de datos — se
+quitó de nuevo en cuanto se identificó la causa real.
+
+Causa real: el usuario estaba mirando una **puerta bloqueada** (spec
+§16), que por diseño explícito de esa sección **siempre se dibujaba
+violeta** (el icono de reloj de arena/X, con su propio color fijo,
+independiente de la sección de la sala) — no era un bug del §18, sino
+el comportamiento intencional de una pieza distinta del juego que el
+§18 nunca tocó a propósito.
+
+Decisión del usuario al confirmarlo: quitar el icono distintivo de
+las puertas bloqueadas. Ahora una puerta sellada se pinta **igual que
+cualquier otro muro de esa sala** — mismo dithering, mismo color de
+sección — sin ningún indicador visual propio. Esto revierte
+deliberadamente la elección original del §16 ("Muro invisible con
+tile distinto") a favor de la opción que entonces se descartó ("Muro
+normal, indistinguible"): la única forma de saber que una puerta está
+bloqueada vuelve a ser chocar contra ella (o el propio Mapa Guía,
+donde esa sala nunca se llega a ver por el fog of war del §17).
+
+Implementación:
+- **`res/sprite/maze_tiles.png`** vuelve a 592x16 (37 celdas): se
+  quita la celda 37 (el reloj de arena) por completo.
+  `MAZE_TILE_COUNT` baja a 148, `CELL_ROW_TILES` a 74.
+- **`maze.c`**: la celda `LOCKED_DOOR` fija desaparece.
+  `Maze_generateRoom()` ahora rellena el tramo de una puerta
+  bloqueada con `randomWallVariant()` independiente por celda (igual
+  que cualquier otro tramo de muro), en vez de un valor de celda fijo
+  — automáticamente hereda el `wallHueBase` (spec §18) ya activo para
+  esa sala, así que encaja con el color de sección sin lógica
+  adicional. `Maze_isWall()` sigue bloqueando el paso igual (cualquier
+  valor de celda `!= PATH` cuenta como muro), la física no cambió en
+  absoluto — solo el aspecto.
+- **`maze.h`**: se elimina `MAZE_LOCKED_DOOR_TILE` (ya estaba sin uso
+  desde el §17, que había quitado su único consumidor en
+  `guidemap.c` al ocultar las salas bloqueadas del todo bajo el fog
+  of war — confirmado con `grep` antes de borrarla).
+- **Verificado**: build limpio (`make`, sin warnings), recuento de
+  tiles compilados confirmado en 148, orden de colores re-verificado
+  contra la imagen final, `test_locks.c` y `test_sections.c`
+  re-ejecutados sin fallos (la lógica de `guidemap.c` no cambió en
+  este paso), arranque limpio en BlastEm.
+
+## 20. Baliza de la siguiente letra a través de la niebla
+
+Petición del usuario: mostrar en el Mapa Guía dónde está la siguiente
+letra. Como el fog of war del §17 oculta por completo cualquier sala
+no visitada (incluida su letra, si la tuviera), y la letra pendiente
+casi siempre vive en una sala que aún no se ha pisado, hacía falta
+una excepción puntual.
+
+Decisión confirmada (preguntada antes de implementar): esa sala
+**solo** revela su letra, flotando en su posición — nada de caja ni
+pasillos, no se revela la forma de la sala ni sus conexiones, solo
+"aquí es". El resto de la niebla de guerra sigue exactamente igual
+que en el §17.
+
+Implementación:
+- **`items.c`/`.h`**: nuevo `Items_isNextTarget(col,row,&outLetter)`
+  — a diferencia de `Items_revealedOnMap` (que da TRUE para
+  `índice <= nextIndex`, o sea la letra actual Y todas las ya
+  recogidas), este exige `índice == nextIndex` exactamente: solo la
+  UNA letra pendiente ahora mismo, nunca las ya recogidas.
+- **`guidemap.c`**, `GuideMap_drawOverlay`: dentro de la rama
+  `if (!cell.visited)` (antes solo hacía `continue`), se comprueba
+  `Items_isNextTarget` y si es TRUE se dibuja únicamente el carácter
+  de la letra con `VDP_drawText` en la posición de esa celda, antes
+  del `continue` — ninguna otra parte de la sala se toca. Las salas
+  visitadas siguen su camino normal sin cambios (su letra, si la
+  tienen, ya se revela por `Items_revealedOnMap` como hasta ahora).
+- **Verificado en el host** (`test_beacon.c`, ~6000 generaciones):
+  para cada paso de `nextIndex` de 0 a `ITEM_COUNT-1`, hay exactamente
+  una sala en todo el mapa con baliza activa, siempre coincide con la
+  posición real de `itemCol[nextIndex]/itemRow[nextIndex]`, y la letra
+  mostrada es la correcta; tras recoger todas las letras, ninguna sala
+  tiene baliza — 0 fallos.
+- Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
+  limpio sin errores en el log tras el rebuild.
+
+## 21. Todas las letras y su habitación, siempre visibles
+
+Petición del usuario: "pinta todas las letras y su habitación" —
+supera lo del §20 (solo la letra pendiente, sin caja) en dos sentidos:
+**todas** las letras (no solo la siguiente pendiente, también las
+bloqueadas más adelante en el orden), y con **su habitación**
+(caja/forma de la sala, no solo el carácter flotando).
+
+Implementación (`guidemap.c`, `GuideMap_drawOverlay`):
+- La rama `if (!cell.visited) continue;` del bucle principal vuelve a
+  ser un `continue` simple (spec §17, sin excepciones) — el fog of war
+  para salas normales no cambia en nada.
+- Se añade un **segundo bucle**, tras el principal, que recorre
+  directamente `itemCol[]/itemRow[]` (solo `ITEM_COUNT`=5 iteraciones,
+  no toda la rejilla): para cada letra, si su sala **ya** fue dibujada
+  por el bucle principal (`guideMap[irow][icol].visited`), se salta —
+  ya tiene su aspecto normal (sólido si es la actual, dithering si
+  está visitada) y su letra ya se revela por `Items_revealedOnMap`
+  como siempre. Si la sala **no** ha sido visitada, se dibuja con el
+  borde hueco 3x2 (`MAP_TILE_CORNER_TL` etc. — el mismo aspecto
+  "conocida, sin visitar" que existía antes del fog of war del §17,
+  ahora reservado solo para estas 5 salas) más su letra encima, **sin
+  mirar si está bloqueada ni si es la pendiente actual** — las 5
+  siempre se pintan.
+- `Items_isNextTarget` (introducido en el §20) queda sin uso — se
+  borra de `items.c`/`.h` junto con su declaración, ya no hace falta
+  ninguna distinción "es la siguiente" para esto: basta con recorrer
+  `itemCol[]/itemRow[]` directamente, que guidemap.c ya tenía a mano.
+- **Verificado en el host**: recompilados y re-ejecutados
+  `test_locks.c` (5984 runs) y `test_sections.c` (6000 runs) sin
+  fallos — la lógica estructural de `guidemap.c` no cambió, solo el
+  renderizado del overlay. Se añadió `test_overlay_smoke.c` (3000
+  llamadas a `GuideMap_drawOverlay` en distintos puntos de la
+  recogida y desde distintas salas "actuales", con los stubs de VDP
+  del host) para confirmar que el nuevo segundo bucle no revienta
+  límites de array ni nada por el estilo — sin crashes.
+- Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
+  limpio sin errores en el log tras el rebuild.
+
+## 22. El sprite de la nave marca la posición en el Mapa Guía
+
+Petición del usuario: pintar el sprite de la nave (en pequeño) para
+marcar dónde está en el Mapa Guía, en vez de (o además de) el relleno
+sólido actual de la sala actual.
+
+Decisiones confirmadas (preguntadas antes de implementar):
+- El hardware del Genesis no escala sprites — se reutiliza el sprite
+  `playerShip` (16x16px) tal cual, sin arte nuevo; encaja bien dentro
+  de la caja de sala del mapa (24x16px, `ROOM_BOX_W`×`ROOM_BOX_H` en
+  tiles de 8px).
+- El relleno sólido (`MAP_TILE_FILL`) de la sala actual **se
+  mantiene** — la nave se dibuja encima, no lo sustituye.
+
+Implementación:
+- **`guidemap.c`/`.h`**: se extrae `roomBoxOriginTiles(col,row,&rx,&ry)`
+  (estática) de la lógica que ya calculaba `offsetX/offsetY/rx/ry`
+  dentro de `GuideMap_drawOverlay` — ahora única fuente de verdad,
+  usada por las dos pasadas de la función (antes tenían el cálculo
+  duplicado). Nueva función pública `GuideMap_roomBoxPixelPos(col,row,&outX,&outY)`
+  la reutiliza y escala de unidades de tile (8px) a píxeles, para que
+  `main.c` pueda posicionar un sprite sin duplicar esta aritmética.
+- **`main.c`**: al abrir el mapa (botón C), en vez de ocultar
+  `playerSprite` (como antes), se llama a `GuideMap_roomBoxPixelPos`
+  con `(currentCol,currentRow)` y se reposiciona el sprite ahí con
+  `SPR_setPosition(playerSprite, mx + 4, my)` — el `+4` centra
+  horizontalmente el sprite de 16px dentro de la caja de 24px
+  (`(24-16)/2`); verticalmente coincide exacto (caja y sprite miden
+  16px de alto), sin offset. Los sprites de los enemigos se siguen
+  ocultando igual que antes. Al cerrar el mapa no hace falta
+  restaurar la posición a mano: el bucle principal ya hace
+  `SPR_setPosition(playerSprite, player.x, player.y)` cada frame
+  que `!mapViewOpen`, lo que incluye el mismo frame en que se cierra.
+- **Verificado en el host**: recompilados y re-ejecutados
+  `test_locks.c`, `test_sections.c` y `test_overlay_smoke.c` tras el
+  refactor de `roomBoxOriginTiles` — sin fallos ni crashes (la
+  refactorización no cambió ningún resultado, solo evitó la
+  duplicación del cálculo).
+- Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
+  limpio sin errores en el log tras el rebuild.
+
+## 23. Nave en blanco parpadeante + salas visitadas con relleno sólido
+
+Dos peticiones del usuario en el mismo mensaje:
+1. El sprite de la nave en el mapa (§22), en blanco y parpadeando.
+2. Las salas visitadas se pintan con relleno sólido, no con
+   dithering.
+
+Implementación (parte 1, `main.c`):
+- `playerShip.palette` (spec §13bis, resources.res) es duotono: índice
+  0 nunca se renderiza (el hardware de sprites del Genesis siempre
+  trata el índice 0 como transparente) e índice 1 es el color visible
+  real de la nave. `PLAYER_SHIP_INK_INDEX` calcula el índice CRAM
+  absoluto de `PAL1`+índice1 (`(PAL1 * 16) + 1`, ya que `PAL_setColor`
+  usa índices absolutos 0-63 sobre las 4 paletas de 16 colores cada
+  una, no relativos por paleta).
+- Al abrir el mapa: `PAL_setColor(PLAYER_SHIP_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF))`
+  pinta ese único índice de blanco (el índice 0, transparente, no se
+  toca — no hace falta). Se resetea `mapBlinkTimer` y se fuerza
+  visible como estado inicial del parpadeo.
+- Cada frame mientras `mapViewOpen` es TRUE: `mapBlinkTimer` cuenta
+  hasta `MAP_BLINK_FRAMES` (15, medio segundo de ciclo completo a
+  60fps) y al llegar alterna `SPR_setVisibility` consultando el estado
+  actual vía `SPR_isVisible(playerSprite, FALSE)` (sin forzar
+  recálculo, solo lee el último flag puesto).
+- Al cerrar el mapa: `PAL_setColor(PLAYER_SHIP_INK_INDEX, playerShip.palette->data[1])`
+  restaura el color original de la nave (un único word, no hace falta
+  recargar la paleta entera con `PAL_setPalette`).
+
+Implementación (parte 2, `guidemap.c`):
+- Como la nave ya marca la posición actual (parpadeando, en blanco),
+  la distinción de forma entre "sala actual" (relleno sólido) y "sala
+  visitada" (dithering) deja de tener sentido — se fusionan las dos
+  ramas en una sola: cualquier sala visitada se pinta con
+  `MAP_TILE_FILL`, sin excepción.
+- Como consecuencia, `GuideMap_drawOverlay` ya no necesita saber cuál
+  es la sala actual — pierde sus parámetros `(curCol, curRow)`, pasa a
+  `GuideMap_drawOverlay(void)`. Actualizado el único call site en
+  `main.c` y la declaración en `guidemap.h`.
+- `MAZE_WALL_DITHER_TILE(hue)` (maze.h) se queda sin uso en
+  `guidemap.c` tras este cambio, pero no se borra: los tiles que
+  referencia siguen siendo el dithering real de los muros del juego
+  (usados constantemente por `maze.c`), no es arte huérfano — solo un
+  alias de acceso que ya no hace falta aquí, sin coste dejarlo.
+- **Verificado en el host**: recompilados y re-ejecutados
+  `test_locks.c` (5984 runs), `test_sections.c` (6000 runs) y
+  `test_overlay_smoke.c` (3000 runs, actualizado a la nueva firma sin
+  argumentos) — sin fallos ni crashes.
+- Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
+  limpio sin errores en el log tras el rebuild.
+
+## 24. Parpadeo más lento + nave del mapa del tamaño de una letra
+
+Dos peticiones del usuario en el mismo mensaje:
+1. El parpadeo del §23, más lento.
+2. La nave del mapa, del mismo tamaño que las letras (8x8px) — el
+   sprite `playerShip` es de 16x16 (2x2 tiles) y el hardware no
+   escala sprites, así que hace falta un sprite nuevo más pequeño.
+
+Decisión confirmada (preguntada antes de implementar): silueta nueva
+simplificada de la nave a 8x8px (1 tile), en vez de reutilizar un
+carácter de texto existente como marcador genérico — sigue siendo un
+sprite VDP real, solo más pequeño, no un símbolo desconectado de la
+nave.
+
+Implementación:
+- **Parpadeo**: `MAP_BLINK_FRAMES` (main.c) pasa de 15 a 30 — medio
+  segundo por estado en vez de cuarto de segundo, un segundo de ciclo
+  completo a 60fps en vez de medio.
+- **`res/sprite/map_ship.png`** (nuevo): 8x8px, mismo duotono que
+  `player.png`/`enemy.png` (`#252525` fondo/transparente, `#987DFA`
+  tinta) — un círculo relleno inscrito en el recuadro, silueta
+  redondeada reconocible como "blob"/nave a ese tamaño, generado con
+  ImageMagick (`-draw "circle 3.5,4 3.5,0.5"`).
+- **`res/resources.res`**: nueva entrada `SPRITE mapShip "sprite/map_ship.png" 1 1 BEST`
+  (1x1 tile, a diferencia de las 2x2 de `playerShip`/`enemyShip`).
+  Rescomp confirma en el log de build que su paleta es idéntica a la
+  de `playerShip` (mismos 2 colores) — no hace falta cargarla aparte,
+  comparte `PAL1`.
+- **`main.c`**: nuevo `Sprite *mapShipSprite`, creado junto a
+  `playerSprite` con la misma `PAL1`. Al abrir el mapa, en vez de
+  reposicionar `playerSprite` (como hacía el §22), ahora se **oculta**
+  `playerSprite` (igual que los enemigos) y se posiciona+muestra
+  `mapShipSprite`, centrado en la caja de 24x16px con offset `+8,+4`
+  (`(24-8)/2`, `(16-8)/2`). El parpadeo y el recoloreado a blanco
+  (§23, `PLAYER_SHIP_INK_INDEX`) pasan a operar sobre `mapShipSprite`
+  en vez de `playerSprite` — como comparten `PAL1`, la misma constante
+  de índice de color sigue siendo válida sin cambios. Al cerrar el
+  mapa, `mapShipSprite` se oculta y `playerSprite` vuelve a mostrarse
+  (su posición se restaura sola, como ya pasaba en el §22).
+- Verificado en BlastEm: build limpio (`make`, sin warnings — el log
+  de rescomp confirma la paleta compartida), arranque limpio sin
+  errores en el log tras el rebuild.
+
+## 25. Enemigos: patrón simple arriba/abajo o izquierda/derecha, rebote en colisión
+
+Petición del usuario: sustituir el patrón "recto por defecto, gira si
+choca" del §12 (derecha → izquierda → reversa, elegido tras varias
+rondas de fuzzing sobre el problema del bucle cerrado) por algo mucho
+más simple — cada enemigo se mueve solo en un eje (vertical u
+horizontal) y rebota (invierte) al chocar, sin girar nunca a un eje
+perpendicular.
+
+Esto resulta ser exactamente el mismo patrón de colisión que ya usa
+`movePlayer()` en `player.c` para el caso de "seguir recto": probar el
+siguiente píxel en la dirección actual, si choca invertir la
+dirección. Al no haber ninguna decisión de giro entre varias
+direcciones, desaparece de raíz toda la familia de problemas de
+"bucle cerrado atrapa al enemigo" que motivó el diseño del §12 — ya
+no hay nada en lo que quedarse atrapado.
+
+Implementación (`enemy.c`):
+- Se elimina toda la lógica de giro: `tileBlockedInDir`, `turnRight`,
+  `turnLeft`, y la comprobación de alineación a tile
+  (`x % MAZE_TILE_PX == 0`) que antes gateaba cuándo re-decidir. Ya no
+  hace falta decidir solo en los límites de celda porque ya no hay
+  una decisión de "girar" que tomar — solo "¿choco? invierto".
+- `Enemy_update` pasa a tener la misma forma que `movePlayer()`
+  (player.c): un `switch` por dirección, con colisión a nivel de
+  píxel usando el mismo hitbox con inset de 2px ("TILE-2", evita
+  falsos positivos de rozamiento en los bordes de celda) —
+  `collideUp/Down/Left/Right`, nuevas, calcadas de las de player.c.
+  Al chocar, invierte con el opuesto exacto en el mismo eje
+  (`DIR_UP↔DIR_DOWN`, `DIR_LEFT↔DIR_RIGHT`) en vez de
+  `Enemy_opposite()` genérico — aunque en la práctica son
+  equivalentes, se escribe explícitamente para dejar claro que nunca
+  cruza de eje.
+- `Enemy_spawnForRoom` no cambia: `e->dir = roomSeed & 3` ya elegía
+  una de las 4 direcciones, y ahora esa elección inicial fija el eje
+  del enemigo para toda su estancia en la sala (nunca cambia después).
+  Los dos enemigos de una sala pueden compartir eje o no, según lo que
+  toque — no se ha forzado variedad entre ellos, no se pidió.
+- El rebote enemigo-enemigo (`Enemy_opposite`, ya existente en
+  `main.c`) no cambia — sigue invirtiendo ambos al solaparse,
+  independientemente del eje de cada uno.
+- **Verificado en el host** (`test_enemy_axis.c`, nuevo): 1500
+  semillas × 16 combinaciones de puertas × 3000 frames cada una
+  (24000 ejecuciones) — el eje de cada enemigo nunca cambia una vez
+  fijado en el spawn, y su hitbox (con el mismo inset de 2px que usa
+  el propio juego) nunca solapa un muro ni el anillo exterior en
+  ningún frame. Primera pasada del test dio 24000/24000 fallos por un
+  bug en el propio test (comprobaba el sprite visual de 16x16 completo
+  en vez del hitbox real de colisión, inset 2px) — corregido el test,
+  no el código del juego, y confirmado 0 fallos tras el arreglo.
+- Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
+  limpio sin errores en el log tras el rebuild.
+
+## 26. Lectura de FPS en pantalla (debug)
+
+Petición del usuario: mostrar los FPS en pantalla como información de
+debug.
+
+Implementación (`main.c`): `SYS_getFPS()` (SGDK, cuenta cuántas veces
+se ha llamado en el último segundo — su propio comentario pide
+llamarla exactamente una vez por frame) se lee una vez por iteración
+del bucle principal, incondicionalmente respecto a `gameState`, justo
+antes de `SYS_doVBlankProcess()`. Se dibuja como texto (`"FPS60"`
+estilo) en la esquina superior derecha (fila 0, columna calculada
+para pegar a la derecha) sobre `BG_B` con prioridad alta
+(`VDP_setTextPriority(1)`, mismo truco que ya usa `Items_drawHud`
+para el HUD de letras) — visible por encima de los tiles de baja
+prioridad de `BG_A` (maze, menú, mapa) sin que ninguno de esos sitios
+necesite saber de esto. Fila 0 en vez de la fila 1 del HUD de items
+para no solaparse con él.
+- Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
+  limpio sin errores en el log tras el rebuild.
