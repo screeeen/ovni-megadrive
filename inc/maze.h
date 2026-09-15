@@ -18,26 +18,37 @@
 #define MAZE_DOOR_ROW ((MAZE_H / 2) & ~1)
 
 // mazeTiles occupies this many contiguous VRAM tiles starting at
-// TILE_USER_INDEX (see maze.c's BASE_TILE/CELL_ROW_TILES comment: 22
-// cols x 2 rows of 8x8 subtiles -- 11 logical 16x16 cells: floor, 9 wall
-// dither variants, 1 locked-door cell). Anything else built on
+// TILE_USER_INDEX (see maze.c's BASE_TILE/CELL_ROW_TILES comment: 76
+// cols x 2 rows of 8x8 subtiles -- 38 logical 16x16 cells: floor, 9 wall
+// dither variants x 4 section hues (spec §18, cells 1-36), 1 locked-door
+// cell (cell 37, always last regardless of hue). Anything else built on
 // TILE_USER_INDEX (e.g. guidemap.c's overlay tiles) must start after this
 // to avoid overlapping maze.c's tileset in VRAM.
-#define MAZE_TILE_COUNT 44
+#define MAZE_TILE_COUNT 152
 
-// One representative wall-dither subtile (variant 5's top-left quarter,
+// Number of section hues (spec §18) -- a room has at most 4 doors, so at
+// most 4 branches ever grow directly out of the start room, which caps
+// how many distinct wall colors are ever needed at once.
+#define MAZE_SECTION_COUNT 4
+
+// One representative wall-dither subtile per section hue (variant 5's
+// top-left quarter of each hue's 9-cell block: absolute cell = hue*9 + 5,
 // see BASE_TILE/CELL_ROW_TILES in maze.c: subtile = TILE_USER_INDEX + 2*c
-// for wall variant c). Other modules can reuse this for a textured
-// "duotono" look consistent with the maze's own walls instead of
-// introducing flat new art.
-#define MAZE_WALL_DITHER_TILE (TILE_USER_INDEX + (2 * 5))
+// for absolute cell c). hue must be < MAZE_SECTION_COUNT. Other modules
+// can reuse this for a textured "duotono" look consistent with the
+// maze's own walls instead of introducing flat new art -- guidemap.c's
+// overlay always uses hue 0 (the original violet), regardless of
+// section, since the per-section coloring is a gameplay-view-only
+// feature (spec §18).
+#define MAZE_WALL_DITHER_TILE(hue) (TILE_USER_INDEX + (2 * (((hue) * 9) + 5)))
 
-// Representative subtile (top-left quarter) of the locked-door cell (index
-// 10 in maze_tiles.png, an hourglass/X shape distinct from every dither
-// wall variant). guidemap.c reuses it the same way it reuses
-// MAZE_WALL_DITHER_TILE, to mark locked rooms on the guide map overlay
-// with the same visual language as the in-room blocked doors (spec §16).
-#define MAZE_LOCKED_DOOR_TILE (TILE_USER_INDEX + (2 * 10))
+// Representative subtile (top-left quarter) of the locked-door cell
+// (absolute cell 37, always last in maze_tiles.png regardless of section
+// hue -- an hourglass/X shape distinct from every dither wall variant).
+// guidemap.c reuses it the same way it reuses MAZE_WALL_DITHER_TILE, to
+// mark locked rooms on the guide map overlay with the same visual
+// language as the in-room blocked doors (spec §16).
+#define MAZE_LOCKED_DOOR_TILE (TILE_USER_INDEX + (2 * 37))
 
 // Uploads the maze tileset to VRAM and sets its palette. Call once at boot.
 void Maze_loadGraphics(void);
@@ -57,9 +68,14 @@ void Maze_generate(void);
 // but the border span is filled with the locked-door cell instead of
 // punched open, so Maze_isWall() blocks it exactly like a wall -- must
 // only be TRUE where the matching doorX is also TRUE.
+// sectionHue (spec §18, 0..MAZE_SECTION_COUNT-1) picks which of the 4
+// wall-dither hue blocks every wall cell in this room is drawn from --
+// same dither shapes/density either way, just a different accent color,
+// so rooms in different branches of the map read as different "zones"
+// while playing.
 void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
                         bool lockedN, bool lockedE, bool lockedS, bool lockedW,
-                        u16 roomSeed);
+                        u8 sectionHue, u16 roomSeed);
 
 // Draws the current maze to plane BG_A.
 void Maze_draw(void);

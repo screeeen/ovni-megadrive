@@ -28,6 +28,11 @@ static u8 dist[MAX_MAP_ROWS][MAX_MAP_COLS];
 static bool roomLocked[MAX_MAP_ROWS][MAX_MAP_COLS];
 static bool containsUnlockedScratch[MAX_MAP_ROWS][MAX_MAP_COLS];
 
+// roomSection[][] from the most recent computeSections() call, part of
+// GuideMap_generate() (spec §18) -- which of the (up to MAZE_SECTION_COUNT)
+// branches growing out of the start room this room belongs to.
+static u8 roomSection[MAX_MAP_ROWS][MAX_MAP_COLS];
+
 static bool inBounds(s16 col, s16 row)
 {
     return (col >= 0) && (col < mapCols) && (row >= 0) && (row < mapRows);
@@ -485,6 +490,59 @@ static void selectItemRooms(void)
     }
 }
 
+// Flood-fills `section` over the subtree rooted at (col,row), excluding
+// the edge back to parentDir -- spec §18.
+static void floodSection(u8 col, u8 row, s8 parentDir, u8 section)
+{
+    u8 d;
+
+    roomSection[row][col] = section;
+
+    for (d = 0; d < 4; d++)
+    {
+        s16 ncol, nrow;
+
+        if (((s8) d) == parentDir) continue;
+        if (!GuideMap_hasDoor(col, row, d)) continue;
+
+        neighborInDir(col, row, d, &ncol, &nrow);
+        floodSection((u8) ncol, (u8) nrow, (s8) opposite(d), section);
+    }
+}
+
+// Assigns a section (spec §18) to every room: one per branch growing
+// directly out of the start room (N/E/S/W scan order), and everything
+// hanging off that branch inherits the same one. A room has at most 4
+// doors, so there are never more than MAZE_SECTION_COUNT branches to
+// number -- no cycling ever actually needed. The start room itself gets
+// section 0, same as whichever branch (if any) got that number too;
+// purely structural (depends only on final door topology, not on items
+// or locks), so this only needs to run once per generation, not on every
+// pickup like GuideMap_recomputeLocks().
+static void computeSections(void)
+{
+    u8 section = 0;
+    u8 d;
+
+    roomSection[startRow][startCol] = 0;
+
+    for (d = 0; d < 4; d++)
+    {
+        s16 ncol, nrow;
+
+        if (!GuideMap_hasDoor(startCol, startRow, d)) continue;
+
+        neighborInDir(startCol, startRow, d, &ncol, &nrow);
+        floodSection((u8) ncol, (u8) nrow, (s8) opposite(d), section);
+        if (section < (MAZE_SECTION_COUNT - 1)) section++;
+    }
+}
+
+u8 GuideMap_roomSection(u8 col, u8 row)
+{
+    return roomSection[row][col];
+}
+
 void GuideMap_generate(void)
 {
     clearMap();
@@ -494,6 +552,7 @@ void GuideMap_generate(void)
 
     carveTree();
     pruneLeaves();
+    computeSections();
     selectGoal();
     selectItemRooms();
 }
@@ -592,13 +651,16 @@ void GuideMap_drawOverlay(u8 curCol, u8 curRow)
             {
                 // Visited (not current): filled with the maze's own wall
                 // dither pattern (MAZE_WALL_DITHER_TILE, maze.h) instead of
-                // a flat fill -- distinct from "fully solid" (current),
-                // still one color throughout.
+                // a flat fill -- distinct from "fully solid" (current).
+                // Always hue 0 (the original violet) regardless of the
+                // room's actual section color (spec §18): the per-section
+                // wall tint is a gameplay-view-only feature, this overlay
+                // stays single-color on purpose.
                 s16 x, y;
 
                 for (y = 0; y < ROOM_BOX_H; y++)
                     for (x = 0; x < ROOM_BOX_W; x++)
-                        putTile(MAZE_WALL_DITHER_TILE, pal, rx + x, ry + y);
+                        putTile(MAZE_WALL_DITHER_TILE(0), pal, rx + x, ry + y);
             }
 
             // Corridors only between two VISITED rooms (spec §17) -- a

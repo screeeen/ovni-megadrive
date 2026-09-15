@@ -1002,3 +1002,86 @@ Implementación (`guidemap.c`, `GuideMap_drawOverlay`):
   pena tocar la imagen ni el rescomp para esto.
 - Verificado: build limpio (`make`, sin warnings) y arranque limpio en
   BlastEm sin errores en el log tras el rebuild.
+
+## 18. Cada sección del mapa, un color de muros distinto (mientras se juega)
+
+Petición del usuario: pintar cada "sección"/"path" de un color
+distinto. Aclaración tras preguntar: se refiere al fondo del propio
+juego (las habitaciones en sí, mientras se navega), no al overlay del
+Mapa Guía del botón C.
+
+Decisiones confirmadas (preguntadas antes de implementar):
+- **Sección** = cada rama que sale directamente de la sala de inicio
+  (como mucho 4, una por dirección N/E/S/W) — todas las salas que
+  cuelgan de esa rama, incluidas sus propias sub-ramas, comparten
+  color. La sala de inicio en sí usa el color de la sección 0.
+- **Qué cambia**: los muros (el dithering), no el suelo — el suelo
+  sigue siendo el fondo oscuro plano, sin textura, como hasta ahora.
+- **Si hay más secciones que colores**: ciclar — en la práctica nunca
+  ocurre, ver más abajo.
+
+Descubrimiento durante el diseño: mi primera estimación de "solo ~2
+colores disponibles sin tocar las paletas de nave/enemigos" (PAL0 +
+PAL3) era demasiado conservadora — confundí el límite real (4 bancos
+de paleta de hardware compartidos entre fondo y sprites) con cuántos
+colores caben DENTRO de un solo banco. Cada banco de paleta del
+Genesis tiene 16 colores; el tileset del maze solo usa 2 de esos 16
+(fondo oscuro e índice 1) porque el arte original solo tiene 2 colores
+— nada impide añadir arte nuevo que use los índices 2-15 del MISMO
+banco (PAL0), sin tocar en absoluto PAL1/PAL2 (nave/enemigos, en uso
+real mientras se juega) ni PAL3. Con eso, hay sitio de sobra para las
+4 secciones (como mucho 4, ver arriba) sin ciclar nunca y sin ningún
+riesgo de contaminar los colores de los sprites ni del texto (que por
+defecto también usa PAL0, pero solo lee el índice 1, que no se toca).
+
+Implementación:
+- **`res/sprite/maze_tiles.png`** pasa de 176x16 (11 celdas) a 608x16
+  (38 celdas): celda 0 = suelo; celdas 1-9, 10-18, 19-27, 28-36 = los
+  mismos 9 patrones de dithering de siempre, repetidos una vez por
+  sección con el color violeta reemplazado (`magick ... -opaque
+  '#987DFA'`) por cada nuevo tono — mismo patrón/densidad de ruido
+  exacto, un color distinto; celda 37 = la puerta bloqueada (spec
+  §16), movida al final y sin reasignar de color (siempre el mismo
+  aspecto, sea cual sea la sección, para que "bloqueado" se lea igual
+  en todo el mapa). Colores nuevos: `#4AECC4` (verde azulado),
+  `#FFA53E` (naranja), `#E85D75` (rosa), añadidos a los índices 2, 3 y
+  4 de PAL0 — verificado escaneando la imagen final en orden raster
+  (mismo método que el bug de índice0 documentado en el §4bis/guidemap.c)
+  para confirmar el orden real de asignación antes de escribir los
+  `PAL_setColor` en `Maze_loadGraphics()`.
+- **`maze.c`**: `MAZE_TILE_COUNT` sube a 152 (38 celdas × 4 subtiles).
+  Nueva variable estática `wallHueBase` (0/9/18/27), fijada al
+  principio de `Maze_generateRoom()`/`Maze_generate()`;
+  `randomWallVariant()` le suma el offset antes de devolver la celda —
+  el resto del carving (`carve()`, `bridgeToSeed()`, anchors de
+  puerta) no sabe ni le importa qué sección es, sigue operando sobre
+  "valores de celda" sin significado de color. `Maze_generateRoom`
+  gana un parámetro `u8 sectionHue` (0..3); `Maze_generate()` (el
+  prototipo de una sola sala, sin tocar por el resto de esta spec)
+  fija `wallHueBase = 0` explícitamente, sigue siempre violeta.
+- **`guidemap.c`**: `computeSections()` (llamada una vez dentro de
+  `GuideMap_generate()`, justo después de `pruneLeaves()` — es
+  puramente estructural, depende solo de la topología final de
+  puertas, no de items ni de bloqueos, así que no hace falta
+  recalcularla nunca más, a diferencia de `GuideMap_recomputeLocks()`)
+  recorre cada una de las puertas de la sala de inicio en orden
+  N/E/S/W y hace un flood-fill (`floodSection`) de un número de
+  sección distinto por cada rama directa. `GuideMap_roomSection(col,row)`
+  expone el resultado. `MAZE_WALL_DITHER_TILE` (usado por el overlay
+  del mapa para el relleno de "visitada") pasa de constante a macro
+  con parámetro `(hue)`; el overlay siempre lo llama con `(0)` — el
+  color por sección es una función solo de la vista de juego, el mapa
+  del botón C se queda como estaba, en un único color.
+- **`main.c`**: `loadRoom()` consulta `GuideMap_roomSection(col,row)` y
+  se lo pasa a `Maze_generateRoom()`.
+- **Verificado en el host** (`test_sections.c`, ~6000 generaciones
+  entre semillas 1-2000 × 3 tamaños de preset): la sala de inicio
+  siempre es sección 0; cada rama directa de la sala de inicio recibe
+  un número de sección distinto de las demás; un recorrido BFS
+  independiente (no usa el código interno de `computeSections()`, solo
+  el grafo de puertas) confirma que todas las salas alcanzables dentro
+  de una misma rama comparten esa sección; toda `CELL_ROOM` del mapa
+  queda cubierta por alguna sección — 0 fallos.
+- Verificado en BlastEm: build limpio (`make`, sin warnings), orden de
+  colores confirmado contra la imagen final compilada, arranque limpio
+  sin errores en el log tras el rebuild.

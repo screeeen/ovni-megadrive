@@ -56,10 +56,11 @@ static void loadRoom(u8 col, u8 row)
     const bool lockedE = cell.doorE && GuideMap_isRoomLocked(col + 1, row);
     const bool lockedS = cell.doorS && GuideMap_isRoomLocked(col, row + 1);
     const bool lockedW = cell.doorW && GuideMap_isRoomLocked(col - 1, row);
+    const u8 sectionHue = GuideMap_roomSection(col, row); // spec §18: per-branch wall color
     u8 i;
 
     Maze_generateRoom(cell.doorN, cell.doorE, cell.doorS, cell.doorW,
-                       lockedN, lockedE, lockedS, lockedW, seed);
+                       lockedN, lockedE, lockedS, lockedW, sectionHue, seed);
     Maze_draw();
     Items_drawInRoom(col, row);
 
@@ -211,13 +212,13 @@ int main(bool hardReset)
         }
         else // STATE_PLAYING
         {
-            // Edge-triggered: rotate once per press. LEFT turns clockwise,
-            // RIGHT counter-clockwise (the original js13k game's single
-            // SPACE action, now split across the two directions).
+            // Edge-triggered: rotate once per press. Inverted as a test
+            // (user request): LEFT turns counter-clockwise, RIGHT
+            // clockwise -- swapped from the original mapping below.
             if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
-                Player_rotateCW(&player);
-            if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
                 Player_rotateCCW(&player);
+            if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
+                Player_rotateCW(&player);
             if ((state & BUTTON_C) && !(prevState & BUTTON_C))
             {
                 mapViewOpen = !mapViewOpen;

@@ -1,25 +1,34 @@
 #include "maze.h"
 #include "resources.h"
 
-// mazeTiles.png is a 176x16 source image: 11 logical 16x16 cells in a row
-// (cell 0 = floor, cells 1-9 = the dither wall variants from ovni's
-// image_edit.png, matching the original's random getRandomValue() 2-10
-// look; cell 10 = locked-door cell, spec §16, an hourglass/X shape never
-// chosen by randomWallVariant(), only placed explicitly at a sealed
-// door's border span). Rescomp slices it into 8x8 VDP tiles in raster
+// mazeTiles.png is a 608x16 source image: 38 logical 16x16 cells in a row
+// -- cell 0 = floor; cells 1-36 = the dither wall variants from ovni's
+// image_edit.png (matching the original's random getRandomValue() 2-10
+// look), repeated once per section hue (spec §18): hue h's 9 variants
+// live at cells h*9+1 .. h*9+9, same dither shapes every time, just the
+// accent color swapped (violet/teal/orange/pink) -- only the background
+// color (0x252525) and hue accent are used across all of them, keeping
+// every hue a strict duotone; cell 37 = locked-door cell (spec §16, an
+// hourglass/X shape), always last and never re-hued, never chosen by
+// randomWallVariant(). Rescomp slices it into 8x8 VDP tiles in raster
 // order (TILESET ... NONE NONE ROW keeps that order untouched, no dedup):
 //   row0 (y0-7):  cell0.TL cell0.TR cell1.TL cell1.TR cell2.TL cell2.TR ...
 //   row1 (y8-15): cell0.BL cell0.BR cell1.BL cell1.BR cell2.BL cell2.BR ...
 // so for a cell value c, its four subtiles are at BASE+2c, BASE+2c+1 (top)
-// and BASE+20+2c, BASE+21+2c (bottom).
+// and BASE+76+2c, BASE+77+2c (bottom).
 #define BASE_TILE       TILE_USER_INDEX
-#define CELL_ROW_TILES  22 // (176px / 8px) tiles per 8px-tall row of the atlas
+#define CELL_ROW_TILES  76 // (608px / 8px) tiles per 8px-tall row of the atlas
 
 #define PATH 0
-#define WALL_VARIANTS 9 // cells 1..9, one per dither pattern
-#define LOCKED_DOOR 10  // cell 10: hourglass/X shape, never picked by randomWallVariant
+#define WALL_VARIANTS 9 // 9 dither patterns per hue
+#define LOCKED_DOOR 37  // cell 37: hourglass/X shape, never picked by randomWallVariant
 
 static u8 grid[MAZE_H][MAZE_W];
+
+// Offset into the current hue's 9-cell block (spec §18): 0, 9, 18 or 27,
+// set once at the top of Maze_generate()/Maze_generateRoom() and read by
+// every randomWallVariant() call for the rest of that room's carve.
+static u8 wallHueBase;
 
 static const s16 startX = 2;
 static const s16 startY = 2;
@@ -40,7 +49,7 @@ static u8 forcedTargetCount;
 
 static u8 randomWallVariant(void)
 {
-    return 1 + (random() % WALL_VARIANTS);
+    return wallHueBase + 1 + (random() % WALL_VARIANTS);
 }
 
 static bool isValid(s16 x, s16 y)
@@ -119,6 +128,8 @@ void Maze_generate(void)
 {
     s16 x, y;
 
+    wallHueBase = 0; // single-room prototype, spec §18 doesn't apply here -- always the original violet
+
     for (y = 0; y < MAZE_H; y++)
         for (x = 0; x < MAZE_W; x++)
             grid[y][x] = randomWallVariant();
@@ -195,10 +206,11 @@ static void bridgeToSeed(s16 x, s16 y)
 
 void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
                         bool lockedN, bool lockedE, bool lockedS, bool lockedW,
-                        u16 roomSeed)
+                        u8 sectionHue, u16 roomSeed)
 {
     s16 x, y;
 
+    wallHueBase = sectionHue * WALL_VARIANTS; // spec §18: every wall cell in this room comes from that hue's block
     setRandomSeed(roomSeed);
 
     for (y = 0; y < MAZE_H; y++)
@@ -257,9 +269,19 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
 
 void Maze_loadGraphics(void)
 {
-    // Exact colors from ovni's src/image_edit.png (dither wall art).
+    // index0/1: exact colors from ovni's src/image_edit.png (dither wall
+    // art) -- hue 0, unchanged, also what the guide map overlay always
+    // uses (spec §18). index2-4: the 3 extra section hues, new palette
+    // slots (never touched before), so this can't affect anything that
+    // already relied on index0/1 -- text (VDP_drawText's default palette)
+    // included. Order/index assignment verified against the compiled
+    // out/release/res/resources.s after rebuilding, same as the index0
+    // gotcha noted in guidemap.c.
     PAL_setColor(0, RGB24_TO_VDPCOLOR(0x252525));
-    PAL_setColor(1, RGB24_TO_VDPCOLOR(0x987DFA));
+    PAL_setColor(1, RGB24_TO_VDPCOLOR(0x987DFA)); // hue 0: violet
+    PAL_setColor(2, RGB24_TO_VDPCOLOR(0x4AECC4)); // hue 1: teal
+    PAL_setColor(3, RGB24_TO_VDPCOLOR(0xFFA53E)); // hue 2: orange
+    PAL_setColor(4, RGB24_TO_VDPCOLOR(0xE85D75)); // hue 3: pink
 
     VDP_loadTileSet(&mazeTiles, BASE_TILE, DMA);
 }

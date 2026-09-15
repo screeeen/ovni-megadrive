@@ -60,10 +60,21 @@ extern u8 itemRow[ITEM_COUNT];
 // room's eccentricity away, reachable by construction since it's the same
 // spanning tree (spec §4.3); then picks itemCol[]/itemRow[] (spec §13).
 // guideMap/startCol/startRow/goalCol/goalRow/itemCol/itemRow are all valid
-// once this returns.
+// once this returns, and so is the per-room section (spec §18, see
+// GuideMap_roomSection below) -- it's purely structural (final door
+// topology only), so it's computed here and never needs recomputing
+// afterwards, unlike the item-dependent lock state.
 void GuideMap_generate(void);
 
 bool GuideMap_hasDoor(u8 col, u8 row, u8 dir);
+
+// Which branch (0..MAZE_SECTION_COUNT-1, maze.h) growing directly out of
+// the start room this room belongs to (spec §18) -- every room hanging
+// off the same direct child of the start shares one number, the start
+// room itself is section 0. main.c passes this into Maze_generateRoom's
+// sectionHue so each branch of the map reads as its own colored zone
+// while playing. Valid once GuideMap_generate() returns.
+u8 GuideMap_roomSection(u8 col, u8 row);
 
 // Recomputes which rooms are locked (spec §16): a room is locked if every
 // path from the start to it crosses at least one door whose entire far
