@@ -71,6 +71,25 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
                         bool lockedN, bool lockedE, bool lockedS, bool lockedW,
                         u8 sectionHue, u16 roomSeed);
 
+// Carves the special "insertion room" (spec §27): the very first room
+// the player ever sees, outside the normal room-tree grid entirely (its
+// only relationship to the grid is via guidemap.c's insertLinkCol/
+// insertLinkRow/insertLinkDir, which main.c uses both to know where to
+// send the player once they leave, and to punch open a matching real
+// border opening on that specific side of the target room -- spec §29,
+// not a blind teleport into its center). Deterministic from roomSeed,
+// same carve algorithm as Maze_generateRoom, seeded from the room's own
+// center exactly like every other room. Always exactly one door and a
+// single fixed wall-dither cell throughout instead of the usual random
+// mix -- a deliberately uniform look distinct from every other room in
+// the game. doorDir picks which border that one door sits on (spec
+// §29ter: randomized once per game, was fixed to always the south
+// border before) -- accepts guidemap.h's DOOR_N/E/S/W values (0/1/2/3)
+// by numeric convention rather than #including guidemap.h here, to keep
+// maze.c decoupled from the guide-map module the way Maze_generateRoom's
+// plain bool doorN/E/S/W parameters already do.
+void Maze_generateInsertionRoom(u8 doorDir, u16 roomSeed);
+
 // Draws the current maze to plane BG_A.
 void Maze_draw(void);
 

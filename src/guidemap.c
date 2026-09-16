@@ -8,6 +8,7 @@ typedef struct { u8 col, row; } Coord;
 MapCell guideMap[MAX_MAP_ROWS][MAX_MAP_COLS];
 u8 startCol, startRow;
 u8 goalCol, goalRow;
+u8 insertLinkCol, insertLinkRow, insertLinkDir;
 u8 itemCol[ITEM_COUNT], itemRow[ITEM_COUNT];
 u8 mapCols = 8, mapRows = 6; // sane default if a caller forgets to set these
 
@@ -32,6 +33,11 @@ static bool containsUnlockedScratch[MAX_MAP_ROWS][MAX_MAP_COLS];
 // GuideMap_generate() (spec §18) -- which of the (up to MAZE_SECTION_COUNT)
 // branches growing out of the start room this room belongs to.
 static u8 roomSection[MAX_MAP_ROWS][MAX_MAP_COLS];
+
+// TRUE for every room on the unique tree path between (startCol,startRow)
+// and item 0's room (letter A) -- scratch, live only during
+// selectInsertionLink()'s own call (spec §29bis).
+static bool pathToAScratch[MAX_MAP_ROWS][MAX_MAP_COLS];
 
 static bool inBounds(s16 col, s16 row)
 {
@@ -543,6 +549,141 @@ u8 GuideMap_roomSection(u8 col, u8 row)
     return roomSection[row][col];
 }
 
+// Fills pathToAScratch[][] with every room on the unique tree path
+// between (startCol,startRow) and item 0's room (letter A) -- spec
+// §29bis. Since the room graph is a tree (spec §4), there's exactly one
+// such path; walked backward from A's room toward start, always
+// stepping to the neighbor whose BFS distance from start (bfsFromStart,
+// which this calls) is exactly one less. Needs itemCol[0]/itemRow[0]
+// already set, so callers must run this after selectItemRooms().
+static void markPathToFirstItem(void)
+{
+    u8 col = itemCol[0], row = itemRow[0];
+    s16 r2, c2;
+
+    for (r2 = 0; r2 < mapRows; r2++)
+        for (c2 = 0; c2 < mapCols; c2++)
+            pathToAScratch[r2][c2] = FALSE;
+
+    bfsFromStart();
+    pathToAScratch[row][col] = TRUE;
+
+    while ((col != startCol) || (row != startRow))
+    {
+        u8 d;
+
+        for (d = 0; d < 4; d++)
+        {
+            s16 ncol, nrow;
+
+            if (!GuideMap_hasDoor(col, row, d)) continue;
+
+            neighborInDir(col, row, d, &ncol, &nrow);
+            if (dist[nrow][ncol] == (u8) (dist[row][col] - 1))
+            {
+                col = (u8) ncol;
+                row = (u8) nrow;
+                pathToAScratch[row][col] = TRUE;
+                break;
+            }
+        }
+    }
+}
+
+typedef struct { u8 col, row, dir; } LinkCandidate;
+
+// Picks (insertLinkCol,insertLinkRow,insertLinkDir) among rooms on the
+// path to letter A (spec §29bis, bug fix over §27/§29): unlocking is
+// monotonic (spec §16) and only that path is guaranteed unlocked from
+// the very start of the game, so a room picked off that path could be
+// sealed the instant the game begins (its own edge back toward start
+// gets walled off whenever its actual tree parent isn't itself on that
+// path) -- stranding the player in a loop between the insertion room and
+// one sealed room, unable to ever reach the rest of the map. Restricting
+// to the path-to-A guarantees the link room (and the way back out of it)
+// stays reachable forever, since nothing on that path is ever locked.
+//
+// A candidate is (room-on-path, side) where that side has no real tree
+// door yet. Two tiers, tried in order:
+//   1. path-to-A rooms whose free side is also a genuine grid perimeter
+//      side (keeps the "arrives from outside the map" look from spec
+//      §27 when possible).
+//   2. any path-to-A room with any free side at all (covers maps where
+//      the path to A never happens to touch the grid's outer border).
+// Reuses `frontier`-sized scratch since the path can include up to every
+// room in the grid, worst case.
+static void selectInsertionLink(void)
+{
+    static LinkCandidate candidates[MAX_MAP_COLS * MAX_MAP_ROWS * 4];
+    u16 candidateCount = 0;
+    s16 col, row;
+
+    markPathToFirstItem();
+
+    for (row = 0; row < mapRows; row++)
+    {
+        for (col = 0; col < mapCols; col++)
+        {
+            if (!pathToAScratch[row][col])
+                continue;
+
+            if (row == 0)           { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_N; candidateCount++; }
+            if (row == mapRows - 1) { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_S; candidateCount++; }
+            if (col == 0)           { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_W; candidateCount++; }
+            if (col == mapCols - 1) { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_E; candidateCount++; }
+        }
+    }
+
+    if (candidateCount == 0)
+    {
+        // Tier 2: still on the path to A, but any side without a real
+        // TREE door yet, not limited to the grid's outer border -- the
+        // adjacent grid cell in that direction might independently be a
+        // real CELL_ROOM too (just never connected here by Prim's, e.g.
+        // reached via a different edge), and that's fine: main.c never
+        // actually tries to load that neighbor through this side, only
+        // through its own real tree door if it has one elsewhere. All
+        // that matters is this room's own doorN/E/S/W bit stays FALSE
+        // here, so merging in insertLinkDir later can't collide with an
+        // existing real door.
+        for (row = 0; row < mapRows; row++)
+        {
+            for (col = 0; col < mapCols; col++)
+            {
+                if (!pathToAScratch[row][col])
+                    continue;
+
+                if (!GuideMap_hasDoor((u8) col, (u8) row, DOOR_N)) { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_N; candidateCount++; }
+                if (!GuideMap_hasDoor((u8) col, (u8) row, DOOR_E)) { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_E; candidateCount++; }
+                if (!GuideMap_hasDoor((u8) col, (u8) row, DOOR_S)) { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_S; candidateCount++; }
+                if (!GuideMap_hasDoor((u8) col, (u8) row, DOOR_W)) { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_W; candidateCount++; }
+            }
+        }
+    }
+
+    if (candidateCount == 0)
+    {
+        // Ultimate defensive fallback -- should be unreachable: every
+        // room on the path to A has a real tree door (at least the one
+        // toward the next room on the path), so it can only run out of
+        // free sides if it already has all 4, on every single room of
+        // the path, at once. Not expected to trigger at the grid sizes
+        // in play (spec §0).
+        insertLinkCol = startCol;
+        insertLinkRow = startRow;
+        insertLinkDir = DOOR_N;
+        return;
+    }
+
+    {
+        const LinkCandidate c = candidates[random() % candidateCount];
+
+        insertLinkCol = c.col;
+        insertLinkRow = c.row;
+        insertLinkDir = c.dir;
+    }
+}
+
 void GuideMap_generate(void)
 {
     clearMap();
@@ -555,6 +696,7 @@ void GuideMap_generate(void)
     computeSections();
     selectGoal();
     selectItemRooms();
+    selectInsertionLink(); // needs itemCol[0]/itemRow[0] (spec §29bis)
 }
 
 // 320x224 screen = 40x28 tiles; center the (small) guide map within it.

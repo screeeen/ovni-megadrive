@@ -1421,3 +1421,363 @@ necesite saber de esto. Fila 0 en vez de la fila 1 del HUD de items
 para no solaparse con él.
 - Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
   limpio sin errores en el log tras el rebuild.
+
+## 27. Habitación de inserción: punto de partida real de la nave
+
+Petición del usuario: la nave aparece primero en una habitación con un
+único tipo de muro (un patrón de dithering fijo, no los 9 aleatorios
+de siempre), con 1 sola salida que da a una habitación periférica
+cualquiera del mapa (cualquiera de las salas en el borde de la
+rejilla) — "la habitación de inserción donde empieza el mundo".
+
+Decisiones confirmadas (preguntadas antes de implementar):
+- **Alcance**: sala nueva y especial, fuera de la rejilla del mapa —
+  no forma parte del árbol de Prim's, `startCol`/`startRow` (raíz
+  lógica del árbol para BFS/bloqueos/secciones) no cambia de
+  significado ni de valor.
+- **Textura**: un único patrón de dithering fijo (no un tile nuevo),
+  reutilizando el arte existente.
+- **Destino**: una habitación periférica cualquiera (borde de la
+  rejilla), elegida al azar en la generación de cada partida.
+
+Implementación:
+- **`maze.c`**: nueva `Maze_generateInsertionRoom(roomSeed)`, hermana
+  de `Maze_generateRoom` — reutiliza el mismo `carve()`/
+  `bridgeToSeed()` (ambos ya estáticos en el archivo), pero rellena
+  la rejilla entera con un único valor de celda fijo
+  (`INSERT_WALL_VARIANT`) en vez de llamar a `randomWallVariant()` —
+  funciona sin tocar `carve()` en absoluto, porque tanto esa función
+  como `bridgeToSeed()` solo distinguen `PATH` (0, ya tallado) de
+  "cualquier otro valor" (muro), nunca miran CUÁL valor de muro es.
+  Puerta única, siempre en el borde sur (arbitrario, sin significado
+  espacial ya que esta sala no pertenece a la rejilla). No usa
+  `wallHueBase`/color por sección (spec §18 no aplica aquí).
+- **`guidemap.c`**: nueva `selectInsertionLink()`, llamada dentro de
+  `GuideMap_generate()` justo después de `pruneLeaves()` — recopila
+  todas las `CELL_ROOM` cuya fila/columna coincide con el borde de la
+  rejilla activa (`row==0`, `row==mapRows-1`, `col==0` o
+  `col==mapCols-1`) y elige una al azar, guardada en
+  `insertLinkCol`/`insertLinkRow` (nuevas variables `extern`, mismo
+  patrón que `startCol`/`goalCol`). Reutiliza `frontier[]` como
+  scratch, igual que `selectGoal`/`selectItemRooms` más abajo en la
+  misma función.
+- **`main.c`**: nuevo estado `inInsertRoom`. `newGame()` genera la
+  sala de inserción (`Maze_generateInsertionRoom(mapSeed)`) en vez de
+  cargar `(startCol,startRow)` directamente; la nave aparece en su
+  punto central (mismo `Player_spawnAtRoomCenter` de siempre, siempre
+  camino garantizado); los enemigos permanecen ocultos (esta sala no
+  tiene enemigos). El botón C queda deshabilitado mientras
+  `inInsertRoom` (no hay nada que previsualizar antes de entrar al
+  mapa real, y `currentCol`/`currentRow` aún no son válidos). El
+  bucle principal de movimiento se divide en tres ramas
+  (`mapViewOpen` / `inInsertRoom` / normal): mientras está en la sala
+  de inserción, `Player_updateRoom` se llama con solo el sur abierto;
+  al cruzarlo (`EXIT_SOUTH`), la transición es tipo teletransporte —
+  no hay una apertura física correspondiente en el muro de la sala
+  periférica de destino (`Maze_generateInsertionRoom` documenta esto
+  explícitamente) — se fija `currentCol/currentRow = insertLinkCol/
+  insertLinkRow`, se llama a `loadRoom()` con normalidad (genera esa
+  sala exactamente como si se hubiera llegado por el árbol, con sus
+  puertas/bloqueos/sección propios sin ningún cambio) y la nave
+  aterriza en el propio punto central de esa sala
+  (`Player_spawnAtRoomCenter`, garantizado abierto siempre, evita
+  cualquier riesgo de aparecer dentro de un muro). Los enemigos de
+  esa sala se hacen visibles en ese momento (ya generados por
+  `loadRoom`). No hay camino de vuelta a la sala de inserción — es de
+  un solo uso, coherente con "donde empieza el mundo".
+- **Nota de diseño explorada y descartada**: se consideró marcar la
+  puerta de conexión también como un bit de puerta real en
+  `guideMap` (para que la sala periférica tuviera una apertura física
+  visible hacia la sala de inserción), pero se descartó: el BFS/
+  bloqueos/secciones de `guidemap.c` asumen que todo bit de puerta
+  corresponde a un vecino real dentro de la rejilla — un bit de
+  puerta hacia una celda fuera de rango (fila/columna -1, al norte de
+  la fila 0 por ejemplo) causaría lecturas fuera de límites en
+  `bfsFromRoom`. El teletransporte evita este riesgo por completo sin
+  perder nada del comportamiento pedido.
+- **Verificado en el host** (`test_insertion.c`, nuevo, 6000
+  generaciones entre semillas 1-2000 × 3 tamaños de preset):
+  `insertLinkCol/Row` siempre cae dentro de los límites, siempre es
+  una `CELL_ROOM` real, y siempre está en el perímetro de la rejilla
+  activa — 0 fallos. Por separado, `Maze_generateInsertionRoom`
+  probada con 6000 semillas propias: el punto de spawn central
+  siempre está libre de muro, exactamente 2 celdas del borde sur
+  quedan abiertas (el tramo de la puerta) y absolutamente ningún otro
+  borde (norte/este/oeste, y el resto del sur) queda abierto — 0
+  fallos. Se reutilizó el mismo hitbox con inset de 2px ("TILE-2") que
+  usa la colisión real del juego, igual que en `test_enemy_axis.c`
+  (spec §25).
+- Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
+  limpio sin errores en el log tras el rebuild.
+
+## 28. Combo de reset: A+B+C+ARRIBA vuelve al menú
+
+Petición del usuario: pulsando A+B+C+ARRIBA a la vez se resetea la
+partida.
+
+Decisiones confirmadas (preguntadas antes de implementar): el reset
+vuelve al menú de selección de tamaño (no arranca una partida nueva
+directamente — hay que pulsar START de nuevo, igual que al inicio), y
+el combo funciona desde cualquier pantalla, no solo durante la
+partida.
+
+Implementación (`main.c`):
+- `RESET_COMBO` (`BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_UP`) se
+  comprueba al principio del bucle principal, ANTES de la rama
+  `gameState == STATE_MENU` / `STATE_PLAYING` (como un tercer `if`
+  que tiene prioridad) — así siempre gana ese frame sobre lo que
+  cualquiera de esos 4 botones haría normalmente (ninguno tenía uso
+  individual salvo C, que solo se pierde ese frame concreto, sin
+  efecto visible ya que el reset lo sustituye de todas formas).
+  Disparo por flanco (`(state & COMBO) == COMBO` Y no lo era en
+  `prevState`), no se repite mientras se mantienen pulsados.
+- Nueva `resetToMenu()`: pone `gameState = STATE_MENU`, limpia
+  `mapViewOpen`/`inInsertRoom` (sin efecto real ya que `newGame()` los
+  vuelve a fijar al arrancar una partida nueva, pero evita dejar
+  estado a medias visible entretanto), oculta los tres sprites que
+  podrían estar visibles (`playerSprite`, `mapShipSprite`,
+  `enemySprites[]` — de lo contrario se verían "congelados" sobre la
+  pantalla de menú) y llama a `drawMenu()`.
+- Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
+  limpio sin errores en el log tras el rebuild.
+
+## 29. Puerta real (no teletransporte) entre la sala de inserción y su destino
+
+Feedback del usuario sobre el §27: quería que el aterrizaje coincidiera
+con una entrada real de la habitación periférica de destino, no con el
+centro de la sala vía teletransporte (que era la solución adoptada
+entonces precisamente para evitar el riesgo de romper el BFS/bloqueos
+de `guidemap.c` — ver la "nota de diseño descartada" del §27).
+
+Diseño revisado: en vez de escribir el bit de puerta extra dentro de
+`guideMap` (el riesgo real: BFS, bloqueos y secciones asumen que todo
+bit de puerta corresponde a un vecino real en la rejilla, y leer un
+vecino fuera de rango causaría lecturas fuera de límites), la
+dirección de enlace se mantiene como un canal aparte
+(`insertLinkDir`), y se fusiona con las puertas reales del árbol
+**solo en el momento de generar/leer esa sala concreta** — nunca
+dentro de `guideMap` mismo. Como esa dirección, por construcción,
+siempre cae en un lado sin vecino real (fila 0 → norte, última fila →
+sur, columna 0 → oeste, última columna → este), nunca puede coincidir
+con una puerta real del árbol para esa sala — no hay ambigüedad
+posible entre "puerta de árbol" y "puerta de inserción".
+
+Implementación:
+- **`guidemap.c`**: `selectInsertionLink()` ahora recopila candidatos
+  como tripletas (sala, lado libre) en vez de solo (sala) — una sala
+  de esquina ofrece 2 candidatos (uno por lado sin vecino), una de
+  borde normal solo 1. Se elige una tripleta al azar; el resultado
+  (`insertLinkCol`, `insertLinkRow`, nueva `insertLinkDir`) se expone
+  igual que antes vía `extern` en `guidemap.h`.
+- **`main.c`**, `loadRoom(col,row)`: cuando `(col,row)` coincide con
+  `(insertLinkCol,insertLinkRow)`, las variables locales `doorN/E/S/W`
+  que se pasan a `Maze_generateRoom` fusionan (`||`) el bit real del
+  árbol (`cell.doorN` etc., de `guideMap`) con `insertLinkDir` — el
+  bloqueo (`lockedN` etc.) sigue calculándose solo sobre `cell.doorN`
+  (el bit crudo), nunca sobre el fusionado, así que la puerta de
+  inserción nunca puede quedar bloqueada por el sistema de letras
+  (§16) — no forma parte de ese grafo en absoluto. `Maze_generateRoom`
+  en sí no cambió nada: simplemente recibe un `TRUE` más en la
+  combinación de puertas, algo que ya soportaba (spec §12/§25, 16
+  combinaciones de puertas ya probadas por fuzzing).
+- **`main.c`**, transición de salida (sala de inserción → periférica):
+  en vez de `Player_spawnAtRoomCenter`, se usa la nueva
+  `positionPlayerEnteringViaDoorDir(insertLinkDir)` — coloca a la nave
+  justo dentro del borde real recién abierto, alineada con el tramo de
+  la puerta (misma tabla de posicionamiento que ya usa
+  `enterRoomFrom`, solo indexada por "lado de ENTRADA de la sala
+  nueva" en vez de "lado de SALIDA de la sala vieja" — son
+  exactamente los mismos 4 casos, solo mirados desde el otro extremo
+  de la puerta).
+- **`main.c`**, camino de vuelta (nuevo, no existía en el §27): en la
+  rama normal de movimiento, `doorN/E/S/W` que se pasan a
+  `Player_updateRoom` también fusionan `insertLinkDir` cuando
+  `(currentCol,currentRow) == (insertLinkCol,insertLinkRow)`. Si el
+  `exitDir` resultante coincide exactamente con esa dirección
+  (`exitDirForDoorDir(insertLinkDir)`, nueva función que traduce
+  `DOOR_N/E/S/W` de guidemap.h al `EXIT_NORTH/EAST/SOUTH/WEST` de
+  player.h — enumeraciones distintas para las mismas 4 direcciones),
+  la nave vuelve a la sala de inserción (regenerada, siempre el mismo
+  seed `mapSeed`) en vez de llamar a `enterRoomFrom` — entra por su
+  única puerta (sur), con el mismo posicionamiento que usa su propia
+  llegada. Cualquier otro `exitDir` (una puerta real del árbol) sigue
+  el camino normal de `enterRoomFrom`, sin cambios. El pickup de
+  ítems y la actualización de enemigos de ese frame se saltan
+  explícitamente cuando esto ocurre (`if (!inInsertRoom) { ... }`)
+  para no operar con un `(currentCol,currentRow)` obsoleto (sigue
+  apuntando a la sala periférica que se acaba de abandonar) contra la
+  posición ya recién movida a la sala de inserción.
+- **Verificado en el host** (`test_insertion.c`, ampliado): además de
+  las comprobaciones ya existentes (destino válido, en el perímetro,
+  puerta única de la sala de inserción), ahora también se verifica
+  que `insertLinkDir` corresponde estructuralmente a un lado
+  genuinamente sin vecino de rejilla (no solo "ahora mismo no hay
+  puerta ahí", sino "no podría haberla nunca", comprobado por
+  aritmética de fila/columna independiente del código de producción),
+  y que nunca coincide con una puerta real ya existente de esa sala
+  (`GuideMap_hasDoor`) — 6000 generaciones, 0 fallos. Re-ejecutados
+  `test_locks.c`, `test_sections.c`, `test_overlay_smoke.c` y
+  `test_enemy_axis.c` sin fallos (ninguno de sus supuestos se vio
+  afectado, ya que `guideMap` en sí nunca se toca).
+- Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
+  limpio sin errores en el log tras el rebuild.
+
+## 29bis. Bug real: la sala periférica de destino a veces quedaba bloqueada
+
+Bug reportado por el usuario tras probar el §29: a veces la nave entra
+en una sala periférica "sin salida (tapada)". Diagnóstico confirmado:
+`selectInsertionLink()` elegía la sala de destino entre **todas** las
+salas del perímetro, sin ningún filtro relacionado con el sistema de
+bloqueos (§16). Como el desbloqueo es monótono pero empieza siendo muy
+restrictivo (solo el camino hacia la letra A está desbloqueado al
+principio de la partida), una sala periférica elegida al azar casi
+nunca cae exactamente en ese camino — y el mecanismo de bloqueo, por
+diseño, sella la puerta de esa sala hacia su propio padre en el árbol
+**salvo que el padre esté también en el camino desbloqueado**. Si ni
+la sala ni su padre están en el camino a A, su única puerta real
+(hacia el padre) queda sellada — la nave queda atrapada, sin más
+salida que volver a la sala de inserción (y, al volver a salir por la
+misma puerta fija de esa sala, cae otra vez en la misma sala sellada:
+un bucle sin fin entre las dos).
+
+Esto invalida una asunción incorrecta hecha durante el diseño del
+§27: se había razonado que la puerta de una sala hacia su padre "casi
+nunca" queda bloqueada porque el padre "casi nunca" está bloqueado —
+cierto solo para salas que están en (o cerca) del camino al ítem
+actual, pero falso en general, ya que el bloqueo se propaga hacia
+FUERA desde el inicio siguiendo exactamente ese único camino, y
+cualquier sala fuera de él (la inmensa mayoría del árbol al principio
+de la partida) tiene un padre que también está fuera — sellada por
+partida doble.
+
+Corrección: `selectInsertionLink()` ahora solo elige entre salas que
+están en el camino real (único, por ser un árbol) desde el inicio
+hasta la sala de la letra A — el único conjunto de salas garantizado
+desbloqueado desde el primer instante y **para siempre** (el
+desbloqueo es monótono: una vez que un ítem cuenta como "debido", su
+camino nunca vuelve a bloquearse, así que restringir aquí no solo
+arregla el arranque sino toda la partida).
+
+Implementación (`guidemap.c`):
+- `GuideMap_generate()` reordena sus pasos: `selectItemRooms()` (fija
+  `itemCol[]/itemRow[]`) pasa a ejecutarse ANTES de
+  `selectInsertionLink()`, que ahora depende de conocer dónde está la
+  letra A.
+- Nueva `markPathToFirstItem()`: reconstruye el camino único (spec
+  §4, es un árbol) desde `(startCol,startRow)` hasta
+  `(itemCol[0],itemRow[0])`, caminando hacia atrás desde la sala de A
+  y dando siempre el paso hacia el vecino cuya distancia BFS
+  (`bfsFromStart()`, reutilizada) sea exactamente una unidad menor —
+  misma técnica que usaba el extinto `tracePathTo()` del §15 (mapa
+  "solo la ruta", revertido entonces, resucitada aquí para un
+  propósito distinto). Resultado guardado en `pathToAScratch[][]`,
+  scratch nuevo del tamaño de la rejilla.
+- `selectInsertionLink()` reescrita en dos niveles, ambos restringidos
+  a `pathToAScratch`:
+  1. **Nivel 1** (preferido): salas del camino a A cuyo lado libre
+     coincide además con el borde real de la rejilla — mantiene el
+     aspecto "llega desde fuera del mapa" del §27 siempre que sea
+     posible.
+  2. **Nivel 2** (reserva): cualquier sala del camino a A con
+     cualquier lado sin puerta de árbol, sin exigir que sea borde de
+     rejilla — cubre mapas donde el camino a A nunca toca el
+     perímetro exterior. Ese lado "libre" puede coincidir con una
+     celda vecina que SÍ es una sala real (solo que Prim's no la
+     conectó por ahí, llegó por otra rama) — no supone ningún
+     problema: `main.c` nunca intenta cargar esa vecina a través de
+     esta puerta, solo la usa para el enlace especial de vuelta a la
+     sala de inserción.
+  Reserva final defensiva idéntica a la del §27/§29 si ambos niveles
+  quedan vacíos (inalcanzable en la práctica).
+- **Verificado en el host** (`test_insertion.c`, reescrito): además
+  de las comprobaciones ya existentes, se añadió un trazador de
+  camino independiente (`independentPathTo`, no reutiliza el código
+  interno de `guidemap.c`) que confirma que `insertLinkCol/Row` está
+  siempre en el camino a A; y, la comprobación central de este bug,
+  se simula recoger las 5 letras en orden llamando a
+  `GuideMap_recomputeLocks()` tras cada una y comprobando
+  `GuideMap_isRoomLocked(insertLinkCol,insertLinkRow)` — debe dar
+  `FALSE` siempre, en cada uno de los 5 pasos, no solo al principio.
+  5984 generaciones válidas, 0 fallos (antes de la corrección, la
+  misma comprobación fallaba en el primer paso — `nextIndex=0` —
+  confirmando el bug exactamente como lo describió el usuario).
+  Re-ejecutados `test_locks.c`, `test_sections.c` y
+  `test_overlay_smoke.c` sin fallos.
+- Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
+  limpio sin errores en el log tras el rebuild.
+
+## 29ter. La puerta de la propia sala de inserción también varía
+
+Feedback del usuario: la puerta de la sala de inserción siempre
+aparecía en el mismo sitio (borde sur fijo, spec §27/§29), mientras
+que el lado de llegada a la sala periférica sí variaba cada partida
+(`insertLinkDir`, spec §29) — pidió que la salida de la sala de
+inserción también variase.
+
+Implementación:
+- **`maze.c`/`.h`**: `Maze_generateInsertionRoom` gana un parámetro
+  `doorDir` (spec §29ter) que elige cuál de los 4 anchors
+  (`ANCHOR_N/E/S/W`, ya existentes, compartidos con
+  `Maze_generateRoom`) usar tanto para el objetivo forzado de
+  `carve()` como para el punzonado final del borde — antes tenía
+  ambos hardcodeados al sur. Como `maze.c` no incluye `guidemap.h`
+  (para no crear una dependencia cruzada entre módulos — el mismo
+  motivo por el que `Maze_generateRoom` ya recibe 4 bools sueltos en
+  vez del enum), se definen constantes `INSERT_DOOR_N/E/S/W` locales
+  con los mismos valores numéricos 0/1/2/3 que `DOOR_N/E/S/W` de
+  `guidemap.h` — documentado explícitamente en el comentario de la
+  declaración, mismo patrón que ya usa `exitDirForDoorDir` en
+  `main.c` para traducir entre las dos enumeraciones de dirección del
+  proyecto.
+- **`main.c`**: nueva `insertRoomDoorDir`, elegida una vez por
+  partida en `newGame()` (`random() & 3`, mismo patrón de bitmask que
+  ya usa `enemy.c` para elegir dirección inicial) y reutilizada sin
+  cambios durante el resto de esa partida — tanto al generar la sala
+  por primera vez como en cualquier viaje de vuelta posterior (spec
+  §29). Las dos comprobaciones que antes asumían `EXIT_SOUTH`/`DOOR_S`
+  fijos (la salida inicial hacia la periférica, y el regreso desde la
+  periférica) ahora comparan contra `exitDirForDoorDir(insertRoomDoorDir)`
+  y pasan las 4 puertas `(insertRoomDoorDir==DOOR_N)` etc. a
+  `Player_updateRoom`/`positionPlayerEnteringViaDoorDir`, igual que ya
+  se hacía con `insertLinkDir` para el otro extremo del enlace.
+- **Verificado en el host** (`test_insertion.c`, ampliado): se
+  recompiló `Maze_generateInsertionRoom` con su nueva firma y se
+  probaron las 4 direcciones para cada semilla/tamaño (antes solo
+  probaba la fija) — para cada una, exactamente el borde solicitado
+  queda con un tramo de 2 celdas abierto y los otros tres permanecen
+  completamente sólidos, y el punto de spawn central sigue siempre
+  libre de muro — 5984 semillas × 4 direcciones, 0 fallos.
+  Re-ejecutados `test_locks.c`, `test_sections.c`,
+  `test_overlay_smoke.c` y `test_enemy_axis.c` sin fallos.
+- Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
+  limpio sin errores en el log tras el rebuild.
+
+## 29quat. La salida de la sala de inserción coincide con la opuesta de la de llegada
+
+Petición del usuario: la coordenada/lado de la salida de la sala de
+inserción tiene que coincidir con el **opuesto** del lado de entrada
+de la sala periférica — sur↔norte, este↔oeste — en vez de elegirse al
+azar de forma independiente (como quedó tras el §29ter).
+
+Implementación (`main.c`): `insertRoomDoorDir` deja de sortearse con
+`random() & 3` y pasa a derivarse directamente de `insertLinkDir`
+(ya fijado por `GuideMap_generate()`, ejecutado justo antes en
+`newGame()`) con `(insertLinkDir + 2) & 3` — la misma transformación
+"+2 mod 4" que ya usan `guidemap.c`'s propio `opposite()` (estático,
+usado al emparejar puertas al tallar el árbol) y `Enemy_opposite()`
+en `enemy.c`, para la misma pareja de 4 direcciones
+(DOOR_N=0↔DOOR_S=2, DOOR_E=1↔DOOR_W=3). El resultado: salir por el
+sur de la sala de inserción ahora siempre lleva a entrar por el norte
+de la periférica (y así con las otras 3 combinaciones), leyéndose
+como una línea recta continua en vez de dos puertas orientadas al
+azar sin relación entre sí.
+- Verificado: la fórmula se comprobó de forma aislada contra las 4
+  parejas opuestas (N↔S, E↔S únicamente ida y vuelta correctas) antes
+  de aplicarla — coincide exactamente. Es un cálculo puro sobre un
+  valor que `guidemap.c` ya genera y valida (`insertLinkDir`, spec
+  §29bis/§29ter), así que los tests existentes de generación de mapa
+  (`test_insertion.c`, `test_locks.c`, `test_sections.c`) no
+  necesitaban cambios y se re-ejecutaron para confirmar que nada se
+  rompió — 0 fallos.
+- Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
+  limpio sin errores en el log tras el rebuild.

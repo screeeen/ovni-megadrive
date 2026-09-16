@@ -42,6 +42,18 @@ static Enemy enemies[ENEMY_COUNT];
 static Sprite *enemySprites[ENEMY_COUNT];
 static u16 mapSeed;
 static u8 currentCol, currentRow;
+// TRUE while the player is still in the special insertion room (spec
+// §27), before currentCol/currentRow are ever set -- gates every place
+// that would otherwise read a stale/meaningless (currentCol,currentRow).
+static bool inInsertRoom;
+// Which border the insertion room's own single door sits on this game
+// (spec §29quat: derived once per newGame() as the OPPOSITE side of
+// insertLinkDir -- N<->S, E<->W -- so leaving the insertion room and
+// arriving at the periphery room reads as one continuous, spatially
+// consistent line, same as any normal room-to-room transition; was
+// independently randomized before that, spec §29ter). A DOOR_N/E/S/W
+// value (guidemap.h).
+static u8 insertRoomDoorDir;
 static bool mapViewOpen;
 static u16 mapBlinkTimer;
 static GameState gameState;
@@ -61,6 +73,54 @@ static u16 roomSeedFor(u8 col, u8 row)
     return (u16) h;
 }
 
+// EXIT_NORTH/EAST/SOUTH/WEST (player.h) and DOOR_N/E/S/W (guidemap.h) are
+// different enumerations (1/2/3/4 vs 0/1/2/3) for the same 4 directions --
+// this converts one to the other, needed wherever insertLinkDir (a
+// DOOR_x) has to be compared against Player_updateRoom's return value (an
+// EXIT_x), spec §29.
+static u8 exitDirForDoorDir(u8 doorDir)
+{
+    switch (doorDir)
+    {
+        case DOOR_N: return EXIT_NORTH;
+        case DOOR_E: return EXIT_EAST;
+        case DOOR_S: return EXIT_SOUTH;
+        default:     return EXIT_WEST; // DOOR_W
+    }
+}
+
+// Places the player just inside the border used to enter the room they
+// were just loaded into, aligned with that door's span (spec §29) --
+// used for the insertion-link transition, which (unlike enterRoomFrom)
+// isn't stepping to a grid-adjacent (col,row), so there's no exitDir to
+// derive this from the usual way. "Entering via DOOR_N" is the same
+// physical scenario as enterRoomFrom's EXIT_SOUTH case (left the previous
+// room south, entered this one's north side), and so on around -- this
+// mirrors that same placement table, just indexed by the new room's own
+// entry side instead of the old room's exit side.
+static void positionPlayerEnteringViaDoorDir(u8 doorDir)
+{
+    switch (doorDir)
+    {
+        case DOOR_N:
+            player.y = MAZE_TILE_PX;
+            player.x = MAZE_DOOR_COL * MAZE_TILE_PX;
+            break;
+        case DOOR_S:
+            player.y = MAZE_TILE_PX * (MAZE_H - 2);
+            player.x = MAZE_DOOR_COL * MAZE_TILE_PX;
+            break;
+        case DOOR_E:
+            player.x = MAZE_TILE_PX * (MAZE_W - 2);
+            player.y = MAZE_DOOR_ROW * MAZE_TILE_PX;
+            break;
+        default: // DOOR_W
+            player.x = MAZE_TILE_PX;
+            player.y = MAZE_DOOR_ROW * MAZE_TILE_PX;
+            break;
+    }
+}
+
 static void loadRoom(u8 col, u8 row)
 {
     const MapCell cell = guideMap[row][col];
@@ -68,15 +128,27 @@ static void loadRoom(u8 col, u8 row)
     // Locked branches (spec §16): a door that exists in the room graph but
     // leads only to letters not due yet gets sealed -- short-circuit skips
     // GuideMap_isRoomLocked when there's no door at all in that direction,
-    // so out-of-range neighbor coords are never read.
+    // so out-of-range neighbor coords are never read. Gated on cell.doorX
+    // (the RAW tree bit), never the insertLinkDir-merged doorX below --
+    // the insertion link is never part of the lock graph.
     const bool lockedN = cell.doorN && GuideMap_isRoomLocked(col, row - 1);
     const bool lockedE = cell.doorE && GuideMap_isRoomLocked(col + 1, row);
     const bool lockedS = cell.doorS && GuideMap_isRoomLocked(col, row + 1);
     const bool lockedW = cell.doorW && GuideMap_isRoomLocked(col - 1, row);
     const u8 sectionHue = GuideMap_roomSection(col, row); // spec §18: per-branch wall color
+    // The insertion room's link (spec §27/§29) punches an extra, always-
+    // unlocked door on whichever border side has no grid neighbor at all
+    // -- guideMap's own doorN/E/S/W bits are left untouched (BFS/locks/
+    // sections/corridor-drawing in guidemap.c never see this), it only
+    // affects what gets physically carved into THIS room's own maze.
+    const bool isInsertLinkRoom = (col == insertLinkCol) && (row == insertLinkRow);
+    const bool doorN = cell.doorN || (isInsertLinkRoom && (insertLinkDir == DOOR_N));
+    const bool doorE = cell.doorE || (isInsertLinkRoom && (insertLinkDir == DOOR_E));
+    const bool doorS = cell.doorS || (isInsertLinkRoom && (insertLinkDir == DOOR_S));
+    const bool doorW = cell.doorW || (isInsertLinkRoom && (insertLinkDir == DOOR_W));
     u8 i;
 
-    Maze_generateRoom(cell.doorN, cell.doorE, cell.doorS, cell.doorW,
+    Maze_generateRoom(doorN, doorE, doorS, doorW,
                        lockedN, lockedE, lockedS, lockedW, sectionHue, seed);
     Maze_draw();
     Items_drawInRoom(col, row);
@@ -143,18 +215,36 @@ static void newGame(void)
     Items_reset();
     GuideMap_recomputeLocks(); // A is unlocked from the start, B..E sealed (spec §16)
 
-    currentCol = startCol;
-    currentRow = startRow;
-
-    loadRoom(currentCol, currentRow);
+    // The player's actual physical starting point is the special
+    // insertion room (spec §27), outside the grid entirely -- NOT
+    // (startCol,startRow), which stays the room tree's logical root
+    // (BFS/lock/section origin) and is otherwise unrelated to where the
+    // ship first appears. currentCol/currentRow are only set once the
+    // player leaves the insertion room, into (insertLinkCol,insertLinkRow).
+    inInsertRoom = TRUE;
+    // Which border its own door sits on: the OPPOSITE side of
+    // insertLinkDir (spec §29quat, N<->S / E<->W -- same "+2 mod 4" flip
+    // guidemap.c's own static opposite() and enemy.c's Enemy_opposite()
+    // use for the same 4-direction pairing), so the insertion room's
+    // exit and the periphery room's entrance read as one continuous
+    // line instead of two independently-facing doors. GuideMap_generate()
+    // (just above) already set insertLinkDir for this game. Stays fixed
+    // for the rest of this playthrough, reused identically every time
+    // the room gets regenerated (initial spawn, and any later trip back
+    // into it).
+    insertRoomDoorDir = (u8) ((insertLinkDir + 2) & 3);
+    Maze_generateInsertionRoom(insertRoomDoorDir, mapSeed);
+    Maze_draw();
     Items_drawHud();
     Player_spawnAtRoomCenter(&player);
     SPR_setPosition(playerSprite, player.x, player.y);
     SPR_setVisibility(playerSprite, VISIBLE);
     {
         u8 i;
+        // No enemies in the insertion room (spec §27) -- they stay
+        // hidden until the player reaches their first real room.
         for (i = 0; i < ENEMY_COUNT; i++)
-            SPR_setVisibility(enemySprites[i], VISIBLE);
+            SPR_setVisibility(enemySprites[i], HIDDEN);
     }
 }
 
@@ -172,6 +262,28 @@ static void drawMenu(void)
     VDP_drawText(buf, (40 - len) / 2, 13);
 
     VDP_drawText("PULSA START", 14, 18);
+}
+
+// Hard reset combo (user request): A+B+C+UP together, from anywhere
+// (menu or mid-game), drops back to the size-select menu. Checked ahead
+// of the per-state input handling below so it always takes priority over
+// whatever any of those 4 buttons would otherwise do that same frame.
+#define RESET_COMBO (BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_UP)
+
+static void resetToMenu(void)
+{
+    u8 i;
+
+    gameState = STATE_MENU;
+    mapViewOpen = FALSE;
+    inInsertRoom = FALSE; // harmless either way -- newGame() sets it back to TRUE when a new run starts
+
+    SPR_setVisibility(playerSprite, HIDDEN);
+    SPR_setVisibility(mapShipSprite, HIDDEN);
+    for (i = 0; i < ENEMY_COUNT; i++)
+        SPR_setVisibility(enemySprites[i], HIDDEN);
+
+    drawMenu();
 }
 
 int main(bool hardReset)
@@ -214,7 +326,11 @@ int main(bool hardReset)
     {
         const u16 state = JOY_readJoypad(JOY_1);
 
-        if (gameState == STATE_MENU)
+        if (((state & RESET_COMBO) == RESET_COMBO) && ((prevState & RESET_COMBO) != RESET_COMBO))
+        {
+            resetToMenu();
+        }
+        else if (gameState == STATE_MENU)
         {
             if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
             {
@@ -241,7 +357,11 @@ int main(bool hardReset)
                 Player_rotateCCW(&player);
             if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
                 Player_rotateCW(&player);
-            if ((state & BUTTON_C) && !(prevState & BUTTON_C))
+            // Map view disabled while still in the insertion room (spec
+            // §27) -- currentCol/currentRow aren't set yet, and there's
+            // nothing to preview before the player has even entered the
+            // grid.
+            if (!inInsertRoom && (state & BUTTON_C) && !(prevState & BUTTON_C))
             {
                 mapViewOpen = !mapViewOpen;
 
@@ -299,53 +419,127 @@ int main(bool hardReset)
                     SPR_setVisibility(mapShipSprite, SPR_isVisible(mapShipSprite, FALSE) ? HIDDEN : VISIBLE);
                 }
             }
+            else if (inInsertRoom)
+            {
+                // The insertion room (spec §27) has exactly one door, on
+                // whichever border insertRoomDoorDir picked for this game
+                // (spec §29ter) -- no items/enemies/locks apply here, it
+                // lives outside the normal grid entirely.
+                const bool doorN = (insertRoomDoorDir == DOOR_N);
+                const bool doorE = (insertRoomDoorDir == DOOR_E);
+                const bool doorS = (insertRoomDoorDir == DOOR_S);
+                const bool doorW = (insertRoomDoorDir == DOOR_W);
+                const u8 exitDir = Player_updateRoom(&player, doorN, doorE, doorS, doorW);
+
+                if (exitDir == exitDirForDoorDir(insertRoomDoorDir))
+                {
+                    u8 i;
+
+                    // Jump straight to the chosen perimeter room and land
+                    // right at its real border opening (spec §29,
+                    // insertLinkDir -- loadRoom() already punched it
+                    // open, same call as for any of that room's own tree
+                    // doors), aligned with that door's span.
+                    inInsertRoom = FALSE;
+                    currentCol = insertLinkCol;
+                    currentRow = insertLinkRow;
+                    loadRoom(currentCol, currentRow);
+                    positionPlayerEnteringViaDoorDir(insertLinkDir);
+
+                    for (i = 0; i < ENEMY_COUNT; i++)
+                        SPR_setVisibility(enemySprites[i], VISIBLE);
+                }
+
+                SPR_setPosition(playerSprite, player.x, player.y);
+            }
             else
             {
                 const MapCell cell = guideMap[currentRow][currentCol];
-                const u8 exitDir = Player_updateRoom(&player, cell.doorN, cell.doorE, cell.doorS, cell.doorW);
+                // The insertion link's extra door (spec §29) is merged in
+                // here too, only when this IS that specific room -- by
+                // construction insertLinkDir is always a side with no
+                // real tree door, so it can never collide with one of
+                // cell.doorN/E/S/W below.
+                const bool isInsertLinkRoom = (currentCol == insertLinkCol) && (currentRow == insertLinkRow);
+                const bool doorN = cell.doorN || (isInsertLinkRoom && (insertLinkDir == DOOR_N));
+                const bool doorE = cell.doorE || (isInsertLinkRoom && (insertLinkDir == DOOR_E));
+                const bool doorS = cell.doorS || (isInsertLinkRoom && (insertLinkDir == DOOR_S));
+                const bool doorW = cell.doorW || (isInsertLinkRoom && (insertLinkDir == DOOR_W));
+                const u8 exitDir = Player_updateRoom(&player, doorN, doorE, doorS, doorW);
 
                 if (exitDir != EXIT_NONE)
-                    enterRoomFrom(exitDir);
+                {
+                    if (isInsertLinkRoom && (exitDir == exitDirForDoorDir(insertLinkDir)))
+                    {
+                        // Walked back out through the insertion link:
+                        // return to a freshly generated insertion room
+                        // (same insertRoomDoorDir as its initial spawn,
+                        // spec §29ter -- not re-randomized), entering via
+                        // its own single door, same placement its own
+                        // arrival uses.
+                        u8 i;
+
+                        inInsertRoom = TRUE;
+                        Maze_generateInsertionRoom(insertRoomDoorDir, mapSeed);
+                        Maze_draw();
+                        positionPlayerEnteringViaDoorDir(insertRoomDoorDir);
+
+                        for (i = 0; i < ENEMY_COUNT; i++)
+                            SPR_setVisibility(enemySprites[i], HIDDEN);
+                    }
+                    else
+                    {
+                        enterRoomFrom(exitDir);
+                    }
+                }
 
                 SPR_setPosition(playerSprite, player.x, player.y);
 
-                // Physical contact pickup, order enforced (spec §13): does
-                // nothing unless (currentCol,currentRow) holds the next
-                // letter due AND the ship's box overlaps it.
-                if (Items_tryCollect(currentCol, currentRow, player.x, player.y))
+                // Skipped on the one frame that just sent the player back
+                // into the insertion room (inInsertRoom flips TRUE above)
+                // -- currentCol/currentRow are now stale (still pointing
+                // at the periphery room), and there's nothing to collect
+                // or patrol in the insertion room anyway.
+                if (!inInsertRoom)
                 {
-                    Maze_draw();           // wipes the now-collected letter's tile
-                    Items_drawInRoom(currentCol, currentRow); // no-op here, kept for symmetry with loadRoom
-                    Items_drawHud();
-                    // Unlocks the next branch (spec §16); the current
-                    // room's own doors never change from this (items only
-                    // live in dead ends), it only affects rooms not yet
-                    // loaded -- they pick up the new lock state next time
-                    // loadRoom() regenerates them.
-                    GuideMap_recomputeLocks();
-                }
+                    // Physical contact pickup, order enforced (spec §13):
+                    // does nothing unless (currentCol,currentRow) holds
+                    // the next letter due AND the ship's box overlaps it.
+                    if (Items_tryCollect(currentCol, currentRow, player.x, player.y))
+                    {
+                        Maze_draw();           // wipes the now-collected letter's tile
+                        Items_drawInRoom(currentCol, currentRow); // no-op here, kept for symmetry with loadRoom
+                        Items_drawHud();
+                        // Unlocks the next branch (spec §16); the current
+                        // room's own doors never change from this (items
+                        // only live in dead ends), it only affects rooms
+                        // not yet loaded -- they pick up the new lock
+                        // state next time loadRoom() regenerates them.
+                        GuideMap_recomputeLocks();
+                    }
 
-                // Routine patrol, no player interaction yet.
-                {
-                    u8 i, j;
+                    // Routine patrol, no player interaction yet.
+                    {
+                        u8 i, j;
 
-                    for (i = 0; i < ENEMY_COUNT; i++)
-                        Enemy_update(&enemies[i]);
+                        for (i = 0; i < ENEMY_COUNT; i++)
+                            Enemy_update(&enemies[i]);
 
-                    // Bounce off each other: reverse both on overlap. A
-                    // brief 1-frame overlap before they separate is
-                    // imperceptible at 60fps and there's no damage/health
-                    // model yet to make it matter.
-                    for (i = 0; i < ENEMY_COUNT; i++)
-                        for (j = i + 1; j < ENEMY_COUNT; j++)
-                            if (Enemy_overlaps(&enemies[i], &enemies[j]))
-                            {
-                                enemies[i].dir = Enemy_opposite(enemies[i].dir);
-                                enemies[j].dir = Enemy_opposite(enemies[j].dir);
-                            }
+                        // Bounce off each other: reverse both on overlap.
+                        // A brief 1-frame overlap before they separate is
+                        // imperceptible at 60fps and there's no damage/
+                        // health model yet to make it matter.
+                        for (i = 0; i < ENEMY_COUNT; i++)
+                            for (j = i + 1; j < ENEMY_COUNT; j++)
+                                if (Enemy_overlaps(&enemies[i], &enemies[j]))
+                                {
+                                    enemies[i].dir = Enemy_opposite(enemies[i].dir);
+                                    enemies[j].dir = Enemy_opposite(enemies[j].dir);
+                                }
 
-                    for (i = 0; i < ENEMY_COUNT; i++)
-                        SPR_setPosition(enemySprites[i], enemies[i].x, enemies[i].y);
+                        for (i = 0; i < ENEMY_COUNT; i++)
+                            SPR_setPosition(enemySprites[i], enemies[i].x, enemies[i].y);
+                    }
                 }
             }
         }

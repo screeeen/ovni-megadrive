@@ -271,6 +271,90 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
     }
 }
 
+// Fixed dither cell used throughout the insertion room (spec §27) -- any
+// single nonzero value works exactly as far as carve()/bridgeToSeed() are
+// concerned (they only ever distinguish PATH=0 from "not yet carved"), so
+// this just picks one deliberately instead of the usual randomWallVariant()
+// mix, giving the room a uniform, deliberately distinct look. Never
+// re-hued per section (spec §18 doesn't apply -- this room lives outside
+// the grid/tree entirely, so wallHueBase is left untouched here).
+#define INSERT_WALL_VARIANT 1
+
+// Numeric convention matching guidemap.h's DOOR_N/E/S/W (0/1/2/3) --
+// defined locally instead of #including guidemap.h, see maze.h's comment
+// on Maze_generateInsertionRoom.
+#define INSERT_DOOR_N 0
+#define INSERT_DOOR_E 1
+#define INSERT_DOOR_S 2
+#define INSERT_DOOR_W 3
+
+void Maze_generateInsertionRoom(u8 doorDir, u16 roomSeed)
+{
+    s16 x, y;
+    s16 anchorX, anchorY;
+
+    setRandomSeed(roomSeed);
+
+    for (y = 0; y < MAZE_H; y++)
+        for (x = 0; x < MAZE_W; x++)
+            grid[y][x] = INSERT_WALL_VARIANT;
+
+    switch (doorDir)
+    {
+        case INSERT_DOOR_N: anchorX = ANCHOR_N_X; anchorY = ANCHOR_N_Y; break;
+        case INSERT_DOOR_E: anchorX = ANCHOR_E_X; anchorY = ANCHOR_E_Y; break;
+        case INSERT_DOOR_S: anchorX = ANCHOR_S_X; anchorY = ANCHOR_S_Y; break;
+        default:             anchorX = ANCHOR_W_X; anchorY = ANCHOR_W_Y; break; // INSERT_DOOR_W
+    }
+
+    forcedTargetCount = 1;
+    forcedTargetX[0] = anchorX;
+    forcedTargetY[0] = anchorY;
+
+    carve(ROOM_SEED_COL, ROOM_SEED_ROW);
+
+    if (grid[anchorY][anchorX] != PATH)
+        bridgeToSeed(anchorX, anchorY);
+
+    for (x = 0; x < MAZE_W; x++)
+    {
+        grid[0][x] = INSERT_WALL_VARIANT;
+        grid[MAZE_H - 1][x] = INSERT_WALL_VARIANT;
+    }
+    for (y = 0; y < MAZE_H; y++)
+    {
+        grid[y][0] = INSERT_WALL_VARIANT;
+        grid[y][MAZE_W - 1] = INSERT_WALL_VARIANT;
+    }
+
+    // The room's single door, on whichever border doorDir picked (spec
+    // §29ter: randomized once per game, no longer always south) -- its
+    // one exit "into the world", leading to insertLinkCol/Row's own
+    // insertLinkDir border (guidemap.c), which main.c punches open as a
+    // genuine matching door on that room too (spec §29), so the player
+    // arrives at (and can walk back out through) a real opening, not a
+    // blind teleport into the room's center.
+    switch (doorDir)
+    {
+        case INSERT_DOOR_N:
+            grid[0][ANCHOR_N_X] = PATH; grid[0][ANCHOR_N_X + 1] = PATH;
+            grid[1][ANCHOR_N_X] = PATH; grid[1][ANCHOR_N_X + 1] = PATH;
+            break;
+        case INSERT_DOOR_S:
+            grid[MAZE_H - 1][ANCHOR_S_X] = PATH; grid[MAZE_H - 1][ANCHOR_S_X + 1] = PATH;
+            grid[MAZE_H - 2][ANCHOR_S_X] = PATH; grid[MAZE_H - 2][ANCHOR_S_X + 1] = PATH;
+            break;
+        case INSERT_DOOR_E:
+            grid[ANCHOR_E_Y][MAZE_W - 1] = PATH; grid[ANCHOR_E_Y + 1][MAZE_W - 1] = PATH;
+            grid[ANCHOR_E_Y][MAZE_W - 2] = PATH; grid[ANCHOR_E_Y + 1][MAZE_W - 2] = PATH;
+            break;
+        default: // INSERT_DOOR_W
+            grid[ANCHOR_W_Y][0] = PATH; grid[ANCHOR_W_Y + 1][0] = PATH;
+            grid[ANCHOR_W_Y][1] = PATH; grid[ANCHOR_W_Y + 1][1] = PATH;
+            break;
+    }
+}
+
 void Maze_loadGraphics(void)
 {
     // index0/1: exact colors from ovni's src/image_edit.png (dither wall

@@ -45,6 +45,19 @@ extern MapCell guideMap[MAX_MAP_ROWS][MAX_MAP_COLS];
 extern u8 startCol, startRow;
 extern u8 goalCol, goalRow;
 
+// Which perimeter room, and which of its (necessarily neighbor-less)
+// border sides, the special insertion room's single door leads into
+// (spec §27/§29) -- a REAL border opening on that room's insertLinkDir
+// side, not a blind teleport into its center. main.c's actual physical
+// starting point for the player, distinct from startCol/startRow (which
+// stays the room tree's logical root: BFS/lock/section origin, unrelated
+// to where the ship first appears). insertLinkDir is DOOR_N/E/S/W; by
+// construction it can never coincide with a real door direction the room
+// already has toward a grid neighbor (only sides genuinely missing a
+// neighbor are ever offered as candidates), so main.c can always tell
+// the two apart unambiguously.
+extern u8 insertLinkCol, insertLinkRow, insertLinkDir;
+
 // Item rooms (spec §13): letters A..A+ITEM_COUNT-1, one per dead-end room
 // (exactly 1 door), picked by farthest-point sampling so they end up
 // spread apart from the start AND from each other, not clustered.
@@ -55,15 +68,17 @@ extern u8 itemCol[ITEM_COUNT];
 extern u8 itemRow[ITEM_COUNT];
 
 // Carves a new room tree via randomized Prim's algorithm (spec §4.1), grown
-// from a random (startCol, startRow); prunes some leaves (spec §4.2); then
-// picks (goalCol, goalRow) at least GOAL_MIN_DISTANCE_PERCENT of the start
-// room's eccentricity away, reachable by construction since it's the same
+// from a random (startCol, startRow); prunes some leaves (spec §4.2); picks
+// (insertLinkCol, insertLinkRow, insertLinkDir) among the map's perimeter
+// rooms and their free border sides (spec §27/§29); then picks (goalCol,
+// goalRow) at least GOAL_MIN_DISTANCE_PERCENT of the start room's
+// eccentricity away, reachable by construction since it's the same
 // spanning tree (spec §4.3); then picks itemCol[]/itemRow[] (spec §13).
-// guideMap/startCol/startRow/goalCol/goalRow/itemCol/itemRow are all valid
-// once this returns, and so is the per-room section (spec §18, see
-// GuideMap_roomSection below) -- it's purely structural (final door
-// topology only), so it's computed here and never needs recomputing
-// afterwards, unlike the item-dependent lock state.
+// guideMap/startCol/startRow/goalCol/goalRow/insertLinkCol/insertLinkRow/
+// insertLinkDir/itemCol/itemRow are all valid once this returns, and so is
+// the per-room section (spec §18, see GuideMap_roomSection below) -- it's
+// purely structural (final door topology only), so it's computed here and
+// never needs recomputing afterwards, unlike the item-dependent lock state.
 void GuideMap_generate(void);
 
 bool GuideMap_hasDoor(u8 col, u8 row, u8 dir);
