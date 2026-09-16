@@ -49,7 +49,11 @@ bool Player_update(Player *p);
 // bounces exactly like Player_update; reaching an active one, aligned with
 // its 2-cell span, returns which border was crossed instead of bouncing --
 // the caller (main.c) is responsible for loading the next room and
-// repositioning the player.
-u8 Player_updateRoom(Player *p, bool doorN, bool doorE, bool doorS, bool doorW);
+// repositioning the player. doorOffsetN/S give the maze COLUMN of the
+// north/south door's span, doorOffsetE/W give the maze ROW of the east/
+// west door's span (spec §30: no longer always MAZE_DOOR_COL/
+// MAZE_DOOR_ROW) -- ignored where the matching doorX is FALSE.
+u8 Player_updateRoom(Player *p, bool doorN, bool doorE, bool doorS, bool doorW,
+                      u8 doorOffsetN, u8 doorOffsetE, u8 doorOffsetS, u8 doorOffsetW);
 
 #endif

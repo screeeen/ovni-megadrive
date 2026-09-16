@@ -90,35 +90,52 @@ static u8 exitDirForDoorDir(u8 doorDir)
 }
 
 // Places the player just inside the border used to enter the room they
-// were just loaded into, aligned with that door's span (spec §29) --
-// used for the insertion-link transition, which (unlike enterRoomFrom)
-// isn't stepping to a grid-adjacent (col,row), so there's no exitDir to
-// derive this from the usual way. "Entering via DOOR_N" is the same
-// physical scenario as enterRoomFrom's EXIT_SOUTH case (left the previous
-// room south, entered this one's north side), and so on around -- this
-// mirrors that same placement table, just indexed by the new room's own
-// entry side instead of the old room's exit side.
-static void positionPlayerEnteringViaDoorDir(u8 doorDir)
+// were just loaded into, aligned with that door's actual span (spec §29,
+// offset-aware per spec §30) -- used for the insertion-link transition,
+// which (unlike enterRoomFrom) isn't stepping to a grid-adjacent
+// (col,row), so there's no exitDir to derive this from the usual way.
+// "Entering via DOOR_N" is the same physical scenario as enterRoomFrom's
+// EXIT_SOUTH case (left the previous room south, entered this one's
+// north side), and so on around -- this mirrors that same placement
+// table, just indexed by the new room's own entry side instead of the
+// old room's exit side. offset is the door's column (N/S) or row (E/W),
+// spec §30 -- no longer always MAZE_DOOR_COL/MAZE_DOOR_ROW.
+static void positionPlayerEnteringViaDoorDir(u8 doorDir, u8 offset)
 {
     switch (doorDir)
     {
         case DOOR_N:
             player.y = MAZE_TILE_PX;
-            player.x = MAZE_DOOR_COL * MAZE_TILE_PX;
+            player.x = offset * MAZE_TILE_PX;
             break;
         case DOOR_S:
             player.y = MAZE_TILE_PX * (MAZE_H - 2);
-            player.x = MAZE_DOOR_COL * MAZE_TILE_PX;
+            player.x = offset * MAZE_TILE_PX;
             break;
         case DOOR_E:
             player.x = MAZE_TILE_PX * (MAZE_W - 2);
-            player.y = MAZE_DOOR_ROW * MAZE_TILE_PX;
+            player.y = offset * MAZE_TILE_PX;
             break;
         default: // DOOR_W
             player.x = MAZE_TILE_PX;
-            player.y = MAZE_DOOR_ROW * MAZE_TILE_PX;
+            player.y = offset * MAZE_TILE_PX;
             break;
     }
+}
+
+// Offset (spec §30) of (col,row)'s door in direction dir -- transparently
+// covers the insertion link's extra door too (spec §29): when (col,row)
+// is (insertLinkCol,insertLinkRow) and dir is insertLinkDir, that edge
+// isn't a real tree door so GuideMap_doorOffset wouldn't have a
+// meaningful value for it; insertLinkOffset is used instead. Every other
+// case reads the real per-edge value guidemap.c already guarantees
+// matches on both sides of that door.
+static u8 doorOffsetFor(u8 col, u8 row, u8 dir)
+{
+    if ((col == insertLinkCol) && (row == insertLinkRow) && (dir == insertLinkDir))
+        return insertLinkOffset;
+
+    return GuideMap_doorOffset(col, row, dir);
 }
 
 static void loadRoom(u8 col, u8 row)
@@ -146,10 +163,19 @@ static void loadRoom(u8 col, u8 row)
     const bool doorE = cell.doorE || (isInsertLinkRoom && (insertLinkDir == DOOR_E));
     const bool doorS = cell.doorS || (isInsertLinkRoom && (insertLinkDir == DOOR_S));
     const bool doorW = cell.doorW || (isInsertLinkRoom && (insertLinkDir == DOOR_W));
+    // Where each of those doors sits along its border (spec §30) --
+    // array indices match guidemap.h's DOOR_N/E/S/W numbering (0/1/2/3),
+    // same convention maze.c's doorOffsets[4] parameter expects.
+    const u8 doorOffsets[4] = {
+        doorOffsetFor(col, row, DOOR_N),
+        doorOffsetFor(col, row, DOOR_E),
+        doorOffsetFor(col, row, DOOR_S),
+        doorOffsetFor(col, row, DOOR_W),
+    };
     u8 i;
 
     Maze_generateRoom(doorN, doorE, doorS, doorW,
-                       lockedN, lockedE, lockedS, lockedW, sectionHue, seed);
+                       lockedN, lockedE, lockedS, lockedW, doorOffsets, sectionHue, seed);
     Maze_draw();
     Items_drawInRoom(col, row);
 
@@ -169,38 +195,22 @@ static void loadRoom(u8 col, u8 row)
 
 // Room transition (spec §7): move to the neighboring cell, regenerate its
 // (deterministic) layout, and place the player just inside the opposite
-// border, aligned with the door's span, still heading the same direction.
+// border, aligned with that door's actual span (spec §30), still heading
+// the same direction.
 static void enterRoomFrom(u8 exitDir)
 {
+    u8 enterDoorDir;
+
     switch (exitDir)
     {
-        case EXIT_NORTH: currentRow--; break;
-        case EXIT_EAST:  currentCol++; break;
-        case EXIT_SOUTH: currentRow++; break;
-        case EXIT_WEST:  currentCol--; break;
+        case EXIT_NORTH: currentRow--; enterDoorDir = DOOR_S; break;
+        case EXIT_EAST:  currentCol++; enterDoorDir = DOOR_W; break;
+        case EXIT_SOUTH: currentRow++; enterDoorDir = DOOR_N; break;
+        default:         currentCol--; enterDoorDir = DOOR_E; break; // EXIT_WEST
     }
 
     loadRoom(currentCol, currentRow);
-
-    switch (exitDir)
-    {
-        case EXIT_NORTH:
-            player.y = MAZE_TILE_PX * (MAZE_H - 2);
-            player.x = MAZE_DOOR_COL * MAZE_TILE_PX;
-            break;
-        case EXIT_SOUTH:
-            player.y = MAZE_TILE_PX;
-            player.x = MAZE_DOOR_COL * MAZE_TILE_PX;
-            break;
-        case EXIT_EAST:
-            player.x = MAZE_TILE_PX;
-            player.y = MAZE_DOOR_ROW * MAZE_TILE_PX;
-            break;
-        case EXIT_WEST:
-            player.x = MAZE_TILE_PX * (MAZE_W - 2);
-            player.y = MAZE_DOOR_ROW * MAZE_TILE_PX;
-            break;
-    }
+    positionPlayerEnteringViaDoorDir(enterDoorDir, doorOffsetFor(currentCol, currentRow, enterDoorDir));
 }
 
 static void newGame(void)
@@ -233,7 +243,9 @@ static void newGame(void)
     // the room gets regenerated (initial spawn, and any later trip back
     // into it).
     insertRoomDoorDir = (u8) ((insertLinkDir + 2) & 3);
-    Maze_generateInsertionRoom(insertRoomDoorDir, mapSeed);
+    // Same offset as insertLinkOffset (spec §30): opposite directions
+    // (N<->S, E<->W) share the same axis, so no translation is needed.
+    Maze_generateInsertionRoom(insertRoomDoorDir, insertLinkOffset, mapSeed);
     Maze_draw();
     Items_drawHud();
     Player_spawnAtRoomCenter(&player);
@@ -429,7 +441,14 @@ int main(bool hardReset)
                 const bool doorE = (insertRoomDoorDir == DOOR_E);
                 const bool doorS = (insertRoomDoorDir == DOOR_S);
                 const bool doorW = (insertRoomDoorDir == DOOR_W);
-                const u8 exitDir = Player_updateRoom(&player, doorN, doorE, doorS, doorW);
+                // Only insertRoomDoorDir's own entry is meaningful (the
+                // other 3 are FALSE above, so Player_updateRoom never
+                // looks at their offset) -- insertLinkOffset is correct
+                // for all 4 slots regardless, since opposite directions
+                // share the axis (spec §29quat/§30).
+                const u8 exitDir = Player_updateRoom(&player, doorN, doorE, doorS, doorW,
+                                                      insertLinkOffset, insertLinkOffset,
+                                                      insertLinkOffset, insertLinkOffset);
 
                 if (exitDir == exitDirForDoorDir(insertRoomDoorDir))
                 {
@@ -439,12 +458,13 @@ int main(bool hardReset)
                     // right at its real border opening (spec §29,
                     // insertLinkDir -- loadRoom() already punched it
                     // open, same call as for any of that room's own tree
-                    // doors), aligned with that door's span.
+                    // doors), aligned with that door's actual span (spec
+                    // §30).
                     inInsertRoom = FALSE;
                     currentCol = insertLinkCol;
                     currentRow = insertLinkRow;
                     loadRoom(currentCol, currentRow);
-                    positionPlayerEnteringViaDoorDir(insertLinkDir);
+                    positionPlayerEnteringViaDoorDir(insertLinkDir, insertLinkOffset);
 
                     for (i = 0; i < ENEMY_COUNT; i++)
                         SPR_setVisibility(enemySprites[i], VISIBLE);
@@ -465,7 +485,11 @@ int main(bool hardReset)
                 const bool doorE = cell.doorE || (isInsertLinkRoom && (insertLinkDir == DOOR_E));
                 const bool doorS = cell.doorS || (isInsertLinkRoom && (insertLinkDir == DOOR_S));
                 const bool doorW = cell.doorW || (isInsertLinkRoom && (insertLinkDir == DOOR_W));
-                const u8 exitDir = Player_updateRoom(&player, doorN, doorE, doorS, doorW);
+                const u8 exitDir = Player_updateRoom(&player, doorN, doorE, doorS, doorW,
+                                                      doorOffsetFor(currentCol, currentRow, DOOR_N),
+                                                      doorOffsetFor(currentCol, currentRow, DOOR_E),
+                                                      doorOffsetFor(currentCol, currentRow, DOOR_S),
+                                                      doorOffsetFor(currentCol, currentRow, DOOR_W));
 
                 if (exitDir != EXIT_NONE)
                 {
@@ -480,9 +504,9 @@ int main(bool hardReset)
                         u8 i;
 
                         inInsertRoom = TRUE;
-                        Maze_generateInsertionRoom(insertRoomDoorDir, mapSeed);
+                        Maze_generateInsertionRoom(insertRoomDoorDir, insertLinkOffset, mapSeed);
                         Maze_draw();
-                        positionPlayerEnteringViaDoorDir(insertRoomDoorDir);
+                        positionPlayerEnteringViaDoorDir(insertRoomDoorDir, insertLinkOffset);
 
                         for (i = 0; i < ENEMY_COUNT; i++)
                             SPR_setVisibility(enemySprites[i], HIDDEN);

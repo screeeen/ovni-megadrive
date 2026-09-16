@@ -167,51 +167,85 @@ void Maze_generate(void)
     grid[endY - 2][endX - 1] = PATH;
 }
 
-// Interior even/even anchor points near each border, on the same step-2
-// lattice carve() walks (see docs/spec-mapa-guia.md §5). Doors are punched
-// 2 cells wide, bridging the border down to whichever anchor's block was
-// force-carved -- same trick as Maze_generate()'s endX/endY punch-through,
-// generalized to up to 4 targets instead of 1.
 // The room's carve seed doubles as the player's spawn point in the very
 // first room of a run (spec §5) -- it's the same (col,row), just named
 // differently depending on which role is relevant at the call site.
 #define ROOM_SEED_COL MAZE_DOOR_COL
 #define ROOM_SEED_ROW MAZE_DOOR_ROW
 
-#define ANCHOR_N_X ROOM_SEED_COL
-#define ANCHOR_N_Y 2
-#define ANCHOR_S_X ROOM_SEED_COL
-#define ANCHOR_S_Y (MAZE_H - 4)
-#define ANCHOR_E_X (MAZE_W - 4)
-#define ANCHOR_E_Y ROOM_SEED_ROW
-#define ANCHOR_W_X 2
-#define ANCHOR_W_Y ROOM_SEED_ROW
+// Numeric convention matching guidemap.h's DOOR_N/E/S/W (0/1/2/3) --
+// defined locally instead of #including guidemap.h, see maze.h's comment
+// on Maze_generateRoom/Maze_generateInsertionRoom. Used to index
+// doorOffsets[4] and the anchorX/Y[4] scratch arrays below.
+#define MAZE_DIR_N 0
+#define MAZE_DIR_E 1
+#define MAZE_DIR_S 2
+#define MAZE_DIR_W 3
+
+// How far into the room from each border a door's anchor point sits
+// (spec §5) -- fixed regardless of WHERE along that border the door is
+// (spec §30: that's the other axis, doorOffsets[dir]/doorOffset).
+#define ANCHOR_DEPTH_N 2
+#define ANCHOR_DEPTH_S (MAZE_H - 4)
+#define ANCHOR_DEPTH_E (MAZE_W - 4)
+#define ANCHOR_DEPTH_W 2
+
+// Combines a direction's fixed depth with its along-border offset (spec
+// §30) into the actual (x,y) anchor point carve() targets for that door.
+static void anchorForDoor(u8 dir, u8 offset, s16 *outX, s16 *outY)
+{
+    switch (dir)
+    {
+        case MAZE_DIR_N: *outX = offset;           *outY = ANCHOR_DEPTH_N; break;
+        case MAZE_DIR_S: *outX = offset;           *outY = ANCHOR_DEPTH_S; break;
+        case MAZE_DIR_E: *outX = ANCHOR_DEPTH_E;   *outY = offset;         break;
+        default:         *outX = ANCHOR_DEPTH_W;   *outY = offset;         break; // MAZE_DIR_W
+    }
+}
 
 // carve()'s "walls>=2 OR isForcedTarget" trick only visits a target if the
 // DFS's natural wandering happens to reach a cell adjacent to it first --
-// rare misses do happen (~0.2% of room/door combinations, spec §11 Paso3).
-// Every ANCHOR_* shares an axis with (ROOM_SEED_COL, ROOM_SEED_ROW) by
-// construction, so a straight single-width line always reconnects a missed
-// target back to the seed, which carve() always visits first.
+// misses do happen, and more often now that door anchors (spec §30) can
+// land anywhere along their border instead of always sharing an axis with
+// (ROOM_SEED_COL, ROOM_SEED_ROW). Moves ONE axis at a time -- first
+// closes the X gap (marking every intermediate cell along that row),
+// then the Y gap (along the resulting column) -- an "L-shaped" path
+// where every consecutive pair of marked cells shares a full edge.
+//
+// BUG FIXED (spec §30bis, found by fuzzing): an earlier version moved
+// both axes in the same step whenever they both still differed --
+// producing a staircase where consecutive cells only touched at a
+// CORNER (e.g. (3,2) and (4,3)), not an edge. That was invisible before
+// this feature because every old anchor shared an axis with the seed (so
+// only one coordinate ever needed to move, degenerating to a straight
+// line either way) -- with independent per-door offsets, anchors
+// routinely differ on both axes, and the diagonal version left the
+// anchor end of the bridge completely disconnected from 4-directional
+// player movement despite every cell along it reading as PATH.
 static void bridgeToSeed(s16 x, s16 y)
 {
     s16 cx = x, cy = y;
 
-    while ((cx != ROOM_SEED_COL) || (cy != ROOM_SEED_ROW))
+    while (cx != ROOM_SEED_COL)
     {
         grid[cy][cx] = PATH;
         if (cx < ROOM_SEED_COL) cx++;
-        else if (cx > ROOM_SEED_COL) cx--;
+        else cx--;
+    }
+    while (cy != ROOM_SEED_ROW)
+    {
+        grid[cy][cx] = PATH;
         if (cy < ROOM_SEED_ROW) cy++;
-        else if (cy > ROOM_SEED_ROW) cy--;
+        else cy--;
     }
 }
 
 void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
                         bool lockedN, bool lockedE, bool lockedS, bool lockedW,
-                        u8 sectionHue, u16 roomSeed)
+                        const u8 doorOffsets[4], u8 sectionHue, u16 roomSeed)
 {
     s16 x, y;
+    s16 anchorX[4], anchorY[4]; // indexed by MAZE_DIR_N/E/S/W
 
     wallHueBase = sectionHue * WALL_VARIANTS; // spec §18: every wall cell in this room comes from that hue's block
     setRandomSeed(roomSeed);
@@ -220,18 +254,23 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
         for (x = 0; x < MAZE_W; x++)
             grid[y][x] = randomWallVariant();
 
+    anchorForDoor(MAZE_DIR_N, doorOffsets[MAZE_DIR_N], &anchorX[MAZE_DIR_N], &anchorY[MAZE_DIR_N]);
+    anchorForDoor(MAZE_DIR_E, doorOffsets[MAZE_DIR_E], &anchorX[MAZE_DIR_E], &anchorY[MAZE_DIR_E]);
+    anchorForDoor(MAZE_DIR_S, doorOffsets[MAZE_DIR_S], &anchorX[MAZE_DIR_S], &anchorY[MAZE_DIR_S]);
+    anchorForDoor(MAZE_DIR_W, doorOffsets[MAZE_DIR_W], &anchorX[MAZE_DIR_W], &anchorY[MAZE_DIR_W]);
+
     forcedTargetCount = 0;
-    if (doorN) { forcedTargetX[forcedTargetCount] = ANCHOR_N_X; forcedTargetY[forcedTargetCount] = ANCHOR_N_Y; forcedTargetCount++; }
-    if (doorE) { forcedTargetX[forcedTargetCount] = ANCHOR_E_X; forcedTargetY[forcedTargetCount] = ANCHOR_E_Y; forcedTargetCount++; }
-    if (doorS) { forcedTargetX[forcedTargetCount] = ANCHOR_S_X; forcedTargetY[forcedTargetCount] = ANCHOR_S_Y; forcedTargetCount++; }
-    if (doorW) { forcedTargetX[forcedTargetCount] = ANCHOR_W_X; forcedTargetY[forcedTargetCount] = ANCHOR_W_Y; forcedTargetCount++; }
+    if (doorN) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_N]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_N]; forcedTargetCount++; }
+    if (doorE) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_E]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_E]; forcedTargetCount++; }
+    if (doorS) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_S]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_S]; forcedTargetCount++; }
+    if (doorW) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_W]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_W]; forcedTargetCount++; }
 
     carve(ROOM_SEED_COL, ROOM_SEED_ROW);
 
-    if (doorN && (grid[ANCHOR_N_Y][ANCHOR_N_X] != PATH)) bridgeToSeed(ANCHOR_N_X, ANCHOR_N_Y);
-    if (doorE && (grid[ANCHOR_E_Y][ANCHOR_E_X] != PATH)) bridgeToSeed(ANCHOR_E_X, ANCHOR_E_Y);
-    if (doorS && (grid[ANCHOR_S_Y][ANCHOR_S_X] != PATH)) bridgeToSeed(ANCHOR_S_X, ANCHOR_S_Y);
-    if (doorW && (grid[ANCHOR_W_Y][ANCHOR_W_X] != PATH)) bridgeToSeed(ANCHOR_W_X, ANCHOR_W_Y);
+    if (doorN && (grid[anchorY[MAZE_DIR_N]][anchorX[MAZE_DIR_N]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_N], anchorY[MAZE_DIR_N]);
+    if (doorE && (grid[anchorY[MAZE_DIR_E]][anchorX[MAZE_DIR_E]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_E], anchorY[MAZE_DIR_E]);
+    if (doorS && (grid[anchorY[MAZE_DIR_S]][anchorX[MAZE_DIR_S]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_S], anchorY[MAZE_DIR_S]);
+    if (doorW && (grid[anchorY[MAZE_DIR_W]][anchorX[MAZE_DIR_W]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_W], anchorY[MAZE_DIR_W]);
 
     for (x = 0; x < MAZE_W; x++)
     {
@@ -248,26 +287,31 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
     // randomWallVariant() calls per cell instead of PATH -- same as any
     // other wall cell in this room (spec §19), so it blends in with the
     // room's own hue and dither noise instead of standing out as its own
-    // fixed-color shape.
+    // fixed-color shape. Position along the border is doorOffsets[dir]
+    // now (spec §30), not always the room's own center column/row.
     if (doorN)
     {
-        grid[0][ANCHOR_N_X] = lockedN ? randomWallVariant() : PATH; grid[0][ANCHOR_N_X + 1] = lockedN ? randomWallVariant() : PATH;
-        grid[1][ANCHOR_N_X] = lockedN ? randomWallVariant() : PATH; grid[1][ANCHOR_N_X + 1] = lockedN ? randomWallVariant() : PATH;
+        const s16 c = anchorX[MAZE_DIR_N];
+        grid[0][c] = lockedN ? randomWallVariant() : PATH; grid[0][c + 1] = lockedN ? randomWallVariant() : PATH;
+        grid[1][c] = lockedN ? randomWallVariant() : PATH; grid[1][c + 1] = lockedN ? randomWallVariant() : PATH;
     }
     if (doorS)
     {
-        grid[MAZE_H - 1][ANCHOR_S_X] = lockedS ? randomWallVariant() : PATH; grid[MAZE_H - 1][ANCHOR_S_X + 1] = lockedS ? randomWallVariant() : PATH;
-        grid[MAZE_H - 2][ANCHOR_S_X] = lockedS ? randomWallVariant() : PATH; grid[MAZE_H - 2][ANCHOR_S_X + 1] = lockedS ? randomWallVariant() : PATH;
+        const s16 c = anchorX[MAZE_DIR_S];
+        grid[MAZE_H - 1][c] = lockedS ? randomWallVariant() : PATH; grid[MAZE_H - 1][c + 1] = lockedS ? randomWallVariant() : PATH;
+        grid[MAZE_H - 2][c] = lockedS ? randomWallVariant() : PATH; grid[MAZE_H - 2][c + 1] = lockedS ? randomWallVariant() : PATH;
     }
     if (doorE)
     {
-        grid[ANCHOR_E_Y][MAZE_W - 1] = lockedE ? randomWallVariant() : PATH; grid[ANCHOR_E_Y + 1][MAZE_W - 1] = lockedE ? randomWallVariant() : PATH;
-        grid[ANCHOR_E_Y][MAZE_W - 2] = lockedE ? randomWallVariant() : PATH; grid[ANCHOR_E_Y + 1][MAZE_W - 2] = lockedE ? randomWallVariant() : PATH;
+        const s16 r = anchorY[MAZE_DIR_E];
+        grid[r][MAZE_W - 1] = lockedE ? randomWallVariant() : PATH; grid[r + 1][MAZE_W - 1] = lockedE ? randomWallVariant() : PATH;
+        grid[r][MAZE_W - 2] = lockedE ? randomWallVariant() : PATH; grid[r + 1][MAZE_W - 2] = lockedE ? randomWallVariant() : PATH;
     }
     if (doorW)
     {
-        grid[ANCHOR_W_Y][0] = lockedW ? randomWallVariant() : PATH; grid[ANCHOR_W_Y + 1][0] = lockedW ? randomWallVariant() : PATH;
-        grid[ANCHOR_W_Y][1] = lockedW ? randomWallVariant() : PATH; grid[ANCHOR_W_Y + 1][1] = lockedW ? randomWallVariant() : PATH;
+        const s16 r = anchorY[MAZE_DIR_W];
+        grid[r][0] = lockedW ? randomWallVariant() : PATH; grid[r + 1][0] = lockedW ? randomWallVariant() : PATH;
+        grid[r][1] = lockedW ? randomWallVariant() : PATH; grid[r + 1][1] = lockedW ? randomWallVariant() : PATH;
     }
 }
 
@@ -280,15 +324,7 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
 // the grid/tree entirely, so wallHueBase is left untouched here).
 #define INSERT_WALL_VARIANT 1
 
-// Numeric convention matching guidemap.h's DOOR_N/E/S/W (0/1/2/3) --
-// defined locally instead of #including guidemap.h, see maze.h's comment
-// on Maze_generateInsertionRoom.
-#define INSERT_DOOR_N 0
-#define INSERT_DOOR_E 1
-#define INSERT_DOOR_S 2
-#define INSERT_DOOR_W 3
-
-void Maze_generateInsertionRoom(u8 doorDir, u16 roomSeed)
+void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u16 roomSeed)
 {
     s16 x, y;
     s16 anchorX, anchorY;
@@ -299,13 +335,7 @@ void Maze_generateInsertionRoom(u8 doorDir, u16 roomSeed)
         for (x = 0; x < MAZE_W; x++)
             grid[y][x] = INSERT_WALL_VARIANT;
 
-    switch (doorDir)
-    {
-        case INSERT_DOOR_N: anchorX = ANCHOR_N_X; anchorY = ANCHOR_N_Y; break;
-        case INSERT_DOOR_E: anchorX = ANCHOR_E_X; anchorY = ANCHOR_E_Y; break;
-        case INSERT_DOOR_S: anchorX = ANCHOR_S_X; anchorY = ANCHOR_S_Y; break;
-        default:             anchorX = ANCHOR_W_X; anchorY = ANCHOR_W_Y; break; // INSERT_DOOR_W
-    }
+    anchorForDoor(doorDir, doorOffset, &anchorX, &anchorY);
 
     forcedTargetCount = 1;
     forcedTargetX[0] = anchorX;
@@ -327,30 +357,31 @@ void Maze_generateInsertionRoom(u8 doorDir, u16 roomSeed)
         grid[y][MAZE_W - 1] = INSERT_WALL_VARIANT;
     }
 
-    // The room's single door, on whichever border doorDir picked (spec
-    // §29ter: randomized once per game, no longer always south) -- its
-    // one exit "into the world", leading to insertLinkCol/Row's own
-    // insertLinkDir border (guidemap.c), which main.c punches open as a
-    // genuine matching door on that room too (spec §29), so the player
-    // arrives at (and can walk back out through) a real opening, not a
-    // blind teleport into the room's center.
+    // The room's single door, on whichever border/offset doorDir/
+    // doorOffset picked (spec §29ter/§30: randomized once per game, no
+    // longer always centered on the south border) -- its one exit "into
+    // the world", leading to insertLinkCol/Row's own insertLinkDir
+    // border (guidemap.c), which main.c punches open as a genuine
+    // matching door on that room too (spec §29), so the player arrives
+    // at (and can walk back out through) a real opening, not a blind
+    // teleport into the room's center.
     switch (doorDir)
     {
-        case INSERT_DOOR_N:
-            grid[0][ANCHOR_N_X] = PATH; grid[0][ANCHOR_N_X + 1] = PATH;
-            grid[1][ANCHOR_N_X] = PATH; grid[1][ANCHOR_N_X + 1] = PATH;
+        case MAZE_DIR_N:
+            grid[0][anchorX] = PATH; grid[0][anchorX + 1] = PATH;
+            grid[1][anchorX] = PATH; grid[1][anchorX + 1] = PATH;
             break;
-        case INSERT_DOOR_S:
-            grid[MAZE_H - 1][ANCHOR_S_X] = PATH; grid[MAZE_H - 1][ANCHOR_S_X + 1] = PATH;
-            grid[MAZE_H - 2][ANCHOR_S_X] = PATH; grid[MAZE_H - 2][ANCHOR_S_X + 1] = PATH;
+        case MAZE_DIR_S:
+            grid[MAZE_H - 1][anchorX] = PATH; grid[MAZE_H - 1][anchorX + 1] = PATH;
+            grid[MAZE_H - 2][anchorX] = PATH; grid[MAZE_H - 2][anchorX + 1] = PATH;
             break;
-        case INSERT_DOOR_E:
-            grid[ANCHOR_E_Y][MAZE_W - 1] = PATH; grid[ANCHOR_E_Y + 1][MAZE_W - 1] = PATH;
-            grid[ANCHOR_E_Y][MAZE_W - 2] = PATH; grid[ANCHOR_E_Y + 1][MAZE_W - 2] = PATH;
+        case MAZE_DIR_E:
+            grid[anchorY][MAZE_W - 1] = PATH; grid[anchorY + 1][MAZE_W - 1] = PATH;
+            grid[anchorY][MAZE_W - 2] = PATH; grid[anchorY + 1][MAZE_W - 2] = PATH;
             break;
-        default: // INSERT_DOOR_W
-            grid[ANCHOR_W_Y][0] = PATH; grid[ANCHOR_W_Y + 1][0] = PATH;
-            grid[ANCHOR_W_Y][1] = PATH; grid[ANCHOR_W_Y + 1][1] = PATH;
+        default: // MAZE_DIR_W
+            grid[anchorY][0] = PATH; grid[anchorY + 1][0] = PATH;
+            grid[anchorY][1] = PATH; grid[anchorY + 1][1] = PATH;
             break;
     }
 }

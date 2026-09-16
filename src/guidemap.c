@@ -8,7 +8,7 @@ typedef struct { u8 col, row; } Coord;
 MapCell guideMap[MAX_MAP_ROWS][MAX_MAP_COLS];
 u8 startCol, startRow;
 u8 goalCol, goalRow;
-u8 insertLinkCol, insertLinkRow, insertLinkDir;
+u8 insertLinkCol, insertLinkRow, insertLinkDir, insertLinkOffset;
 u8 itemCol[ITEM_COUNT], itemRow[ITEM_COUNT];
 u8 mapCols = 8, mapRows = 6; // sane default if a caller forgets to set these
 
@@ -99,15 +99,48 @@ static void setDoorBit(u8 col, u8 row, u8 dir, bool value)
     }
 }
 
+// Valid range for a door's position along its border (spec §30): a maze
+// column for N/S doors, a maze row for E/W doors -- bounded away from
+// the corners (2 cells clear on each side) so a door span never overlaps
+// the room's outer wall corners, matching the margin the old fixed
+// ANCHOR_* points in maze.c already used (ANCHOR_W_X=2/ANCHOR_E_X=
+// MAZE_W-4, ANCHOR_N_Y=2/ANCHOR_S_Y=MAZE_H-4).
+#define DOOR_COL_MIN 2
+#define DOOR_COL_MAX (MAZE_W - 4)
+#define DOOR_ROW_MIN 2
+#define DOOR_ROW_MAX (MAZE_H - 4)
+
+static void setDoorOffset(u8 col, u8 row, u8 dir, u8 offset)
+{
+    switch (dir)
+    {
+        case DOOR_N: guideMap[row][col].doorOffsetN = offset; break;
+        case DOOR_E: guideMap[row][col].doorOffsetE = offset; break;
+        case DOOR_S: guideMap[row][col].doorOffsetS = offset; break;
+        default:     guideMap[row][col].doorOffsetW = offset; break; // DOOR_W
+    }
+}
+
 // Opens the door on both sides of the edge between (col,row) and its
 // neighbor in direction dir — a one-way door would strand the player.
+// Also rolls where along that shared border it sits (spec §30) -- one
+// random value, written to both sides so they always line up exactly.
 static void openDoor(u8 col, u8 row, u8 dir)
 {
     s16 ncol, nrow;
+    u8 offset;
 
     neighborInDir(col, row, dir, &ncol, &nrow);
+
+    if ((dir == DOOR_N) || (dir == DOOR_S))
+        offset = DOOR_COL_MIN + (random() % (DOOR_COL_MAX - DOOR_COL_MIN + 1));
+    else
+        offset = DOOR_ROW_MIN + (random() % (DOOR_ROW_MAX - DOOR_ROW_MIN + 1));
+
     setDoorBit(col, row, dir, TRUE);
     setDoorBit((u8) ncol, (u8) nrow, opposite(dir), TRUE);
+    setDoorOffset(col, row, dir, offset);
+    setDoorOffset((u8) ncol, (u8) nrow, opposite(dir), offset);
 }
 
 static void clearMap(void)
@@ -672,6 +705,7 @@ static void selectInsertionLink(void)
         insertLinkCol = startCol;
         insertLinkRow = startRow;
         insertLinkDir = DOOR_N;
+        insertLinkOffset = DOOR_COL_MIN;
         return;
     }
 
@@ -681,6 +715,16 @@ static void selectInsertionLink(void)
         insertLinkCol = c.col;
         insertLinkRow = c.row;
         insertLinkDir = c.dir;
+
+        // Where along that border the opening sits (spec §30) -- same
+        // range convention openDoor() uses for a normal tree door, since
+        // this behaves like one physically (main.c reuses this exact
+        // value for the insertion room's own door too, spec §29quat's
+        // shared-axis reasoning still applies unchanged).
+        if ((insertLinkDir == DOOR_N) || (insertLinkDir == DOOR_S))
+            insertLinkOffset = DOOR_COL_MIN + (random() % (DOOR_COL_MAX - DOOR_COL_MIN + 1));
+        else
+            insertLinkOffset = DOOR_ROW_MIN + (random() % (DOOR_ROW_MAX - DOOR_ROW_MIN + 1));
     }
 }
 
@@ -893,5 +937,16 @@ bool GuideMap_hasDoor(u8 col, u8 row, u8 dir)
         case DOOR_E: return guideMap[row][col].doorE;
         case DOOR_S: return guideMap[row][col].doorS;
         default:     return guideMap[row][col].doorW; // DOOR_W
+    }
+}
+
+u8 GuideMap_doorOffset(u8 col, u8 row, u8 dir)
+{
+    switch (dir)
+    {
+        case DOOR_N: return guideMap[row][col].doorOffsetN;
+        case DOOR_E: return guideMap[row][col].doorOffsetE;
+        case DOOR_S: return guideMap[row][col].doorOffsetS;
+        default:     return guideMap[row][col].doorOffsetW; // DOOR_W
     }
 }

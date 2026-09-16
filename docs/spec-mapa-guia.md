@@ -1781,3 +1781,124 @@ azar sin relación entre sí.
   rompió — 0 fallos.
 - Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
   limpio sin errores en el log tras el rebuild.
+
+## 30. Puertas en cualquier posición del borde, no solo en el centro
+
+Petición del usuario: las entradas y salidas de las habitaciones ya no
+tienen que estar necesariamente en el medio del borde — pueden estar
+en cualquier coordenada válida, siempre que la entrada de una sala
+coincida exactamente con la salida de la contigua (misma columna para
+puertas norte/sur, misma fila para este/oeste).
+
+Decisiones confirmadas (preguntadas antes de implementar):
+- Cada puerta de una misma sala (p.ej. norte Y sur a la vez) elige su
+  posición de forma totalmente independiente — no comparten columna/
+  fila entre sí.
+- Cualquier posición válida del borde vale (no un rango acotado cerca
+  del centro), respetando un margen mínimo para no invadir las
+  esquinas.
+- También aplica a la conexión de la sala de inserción con la
+  periférica (spec §27-§29quat).
+
+Implementación:
+- **`guidemap.h`**: `MapCell` gana 4 campos nuevos,
+  `doorOffsetN/E/S/W` — la columna (N/S) o fila (E/W) donde esa puerta
+  concreta se sitúa. Solo tienen sentido cuando el bit `doorX`
+  correspondiente es `TRUE`. `insertLinkOffset` (nuevo `extern`,
+  junto a `insertLinkCol/Row/Dir`) hace lo mismo para el enlace de la
+  sala de inserción.
+- **`guidemap.c`**: `openDoor()` (llamada por `carveTree()` al tallar
+  cada arista del árbol) sortea ahora un offset — columna en rango
+  `[DOOR_COL_MIN=2, DOOR_COL_MAX=MAZE_W-4=16]` para puertas N/S, fila
+  en `[DOOR_ROW_MIN=2, DOOR_ROW_MAX=MAZE_H-4=10]` para E/W — y lo
+  escribe en AMBOS lados de la arista a la vez (mismo valor, vía el
+  nuevo `setDoorOffset()`), garantizando que ambas salas coincidan
+  exactamente sin necesitar traducir nada entre ellas. Nuevo
+  `GuideMap_doorOffset(col,row,dir)` expone el valor a otros módulos.
+  `selectInsertionLink()` sortea `insertLinkOffset` de la misma forma,
+  en el rango que corresponda según el eje de `insertLinkDir`.
+  **Nota**: esto añade llamadas a `random()` dentro de `carveTree()`
+  que no existían antes, así que una misma semilla ahora genera un
+  mapa con forma distinta a como lo hacía antes de este cambio — sin
+  consecuencias prácticas, ya que `mapSeed` no es nunca expuesto ni
+  persistido al jugador (siempre `random()` fresco en cada
+  `newGame()`).
+- **`maze.c`/`.h`**: `Maze_generateRoom` cambia su parámetro
+  `sectionHue` a venir acompañado de un nuevo `const u8 doorOffsets[4]`
+  (indexado con la misma convención 0/1/2/3 = N/E/S/W de
+  `guidemap.h`, sin necesitar incluir ese header aquí — mismo patrón
+  ya usado en `Maze_generateInsertionRoom`). Los antiguos
+  `ANCHOR_N_X/Y` etc. (constantes fijas) se sustituyen por
+  `anchorForDoor(dir, offset, &x, &y)`, que combina la profundidad
+  fija de cada lado (`ANCHOR_DEPTH_N/E/S/W` — antes parte de los
+  `ANCHOR_*`, ahora aislada) con el offset variable. El propio
+  `MAZE_DOOR_COL`/`MAZE_DOOR_ROW` no cambia de valor ni de rol — sigue
+  siendo el centro/semilla de la sala (de ahí cuelgan el spawn del
+  jugador, la posición fija de los ítems, y el punto desde el que
+  arranca `carve()`), simplemente ya no marca dónde están las
+  puertas. `Maze_generateInsertionRoom` gana un parámetro
+  `doorOffset` con el mismo significado.
+- **`player.h`/`.c`**: `Player_updateRoom` gana 4 parámetros
+  `doorOffsetN/E/S/W`; `inDoorSpan()` los usa en vez de
+  `MAZE_DOOR_COL`/`MAZE_DOOR_ROW` fijos.
+- **`main.c`**: nueva `doorOffsetFor(col,row,dir)` — capa fina que
+  también sabe devolver `insertLinkOffset` cuando `(col,row,dir)`
+  coincide con el enlace de inserción (que no es una puerta de árbol
+  real, así que `GuideMap_doorOffset` no tendría un valor válido para
+  ella). `loadRoom()` la usa para construir el array `doorOffsets[4]`
+  que pasa a `Maze_generateRoom`. `positionPlayerEnteringViaDoorDir`
+  gana un parámetro `offset` (coordenada real en vez de
+  `MAZE_DOOR_COL`/`ROW`); `enterRoomFrom()` se simplifica
+  reutilizándola en vez de repetir su propia tabla de posicionamiento
+  (antes duplicada entre ambas funciones). Todas las llamadas a
+  `Player_updateRoom` (sala de inserción, sala enlazada, y el bucle de
+  movimiento normal) pasan los 4 offsets correspondientes.
+
+## 30bis. Bug de conectividad encontrado por fuzzing: puente diagonal roto
+
+`test_door_offsets.c` (nuevo, verifica con BFS de accesibilidad
+independiente que cada puerta activa es alcanzable desde la semilla
+de talla de la sala) encontró un fallo real en ~3.8% de las
+combinaciones (1227 de 32000): la puerta quedaba físicamente pintada
+como suelo pero completamente aislada del resto de la sala.
+
+Causa: `bridgeToSeed(x,y)` (el mecanismo de emergencia que conecta un
+"ancla" de puerta con la semilla de la sala cuando `carve()` no llega
+a tallarlo de forma natural, spec §11 Paso3) movía **los dos ejes a
+la vez** en cada paso cuando ambos aún diferían de la semilla —
+produciendo una escalera diagonal donde cada celda solo tocaba a la
+siguiente por una **esquina**, no por un lado completo. Esto era
+invisible antes del §30 porque todas las anclas antiguas
+(`ANCHOR_N_X`, etc.) compartían siempre un eje exacto con la semilla
+(`ROOM_SEED_COL`/`ROOM_SEED_ROW`), así que en la práctica el bucle
+nunca movía más de un eje a la vez — la línea resultante siempre era
+recta (horizontal o vertical), nunca diagonal. Con offsets
+independientes por puerta (spec §30), un ancla casi nunca comparte
+eje con la semilla, así que el camino diagonal se volvió el caso
+común, no la excepción — y la nave, al moverse solo en las 4
+direcciones cardinales, nunca podía cruzar esa unión de solo-esquina.
+
+Corrección: `bridgeToSeed` ahora mueve un eje por vez — primero cierra
+la distancia en X (marcando cada celda intermedia de esa fila),
+después la distancia en Y (marcando cada celda intermedia de esa
+columna) — un camino en "L" donde cada par de celdas consecutivas
+comparte un lado completo, nunca solo una esquina.
+- **Verificado en el host** (`test_door_offsets.c`): Parte 1 — 32000
+  combinaciones (2000 semillas × 16 combinaciones de puertas), cada
+  puerta activa con un offset independiente y variado por dirección;
+  se confirma que el tramo de la puerta nunca es muro y siempre es
+  alcanzable (BFS propio, no reutiliza el código interno de
+  `maze.c`) desde la semilla de la sala — 0 fallos tras la
+  corrección (1227 fallos antes). Parte 2 — 3000 generaciones de mapa
+  completo (1000 semillas × 3 tamaños): para cada arista real del
+  árbol, el offset coincide exactamente en ambos lados y cae dentro
+  del rango válido de su eje — 0 fallos. `test_insertion.c` ampliado
+  para verificar que la apertura de la sala de inserción cae
+  exactamente en el offset pedido (no solo "en algún punto del
+  borde"). `test_enemy_axis.c` ampliado para generar sus 16
+  combinaciones de puertas con offsets variados en vez de siempre
+  centrados. Re-ejecutados `test_locks.c`, `test_sections.c` y
+  `test_overlay_smoke.c` sin fallos (lógica de `guidemap.c` no
+  relacionada con esto, sin cambios).
+- Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
+  limpio sin errores en el log tras el rebuild.

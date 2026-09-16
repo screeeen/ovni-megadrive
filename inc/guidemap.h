@@ -20,6 +20,14 @@ typedef struct
     u8 doorS  : 1;
     u8 doorW  : 1;
     u8 visited: 1;
+    // Where each active door sits along its border (spec §30): a maze
+    // column (for doorN/doorS) or maze row (for doorE/doorW), in
+    // MAZE_TILE_PX cell units -- no longer always the room's own center.
+    // Meaningless when the matching doorX above is FALSE. Both rooms
+    // sharing an edge always carry the same value for it (openDoor sets
+    // both sides together), so a room's own door lines up exactly with
+    // its neighbor's matching door.
+    u8 doorOffsetN, doorOffsetE, doorOffsetS, doorOffsetW;
 } MapCell;
 
 #define DOOR_N 0
@@ -56,6 +64,15 @@ extern u8 goalCol, goalRow;
 // already has toward a grid neighbor (only sides genuinely missing a
 // neighbor are ever offered as candidates), so main.c can always tell
 // the two apart unambiguously.
+// Where insertLinkDir's border opening sits, spec §30 -- same units/axis
+// convention as MapCell's doorOffsetN/E/S/W (a maze column for N/S, a
+// maze row for E/W). Shared by both ends of the link: the periphery
+// room's own opening on its insertLinkDir side, AND the insertion room's
+// single door (main.c passes this same value to Maze_generateInsertionRoom
+// too) -- N/S and their opposite S/N share the column axis, E/W and their
+// opposite W/E share the row axis, so no translation is needed between
+// the two sides, just reuse the one value.
+extern u8 insertLinkOffset;
 extern u8 insertLinkCol, insertLinkRow, insertLinkDir;
 
 // Item rooms (spec §13): letters A..A+ITEM_COUNT-1, one per dead-end room
@@ -82,6 +99,12 @@ extern u8 itemRow[ITEM_COUNT];
 void GuideMap_generate(void);
 
 bool GuideMap_hasDoor(u8 col, u8 row, u8 dir);
+
+// Same value as guideMap[row][col]'s doorOffsetN/E/S/W field for dir
+// (spec §30) -- a thin accessor so callers outside guidemap.c don't need
+// to know the MapCell layout to read it. Meaningless if
+// GuideMap_hasDoor(col,row,dir) is FALSE.
+u8 GuideMap_doorOffset(u8 col, u8 row, u8 dir);
 
 // Which branch (0..MAZE_SECTION_COUNT-1, maze.h) growing directly out of
 // the start room this room belongs to (spec §18) -- every room hanging

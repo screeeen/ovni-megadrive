@@ -114,8 +114,10 @@ bool Player_update(Player *p)
     return FALSE;
 }
 
-// tile is the door span's first column/row (MAZE_DOOR_COL or MAZE_DOOR_ROW);
-// a door is 2 cells wide, so both it and the next one qualify.
+// tile is the door span's first column/row (spec §30: wherever this
+// particular door's offset landed, no longer always MAZE_DOOR_COL/
+// MAZE_DOOR_ROW); a door is 2 cells wide, so both it and the next one
+// qualify.
 static bool inDoorSpan(s16 px, s16 tile)
 {
     const s16 t = toTile(px);
@@ -123,24 +125,25 @@ static bool inDoorSpan(s16 px, s16 tile)
     return (t == tile) || (t == tile + 1);
 }
 
-u8 Player_updateRoom(Player *p, bool doorN, bool doorE, bool doorS, bool doorW)
+u8 Player_updateRoom(Player *p, bool doorN, bool doorE, bool doorS, bool doorW,
+                      u8 doorOffsetN, u8 doorOffsetE, u8 doorOffsetS, u8 doorOffsetW)
 {
     switch (p->dir)
     {
         case DIR_UP:
-            if (doorN && (p->y <= 0) && inDoorSpan(p->x, MAZE_DOOR_COL))
+            if (doorN && (p->y <= 0) && inDoorSpan(p->x, doorOffsetN))
                 return EXIT_NORTH;
             break;
         case DIR_DOWN:
-            if (doorS && (p->y >= MAZE_TILE_PX * (MAZE_H - 1)) && inDoorSpan(p->x, MAZE_DOOR_COL))
+            if (doorS && (p->y >= MAZE_TILE_PX * (MAZE_H - 1)) && inDoorSpan(p->x, doorOffsetS))
                 return EXIT_SOUTH;
             break;
         case DIR_LEFT:
-            if (doorW && (p->x <= 0) && inDoorSpan(p->y, MAZE_DOOR_ROW))
+            if (doorW && (p->x <= 0) && inDoorSpan(p->y, doorOffsetW))
                 return EXIT_WEST;
             break;
         case DIR_RIGHT:
-            if (doorE && (p->x >= MAZE_TILE_PX * (MAZE_W - 1)) && inDoorSpan(p->y, MAZE_DOOR_ROW))
+            if (doorE && (p->x >= MAZE_TILE_PX * (MAZE_W - 1)) && inDoorSpan(p->y, doorOffsetE))
                 return EXIT_EAST;
             break;
     }

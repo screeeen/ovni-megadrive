@@ -9,11 +9,14 @@
 #define MAZE_W          20
 #define MAZE_H          14
 
-// Door span in tile units, shared by the multi-room system: N/S doors are
-// centered on column MAZE_DOOR_COL (2 cells wide), E/W doors on row
-// MAZE_DOOR_ROW. Single source of truth for maze.c's door anchors/punch
-// coordinates and player.c's exit detection (spec §5, §7) -- keep them
-// aligned, don't recompute this differently in either file.
+// The room's own interior hub / carve seed -- where Maze_generateRoom's
+// carve() always starts (guaranteed-open regardless of door layout), and
+// where Player_spawnAtRoomCenter/items.c's fixed item position/
+// positionPlayerEnteringViaDoorDir's insertion-room landing spot all
+// still anchor (spec §5/§13/§27). Door POSITIONS along their own borders
+// no longer derive from this (spec §30: they're independently random per
+// door, see MapCell's doorOffsetN/E/S/W in guidemap.h) -- this is now
+// only the room's center, not a door coordinate.
 #define MAZE_DOOR_COL (MAZE_W / 2)
 #define MAZE_DOOR_ROW ((MAZE_H / 2) & ~1)
 
@@ -62,6 +65,15 @@ void Maze_generate(void);
 // same randomWallVariant() as any other wall, not a distinct shape)
 // instead of punched open, so Maze_isWall() blocks it exactly like a
 // wall -- must only be TRUE where the matching doorX is also TRUE.
+// doorOffsets[4] (spec §30) gives, for each direction (indexed by
+// guidemap.h's DOOR_N/E/S/W numeric convention 0/1/2/3, same as
+// Maze_generateInsertionRoom's doorDir below -- maze.c doesn't #include
+// guidemap.h, see that function's comment), the maze column (N/S
+// entries) or maze row (E/W entries) that door sits at -- no longer
+// always centered on MAZE_DOOR_COL/MAZE_DOOR_ROW. Entries for a
+// direction whose doorX is FALSE are ignored. Caller must ensure both
+// rooms sharing a door pass the identical offset for it (guidemap.c's
+// GuideMap_doorOffset already guarantees this).
 // sectionHue (spec §18, 0..MAZE_SECTION_COUNT-1) picks which of the 4
 // wall-dither hue blocks every wall cell in this room is drawn from --
 // same dither shapes/density either way, just a different accent color,
@@ -69,26 +81,30 @@ void Maze_generate(void);
 // while playing.
 void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
                         bool lockedN, bool lockedE, bool lockedS, bool lockedW,
-                        u8 sectionHue, u16 roomSeed);
+                        const u8 doorOffsets[4], u8 sectionHue, u16 roomSeed);
 
 // Carves the special "insertion room" (spec §27): the very first room
 // the player ever sees, outside the normal room-tree grid entirely (its
 // only relationship to the grid is via guidemap.c's insertLinkCol/
-// insertLinkRow/insertLinkDir, which main.c uses both to know where to
-// send the player once they leave, and to punch open a matching real
-// border opening on that specific side of the target room -- spec §29,
-// not a blind teleport into its center). Deterministic from roomSeed,
-// same carve algorithm as Maze_generateRoom, seeded from the room's own
-// center exactly like every other room. Always exactly one door and a
-// single fixed wall-dither cell throughout instead of the usual random
-// mix -- a deliberately uniform look distinct from every other room in
-// the game. doorDir picks which border that one door sits on (spec
-// §29ter: randomized once per game, was fixed to always the south
-// border before) -- accepts guidemap.h's DOOR_N/E/S/W values (0/1/2/3)
-// by numeric convention rather than #including guidemap.h here, to keep
-// maze.c decoupled from the guide-map module the way Maze_generateRoom's
-// plain bool doorN/E/S/W parameters already do.
-void Maze_generateInsertionRoom(u8 doorDir, u16 roomSeed);
+// insertLinkRow/insertLinkDir/insertLinkOffset, which main.c uses both to
+// know where to send the player once they leave, and to punch open a
+// matching real border opening on that specific side of the target room
+// -- spec §29, not a blind teleport into its center). Deterministic from
+// roomSeed, same carve algorithm as Maze_generateRoom, seeded from the
+// room's own center exactly like every other room. Always exactly one
+// door and a single fixed wall-dither cell throughout instead of the
+// usual random mix -- a deliberately uniform look distinct from every
+// other room in the game. doorDir picks which border that one door sits
+// on (spec §29ter: randomized once per game via the opposite of
+// insertLinkDir, spec §29quat) -- accepts guidemap.h's DOOR_N/E/S/W
+// values (0/1/2/3) by numeric convention rather than #including
+// guidemap.h here, to keep maze.c decoupled from the guide-map module
+// the way Maze_generateRoom's plain bool doorN/E/S/W parameters already
+// do. doorOffset (spec §30) is the column (doorDir N/S) or row (doorDir
+// E/W) that one door sits at -- callers pass insertLinkOffset here, the
+// same value the periphery room's own matching opening uses, since N/S
+// and their opposite S/N (same for E/W) always share that axis.
+void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u16 roomSeed);
 
 // Draws the current maze to plane BG_A.
 void Maze_draw(void);
