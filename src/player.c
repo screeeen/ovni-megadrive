@@ -59,7 +59,14 @@ void Player_rotateCW(Player *p)
     p->dir = (p->dir + 3) & 3;
 }
 
-static void movePlayer(Player *p)
+// bounceOnWall (spec §40): TRUE is "borracho" mode's original behavior
+// -- hitting a wall reverses p->dir so the ship keeps moving, bouncing
+// back the way it came. FALSE is "normal" mode -- hitting a wall just
+// leaves p->dir and position alone, so the ship sits still against it
+// until the player either steers away or the wall opens. DIR_NONE (only
+// possible in normal mode -- borracho always has a real direction)
+// matches no case below, so the ship simply doesn't move.
+static void movePlayer(Player *p, bool bounceOnWall)
 {
     switch (p->dir)
     {
@@ -68,7 +75,7 @@ static void movePlayer(Player *p)
             const s16 newY = p->y - 1;
 
             if (!collideUp(newY, p->x)) p->y = newY;
-            else p->dir = DIR_DOWN;
+            else if (bounceOnWall) p->dir = DIR_DOWN;
             break;
         }
         case DIR_DOWN:
@@ -76,7 +83,7 @@ static void movePlayer(Player *p)
             const s16 newY = p->y + 1;
 
             if (!collideDown(newY, p->x)) p->y = newY;
-            else p->dir = DIR_UP;
+            else if (bounceOnWall) p->dir = DIR_UP;
             break;
         }
         case DIR_LEFT:
@@ -84,7 +91,7 @@ static void movePlayer(Player *p)
             const s16 newX = p->x - 1;
 
             if (!collideLeft(newX, p->y)) p->x = newX;
-            else p->dir = DIR_RIGHT;
+            else if (bounceOnWall) p->dir = DIR_RIGHT;
             break;
         }
         case DIR_RIGHT:
@@ -92,7 +99,7 @@ static void movePlayer(Player *p)
             const s16 newX = p->x + 1;
 
             if (!collideRight(newX, p->y)) p->x = newX;
-            else p->dir = DIR_LEFT;
+            else if (bounceOnWall) p->dir = DIR_LEFT;
             break;
         }
     }
@@ -109,7 +116,7 @@ bool Player_update(Player *p)
         p->y = 1;
     }
 
-    movePlayer(p);
+    movePlayer(p, TRUE); // single-room prototype, always the original bounce behavior
 
     return FALSE;
 }
@@ -125,8 +132,14 @@ static bool inDoorSpan(s16 px, s16 tile)
     return (t == tile) || (t == tile + 1);
 }
 
-u8 Player_updateRoom(Player *p, bool doorN, bool doorE, bool doorS, bool doorW,
-                      u8 doorOffsetN, u8 doorOffsetE, u8 doorOffsetS, u8 doorOffsetW)
+// One frame's worth of the original speed-1 logic: check for an exit
+// first, otherwise take a single 1px step. Factored out of
+// Player_updateRoom (spec §42) so `speed` can repeat it several times
+// per visual frame WITHOUT changing any of the actual collision/exit
+// math -- each repetition is byte-for-byte the same check a speed-1 game
+// would have done on its own separate frame, just compressed into one.
+static u8 updateRoomStep(Player *p, bool drunkMode, bool doorN, bool doorE, bool doorS, bool doorW,
+                          u8 doorOffsetN, u8 doorOffsetE, u8 doorOffsetS, u8 doorOffsetW)
 {
     switch (p->dir)
     {
@@ -146,9 +159,39 @@ u8 Player_updateRoom(Player *p, bool doorN, bool doorE, bool doorS, bool doorW,
             if (doorE && (p->x >= MAZE_TILE_PX * (MAZE_W - 1)) && inDoorSpan(p->y, doorOffsetE))
                 return EXIT_EAST;
             break;
+        default: // DIR_NONE (normal mode only) -- nothing held, can't exit
+            break;
     }
 
-    movePlayer(p);
+    movePlayer(p, drunkMode);
+
+    return EXIT_NONE;
+}
+
+// speed (spec §42, user request: "que vaya más rápido en el modo
+// normal") is how many 1px sub-steps to take this single visual frame --
+// NOT a bigger single jump. A bigger jump would only check collision at
+// the FINAL landing pixel, which at high enough speed can tunnel clean
+// through a wall, or overshoot the exact pixel the door-span/border
+// checks look for and get stuck 1px short of it forever (verified this
+// really happens with a host test before picking this design -- see
+// spec §42). Repeating the untouched speed-1 step is immune to both:
+// every intermediate pixel is still checked, one at a time, exactly as
+// it always was. Stops as soon as any sub-step returns an exit, so a
+// fast room still can't blow past a door mid-frame.
+u8 Player_updateRoom(Player *p, bool drunkMode, u8 speed, bool doorN, bool doorE, bool doorS, bool doorW,
+                      u8 doorOffsetN, u8 doorOffsetE, u8 doorOffsetS, u8 doorOffsetW)
+{
+    u8 i;
+
+    for (i = 0; i < speed; i++)
+    {
+        const u8 exitDir = updateRoomStep(p, drunkMode, doorN, doorE, doorS, doorW,
+                                           doorOffsetN, doorOffsetE, doorOffsetS, doorOffsetW);
+
+        if (exitDir != EXIT_NONE)
+            return exitDir;
+    }
 
     return EXIT_NONE;
 }

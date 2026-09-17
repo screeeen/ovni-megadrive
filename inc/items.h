@@ -25,6 +25,26 @@ bool Items_revealedOnMap(u8 col, u8 row, char *outLetter);
 // §16), without needing to know about collected[]/nextIndex directly.
 bool Items_isUnlocked(u8 index);
 
+// True once every one of this game's itemCount letters has been collected
+// (spec §34) -- main.c checks this when the ship walks back out through
+// the insertion link to decide whether that's a normal "back to the
+// insertion room, can go in again" trip or the phase is actually complete.
+bool Items_allCollected(void);
+
+// How many letters are collected right now (0..itemCount) -- same value
+// as nextIndex, exposed so main.c can snapshot per-preset progress (spec
+// §35) when the ship leaves a planet before finishing it.
+u8 Items_collectedCount(void);
+
+// Restores progress instantly, without touching position/overlap checks
+// (spec §35): marks items 0..count-1 collected and sets nextIndex to
+// count, as if they'd been picked up normally in order. Valid because
+// collection is always strictly in-order (Items_tryCollect enforces it),
+// so "count collected" always means exactly indices 0..count-1 -- never
+// an arbitrary subset. Call right after Items_reset(), before
+// GuideMap_recomputeLocks(), when resuming a planet with saved progress.
+void Items_fastForward(u8 count);
+
 // Player is in room (col,row), ship box at pixel (playerX,playerY). If
 // that room holds the NEXT item due in order and the ship's 16x16 box
 // overlaps it, marks it collected and returns TRUE (caller should redraw

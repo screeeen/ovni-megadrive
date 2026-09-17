@@ -2432,3 +2432,659 @@ planetas".
   segundos, log sin errores. Sigue sin poder verificarse visualmente
   en esta sesión — pendiente de que el usuario confirme que los 7
   planetas y sus tamaños/letras se ven y se seleccionan correctamente.
+
+## 34. Victoria al volver a la nave con todas las letras
+
+Petición del usuario: "cuando recoges todas las letras puedes volver a
+la nave. Se vuelve por la habitación de extracción. En realidad la
+nave puede volver cuando quiera. Cada planeta tiene el recuento de sus
+letras." Aclarado con 3 preguntas: (1) al volver a la nave con todas
+las letras, pantalla de victoria y vuelta al menú; (2) se puede volver
+en cualquier momento como ya pasaba, pero distinguiendo visualmente
+una salida incompleta de una completa; (3) el recuento de letras por
+planeta ya estaba resuelto en el §33 (texto bajo el menú al
+seleccionar un planeta) — nada que cambiar ahí.
+
+- Volver por la habitación de inserción (spec §27/§29) YA era posible
+  en cualquier momento, con o sin todas las letras — eso no cambia.
+  Lo que cambia es el DESTINO de ese viaje de vuelta:
+  - Con `Items_allCollected()` (nueva función en `items.h`/`.c`,
+    `nextIndex >= itemCount`) en TRUE: fase completada. Nuevo estado
+    `STATE_WIN` en el `GameState` de `main.c` — pantalla fija
+    ("FASE COMPLETADA" / "PULSA A PARA VOLVER AL MENU") sobre BG_A,
+    nave y enemigos ocultos, esperando BUTTON_A para volver al menú
+    (reutiliza `resetToMenu()` tal cual).
+  - Con `Items_allCollected()` en FALSE: exactamente el comportamiento
+    de siempre — vuelve a una habitación de inserción recién generada,
+    puede volver a entrar en el mapa cuando quiera.
+- Distinción visual pedida en la sala de extracción (spec §34,
+  aclaración 2): mientras la nave está en la habitación de inserción
+  y aún faltan letras, un mensaje fijo ("AUN FALTAN LETRAS") en BG_B
+  fila 2, con la misma técnica de alta prioridad que ya usan el HUD de
+  letras (fila 1) y el contador de FPS (fila 0) para verse por encima
+  del laberinto de BG_A. Se muestra al entrar (spawn inicial en
+  `newGame()` y cada vuelta desde el mapa) y se borra al volver a
+  salir hacia el mapa. Nunca se muestra en el caso completo — ese caso
+  ya no vuelve a la habitación de inserción en absoluto, va directo a
+  la pantalla de victoria, así que la propia aparición de esa pantalla
+  ES la distinción.
+- Efecto colateral corregido de paso: `resetToMenu()` no limpiaba
+  nunca las filas 1/2 de BG_B (HUD de letras / este nuevo aviso) —
+  como esas filas sólo se redibujan durante la partida y
+  `VDP_clearPlane` del menú sólo toca BG_A (un plano distinto), un
+  reset a mitad de partida (combo de reinicio, o ahora también
+  `STATE_WIN`) podía dejarlas superpuestas sobre el menú. Se añaden 2
+  `VDP_clearTextLineBG(BG_B, ...)` en `resetToMenu()` para las dos
+  filas. No reportado por el usuario, encontrado al revisar el reuso
+  de `resetToMenu()` desde el nuevo flujo de victoria.
+- **Verificado**: `make clean && make` sin errores ni warnings nuevos.
+  Revisión manual del flujo de control (no fuzzeable por el host al
+  depender de `JOY_readJoypad`/sprites reales de SGDK): confirmado que
+  tras entrar en `STATE_WIN` el resto del frame (reposicionar
+  `playerSprite`, el bloque de recogida/patrulla) queda correctamente
+  saltado porque `inInsertRoom` se pone a TRUE en ambas ramas (como ya
+  hacía la rama gemela antes de este cambio), y que `Items_h`/
+  `resources.h` ya estaban incluidos donde se necesitaba
+  (`Items_allCollected` visible desde `main.c` vía `items.h`).
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  log sin errores. Sigue sin poder verificarse visualmente en esta
+  sesión — pendiente de que el usuario confirme en pantalla el aviso
+  de "AUN FALTAN LETRAS" y la pantalla de victoria al completar una
+  fase.
+
+## 35. Progreso guardado por planeta, visible en el menú
+
+Petición del usuario: "quiero que cada planeta tenga el recuento de
+sus letras obtenidas. Si el player sale de un planeta, esas letras se
+conservan. En la UI del menu si indican las letras recogidas y las
+que faltan."
+
+- Nuevo `PresetSave { bool hasSave; u16 mapSeed; u8 collectedCount; }`
+  en `main.c`, un array `presetSave[SIZE_PRESET_COUNT]` (uno por
+  planeta, arranca a cero = sin guardar). Como recoger letras siempre
+  es estrictamente en orden (spec §13, `Items_tryCollect` lo obliga),
+  basta con guardar CUÁNTAS llevas — nunca hace falta un bitmask,
+  "N recogidas" siempre significa exactamente los índices 0..N-1.
+- **Hallazgo importante al implementar esto**: `mapSeed` ya existía
+  (`main.c`, spec §5) pero SÓLO se usaba para el hash determinista de
+  cada habitación individual (`roomSeedFor`) — nunca se usaba para
+  hacer determinista la propia `GuideMap_generate()` (topología del
+  árbol de salas, posición de las letras, enlace de inserción, meta).
+  `GuideMap_generate()` tira de `random()`, que lee el stream global
+  del PRNG de SGDK — un stream que sigue avanzando con cada llamada a
+  `random()` en cualquier parte del juego (otras salas, enemigos...),
+  así que releer el mismo `mapSeed` más tarde NO reproducía el mismo
+  mapa. `maze.c` ya resolvía este mismo problema a nivel de habitación
+  con `setRandomSeed(roomSeed)` al principio de `Maze_generateRoom`/
+  `Maze_generateInsertionRoom` (líneas 251/332) — `newGame()` ahora
+  aplica la misma idea a nivel de mapa completo: `setRandomSeed(mapSeed)`
+  justo antes de `GuideMap_generate()`, tanto en una partida nueva
+  (mapSeed recién sorteado) como al reanudar (mapSeed guardado) — así
+  el mismo mapSeed reproduce EXACTAMENTE el mismo mapa, sin importar
+  cuánto haya avanzado el stream global mientras tanto.
+- `newGame()`: si `presetSave[sizePresetIndex].hasSave`, reutiliza su
+  `mapSeed` guardado (en vez de sortear uno nuevo) y, tras
+  `Items_reset()`, llama a la nueva `Items_fastForward(collectedCount)`
+  (`items.c`) para marcar como recogidas las primeras `collectedCount`
+  letras de golpe, sin comprobaciones de posición/colisión (no aplica,
+  es una restauración de estado, no una recogida física real).
+  `GuideMap_recomputeLocks()` se sigue llamando DESPUÉS, para que los
+  candados reflejen correctamente qué letra toca ahora.
+- `resetToMenu()`: antes de cambiar `gameState`, mira el estado
+  ANTERIOR (`STATE_PLAYING` o `STATE_WIN`, nunca si ya estaba en el
+  menú — evita sobrescribir con datos obsoletos si se pulsa el combo
+  de reset estando ya en el menú) y guarda el progreso del planeta que
+  se acaba de dejar: si `Items_allCollected()`, borra su guardado
+  (`hasSave=FALSE` — completar un planeta es "empezar de cero" la
+  próxima vez, sólo ABANDONAR a medias es lo que debe poder
+  reanudarse); si no, guarda `hasSave=TRUE`, el `mapSeed` actual y
+  `Items_collectedCount()`.
+- `drawMenu()`: nueva línea (fila 26, entre el tamaño/letras en la 25
+  y "PULSA A" en la 27) con "N DE M RECOGIDAS" para el planeta
+  seleccionado — usa `collectedCount` guardado si `hasSave`, o 0 si
+  nunca se ha jugado ese planeta (o si se completó y su guardado se
+  borró), mostrando siempre el estado real, no el de la partida en
+  curso.
+- Efecto colateral menor corregido de paso: `resetToMenu()` ya
+  limpiaba las filas 1/2 de BG_B (spec §34); sin cambios adicionales
+  ahí, sólo se confirma que sigue siendo coherente con el nuevo guardado
+  (limpiar el HUD visual no afecta al guardado en memoria, son cosas
+  separadas).
+- **Verificado**: nuevo test de fuzzing en el host
+  (`test_resume.c`, scratchpad de la sesión) que simula exactamente el
+  escenario real: genera un mapa con un `mapSeed`, avanza el stream
+  global con 500 llamadas a `random()` de "ruido" MÁS una generación
+  completa de un preset totalmente distinto (simulando otra partida
+  intercalada), y comprueba que reaplicar `setRandomSeed(mapSeed)` +
+  `GuideMap_generate()` reproduce exactamente la misma rejilla,
+  posiciones de letras, enlace de inserción y meta — 7 presets × 5000
+  semillas = 35000 simulaciones, 0 fallos. También comprueba el
+  camino de `Items_fastForward`: tras reanudar con progreso parcial,
+  el enlace de inserción sigue desbloqueado y la siguiente letra
+  pendiente sigue siendo recogible en su habitación real. (Dos fallos
+  de comparación en iteraciones tempranas del test resultaron ser del
+  propio test, no del juego: comparaba la rejilla completa
+  `MAX_MAP_ROWS×MAX_MAP_COLS` en vez de sólo la región activa
+  `mapRows×mapCols`, y comparaba `doorOffsetX`/`itemCol[]` más allá de
+  cuándo son significativos — corregido en el test antes de confiar en
+  el resultado.)
+- `make clean && make` sin errores ni warnings nuevos.
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  log sin errores. Sigue sin poder verificarse visualmente en esta
+  sesión — pendiente de que el usuario confirme que la línea "N DE M
+  RECOGIDAS" se ve bien en el menú y que abandonar un planeta a medias
+  y volver a él lo reanuda con el mismo mapa y las mismas letras ya
+  recogidas.
+
+## 36. Segunda puerta en la sala de extracción, para volver al menú
+
+Petición del usuario: "tiene que haber una salida en la sala de
+extracción para que el usuario vuelva a salir al menu. Por ahi entra."
+
+Hasta ahora la sala de inserción/extracción tenía una única puerta
+(la "puerta de misión", hacia/desde `insertLinkCol/Row`): volver al
+menú sólo era posible completando todas las letras (spec §34) o con
+el combo de reset (A+B+C+UP). El usuario pide una puerta física
+adicional, en esa misma sala, dedicada a volver al menú a voluntad.
+
+- `Maze_generateInsertionRoom` (maze.c/maze.h) gana dos parámetros:
+  `menuDoorDir`, `menuDoorOffset`. Siempre perpendicular a la puerta
+  de misión (`main.c` la deriva como `(insertRoomDoorDir + 1) & 3`),
+  así que nunca puede coincidir ni ser opuesta a ella. Refactorizado
+  el volcado de la puerta (antes un único `switch` inline) a una
+  función compartida `punchBorderDoor(dir, anchorX, anchorY)`, usada
+  para las dos puertas — evita que la lógica de las dos puertas pueda
+  divergir con el tiempo. `carve()` ahora recibe 2 `forcedTarget`
+  (antes 1), y `bridgeToSeed` se llama para cada ancla que no haya
+  quedado ya conectada por el propio carve.
+- El offset de la puerta de misión sigue viniendo de `insertLinkOffset`
+  (debe coincidir con la puerta real del lado opuesto, spec §30). El
+  de la puerta de menú es fijo/centrado (`MAZE_W/2` o `MAZE_H/2` según
+  eje) — nunca necesita alinearse con ninguna otra sala, así que no
+  hace falta aleatorizarlo; se calcula una sola vez en `main.c`
+  (`newGame()`) y se pasa como parámetro, evitando duplicar la fórmula
+  de centrado en dos archivos.
+- `main.c`: nuevas `menuDoorDir`/`menuDoorOffset` (estáticas, fijadas
+  una vez por partida igual que `insertRoomDoorDir`). El manejo por
+  frame de la sala de inserción ahora marca AMBAS puertas como activas
+  para `Player_updateRoom` (antes sólo una), con el offset
+  correspondiente a cada una. Cruzar la puerta de misión se comporta
+  igual que siempre (spec §29/§34: a la rejilla, o victoria si ya
+  estaban todas las letras); cruzar la puerta de menú llama
+  directamente a `resetToMenu()` — la misma función que ya usa el
+  combo de reset, así que el guardado de progreso (spec §35) se aplica
+  automáticamente sin lógica nueva.
+- **Verificado**: nuevo test de fuzzing en el host
+  (`test_insert_two_doors.c`, scratchpad de la sesión), reutilizando
+  la técnica BFS de accesibilidad ya usada para el bug de §30bis:
+  genera la sala de inserción con las 12 combinaciones válidas de
+  dirección (puerta de misión × puerta de menú, excluyendo cuando
+  coinciden) y un rango de offsets variado, para 20000 semillas cada
+  una — 240000 generaciones en total, confirmando que AMBAS puertas
+  quedan siempre conectadas a la semilla de la sala (nunca una sala
+  con una puerta físicamente inalcanzable). 0 fallos.
+- `make clean && make` sin errores ni warnings nuevos.
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  log sin errores. Sigue sin poder verificarse visualmente en esta
+  sesión — pendiente de que el usuario confirme que la segunda puerta
+  aparece en la sala de extracción y que cruzarla vuelve al menú.
+
+## 37. La sala de extracción en el mapa, y una flecha señalando la salida
+
+Petición del usuario: "quiero que la habitación de inserción/
+extracción figure en el mapa. Y quiero que indiques con una flecha la
+salida dentro de esta habitación."
+
+Dos partes separadas, una en el mapa-guía (`GuideMap_drawOverlay`,
+tecla C) y otra dentro de la propia sala mientras se juega (BG_A,
+igual que las letras de los items o el HUD).
+
+- **La sala en el mapa** (`guidemap.c`): siempre se dibuja (nunca
+  sujeta a fog-of-war -- el jugador siempre la ha "visitado", es donde
+  empieza toda partida), justo fuera de la rejilla, en el lado de
+  `insertLinkDir` respecto a `(insertLinkCol,insertLinkRow)` — la
+  misma relación espacial que ya tiene la puerta física real
+  (maze.c/main.c). Relleno sólido, mismo aspecto que cualquier sala
+  visitada. Un tramo de corredor conecta su caja con la sala periférica,
+  con la misma convención de hueco de 1 tile que ya usan los corredores
+  normales entre salas.
+  - **Problema de espacio detectado y resuelto**: el preset más grande
+    (10x8) deja casi cero margen alrededor de la propia rejilla dentro
+    de la pantalla de 40x28 tiles (`totalW=39` de 40 columnas
+    disponibles). Colocar la sala de extracción exactamente adyacente
+    no siempre cabe en pantalla para los presets grandes. Se resuelve
+    con un CLAMP: la posición calculada se recorta para quedar siempre
+    dentro de la pantalla (se dibuja "lo más cerca posible" en vez de
+    fuera de plano) — degradación aceptable sólo en el borde extremo
+    de los presets más grandes, exacta en el resto. El tramo de
+    corredor lleva su propia comprobación de límites (a diferencia del
+    resto del código de corredores, que nunca la necesita porque un
+    vecino real siempre está dentro de la rejilla).
+- **La flecha dentro de la sala** (`main.c`, nueva `drawInsertRoomArrow()`):
+  un carácter ASCII (`^`/`v`/`<`/`>` según `insertRoomDoorDir`) dibujado
+  con `VDP_drawText` directamente sobre BG_A, sin arte nuevo — mismo
+  enfoque que ya usan las letras de los items o el HUD. Se coloca justo
+  dentro de la puerta de MISIÓN únicamente (no la puerta de menú del
+  §36, que es una acción secundaria/opcional; ésta es la que toda
+  partida necesita encontrar), centrada en su ancho de 2 celdas de
+  laberinto usando el mismo `insertLinkOffset` con el que la propia
+  puerta ya se construye. Llamada tras cada `Maze_draw()` de la sala de
+  inserción (spawn inicial y cada regreso).
+- **Verificado**: nuevo test en el host (`test_insert_on_map.c`,
+  scratchpad de la sesión) con una variante del shim `fakeinc` que
+  esta vez SÍ comprueba límites (`fakeinc_bounds/genesis.h`, en vez
+  de aceptar cualquier coordenada como el shim original): genera un
+  mapa completo, marca todas las salas como visitadas (peor caso para
+  el bucle principal) y llama a `GuideMap_drawOverlay()` de verdad,
+  para los 7 presets × 5000 semillas = 35000 llamadas — 0 escrituras
+  de tile fuera de los límites 40x28 reales. Para la flecha (sólo en
+  `main.c`, no se puede compilar en el host por depender del bucle
+  principal de SGDK): verificado a mano que `insertLinkOffset` siempre
+  cae en [2,16] (N/S) o [2,10] (E/W) -- rango ya establecido y
+  fuzzeado en specs anteriores (§30) --, así que `tx`/`ty` siempre caen
+  dentro de [0,40)/[0,28) por construcción, sin necesitar clamp.
+- `make clean && make` sin errores ni warnings nuevos.
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  log sin errores. Sigue sin poder verificarse visualmente en esta
+  sesión — pendiente de que el usuario confirme que la sala de
+  extracción aparece en el mapa-guía y que la flecha señala
+  correctamente la puerta de misión dentro de la sala.
+
+## 38. Bug: completar la fase de 1 letra mostraba "0 de 1" en el menú
+
+Reporte del usuario: "hay un bug, la habitación con 1 letra, si la
+completo, en el menu aparece 0 de 1. Debería ser completa."
+
+Causa: `resetToMenu()` (spec §35) BORRABA el guardado
+(`hasSave=FALSE`) cada vez que `Items_allCollected()` era TRUE al
+volver al menú, con la idea de que "completar es empezar de cero la
+próxima vez". Pero eso significa que justo DESPUÉS de ganar, el
+guardado de ese planeta deja de existir, y `drawMenu()` -- al no
+haber guardado -- muestra `collected=0` en vez de reflejar que
+`collectedCount` habría sido igual a `letters` (fase completa). Esto
+reproducía el bug exacto que reporta el usuario para CUALQUIER
+preset, no sólo el de 1 letra -- simplemente es más notorio ahí
+porque "0 de 1" salta más a la vista que "0 de 5".
+
+- Arreglado quitando esa rama especial: `resetToMenu()` ahora siempre
+  guarda `hasSave=TRUE`, `mapSeed` y `Items_collectedCount()` al salir
+  de una partida real (`STATE_PLAYING` o `STATE_WIN`), sin excepción
+  para el caso completo. Cuando la partida se ganó,
+  `Items_collectedCount()` ya vale exactamente `itemCount` de forma
+  natural (por eso se pudo ganar), así que el guardado queda
+  correctamente como "completo" y el menú lo muestra así
+  ("N DE N RECOGIDAS").
+- Efecto secundario aceptado, no reportado como problema: si se
+  vuelve a seleccionar un planeta ya completado, `newGame()` reanuda
+  ese mismo mapa (mismo `mapSeed`) con todas las letras ya marcadas
+  como recogidas (`Items_fastForward(itemCount)`) -- caminar hasta la
+  puerta de misión dispara la victoria de inmediato, ya que no queda
+  nada por recoger. No se ha pedido un "empezar de cero tras
+  completar", así que no se añade esa lógica extra; el guardado sólo
+  necesitaba dejar de borrarse para que el menú mostrara el estado
+  real.
+- `make clean && make` sin errores ni warnings nuevos.
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  log sin errores. Sigue sin poder verificarse visualmente en esta
+  sesión — pendiente de que el usuario confirme que completar la fase
+  de 1 letra (y cualquier otra) ahora muestra "N DE N RECOGIDAS" en el
+  menú en vez de "0 DE N".
+
+## 39. La victoria se decide al salir de la sala, no al entrar en ella
+
+Petición del usuario: "para completar la fase, tiene que salir de la
+habitación de inserción/extracción con todas las letras recogidas."
+
+Hasta ahora (spec §34) la victoria se disparaba en el momento de
+CRUZAR desde la rejilla HACIA la sala de inserción (con todas las
+letras ya recogidas) — la sala de extracción en sí nunca llegaba a
+mostrarse en ese caso, se saltaba directamente a la pantalla de
+"FASE COMPLETADA". El usuario pide que sea al revés: hay que llegar
+primero a la sala (como siempre), y la fase sólo se completa cuando
+el jugador la ABANDONA por su propia puerta de salida (la puerta de
+menú, spec §36) teniendo ya todas las letras.
+
+- La rama "volvió por el enlace de inserción" (dentro de la sala
+  periférica, `isInsertLinkRoom && exitDir==insertLinkDir`) pierde por
+  completo el `if (Items_allCollected())`: ahora SIEMPRE regenera la
+  sala de inserción sin más, exactamente igual que cuando aún faltan
+  letras — nunca dispara la victoria directamente.
+- La comprobación se traslada a la rama de la puerta de MENÚ dentro
+  de la propia sala de inserción (`else if (exitDir ==
+  exitDirForDoorDir(menuDoorDir))`, spec §36): si
+  `Items_allCollected()` es TRUE al cruzarla, dispara la pantalla de
+  victoria (`STATE_WIN`) en vez de volver directamente al menú; si es
+  FALSE, se comporta exactamente igual que antes (`resetToMenu()`,
+  guarda el progreso, spec §35).
+- Consecuencia directa, coherente con lo que pide el usuario: ahora el
+  jugador SIEMPRE ve/atraviesa la sala de extracción -- con la flecha
+  señalando la puerta de misión (spec §37) y, si ya tiene todo, puede
+  simplemente girar y salir por la puerta de menú para completar la
+  fase; nada cambia en la puerta de misión en sí, que sigue llevando
+  siempre a la rejilla igual que antes.
+- `make clean && make` sin errores ni warnings nuevos.
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  log sin errores. Sigue sin poder verificarse visualmente en esta
+  sesión — pendiente de que el usuario confirme que, con todas las
+  letras recogidas, volver a la sala de extracción YA NO completa la
+  fase por sí solo, y que hace falta salir por la puerta de menú para
+  que aparezca "FASE COMPLETADA".
+
+## 40. Dos esquemas de control: NORMAL (nuevo, por defecto) y BORRACHO
+
+Petición del usuario: "haz un modo de control normal cada direccion a
+su tecla de cursor. Y presionando arriba y B+C se activa el modo
+'borracho' qué es el esquema de control que hay ahora."
+
+El control que este juego siempre tuvo (heredado del js13k original)
+es: la nave avanza sola cada frame en la dirección a la que está
+"mirando", rebotando al chocar contra un muro, y LEFT/RIGHT sólo giran
+esa dirección 90° en vez de mover directamente -- de ahí el nombre
+"borracho" que le da el usuario, describe bien lo desorientador que
+es frente a un control directo. Se convierte en un modo alternativo;
+el nuevo modo NORMAL (control directo, cada dirección del D-pad mueve
+la nave hacia ahí mientras se mantenga pulsada) pasa a ser el
+predeterminado.
+
+- `player.h`/`player.c`: nuevo `DIR_NONE` (ningún valor de dirección
+  activo -- sólo posible en modo NORMAL, la nave simplemente no se
+  mueve). `movePlayer()` gana un parámetro `bounceOnWall`: TRUE
+  (borracho) invierte `p->dir` al chocar, exactamente el
+  comportamiento de siempre; FALSE (normal) deja `p->dir` y la
+  posición intactos al chocar -- la nave se queda quieta contra el
+  muro en vez de rebotar. `Player_updateRoom()` gana un parámetro
+  `drunkMode` que se limita a reenviar ese valor a `movePlayer`; la
+  detección de salida por puerta no cambia (sigue mirando `p->dir`,
+  que ahora simplemente puede valer `DIR_NONE` sin coincidir con
+  ningún caso, sin necesitar lógica nueva ahí).
+- `main.c`: nuevo `ControlMode` (`CONTROL_NORMAL`/`CONTROL_DRUNK`),
+  arranca en NORMAL, persiste entre partidas/menú (es una preferencia
+  del jugador, no parte del estado de una partida concreta). Combo de
+  activación `DRUNK_TOGGLE_COMBO = BUTTON_B|BUTTON_C|BUTTON_UP` --
+  alterna entre los dos modos, comprobado justo después del combo de
+  reset ya existente (A+B+C+UP) en el bucle principal: como
+  `DRUNK_TOGGLE_COMBO` es un subconjunto de `RESET_COMBO` (le falta
+  sólo A), mantener pulsados los 4 botones a la vez siempre resuelve
+  como el reset solo, nunca ambos a la vez (el `if`/`else if` ya
+  existente lo garantiza sin lógica extra).
+- El manejo de input en `STATE_PLAYING` se bifurca por modo: en
+  BORRACHO, LEFT/RIGHT rotan (edge-triggered, comportamiento idéntico
+  al de siempre); en NORMAL, se lee el D-pad completo cada frame
+  (UP/DOWN/LEFT/RIGHT, sin diagonales, prioridad en ese orden) y se
+  asigna directamente a `player.dir` (o `DIR_NONE` si no hay ninguna
+  dirección pulsada). Los 2 sitios donde se llama a
+  `Player_updateRoom()` pasan `controlMode == CONTROL_DRUNK` como
+  nuevo argumento.
+- Indicador en pantalla (nuevo, para poder verificar sin capturas):
+  "NORMAL" o "BORRACHO" en la esquina superior izquierda de BG_B,
+  misma técnica de alta prioridad que ya usa el contador de FPS
+  (esquina superior derecha) -- visible tanto en el menú como en
+  partida, para saber en todo momento qué modo está activo.
+- **Verificado**: nuevo test en el host (`test_control_modes.c`,
+  scratchpad de la sesión) con un `Maze_isWall` de prueba (muro fijo
+  en una columna conocida) para poder predecir el punto exacto de
+  colisión: confirma que el modo BORRACHO sigue rebotando exactamente
+  igual que antes (regresión), que el modo NORMAL se queda quieto sin
+  invertir dirección al chocar (ni se mueve más en frames
+  posteriores), y que `DIR_NONE` no mueve la nave en absoluto. (La
+  primera versión del test fallaba por una suposición incorrecta del
+  propio test sobre dónde se detiene la nave exactamente --
+  `collideRight` sondea `x+BOX` con `BOX=MAZE_TILE_PX-2=14`, no la
+  caja completa de 16px, así que el punto de parada real no cae en un
+  borde de celda limpio; corregido el test antes de confiar en el
+  resultado.)
+- `make clean && make` sin errores ni warnings nuevos.
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  log sin errores. Sigue sin poder verificarse visualmente en esta
+  sesión — pendiente de que el usuario confirme que el modo NORMAL
+  mueve la nave directamente con el D-pad, que UP+B+C activa/desactiva
+  el modo BORRACHO (el control original), y que el indicador de modo
+  se ve en la esquina superior izquierda.
+
+## 41. Modo NORMAL: velocidad constante, no hay que mantener pulsado
+
+Petición del usuario (tras confirmar que el mapeo del §40 iba bien):
+"bien pero que la velocidad sea constante como el borracho."
+
+`movePlayer()` siempre mueve exactamente 1px/frame en ambos modos --
+en eso ya eran idénticos. Lo que no era constante era el modelo de
+INPUT: el §40 leía el D-pad como "mientras se mantenga pulsado" (nivel,
+no flanco), así que la velocidad caía a 0 en el instante de soltar el
+botón -- un patrón de arranca-para, no una velocidad constante como la
+del modo borracho (que nunca se detiene salvo al chocar). Reinterpretado
+"velocidad constante como el borracho" como: una vez fijada una
+dirección, la nave debe seguir moviéndose sola a ese ritmo constante
+sin necesidad de mantener nada pulsado -- igual que el borracho nunca
+para -- y sólo cambia con una pulsación NUEVA de otra dirección, o se
+detiene (sin rebotar, spec §40) al chocar contra un muro.
+
+- `main.c`: la rama `CONTROL_NORMAL` del manejo de input pasa de nivel
+  (`state & BUTTON_X`) a flanco (`(state & BUTTON_X) &&
+  !(prevState & BUTTON_X)`) para las 4 direcciones, y se quita el
+  `else player.dir = DIR_NONE;` que antes forzaba parada al soltar --
+  ahora `player.dir` sólo cambia con una pulsación nueva, permanece
+  igual el resto del tiempo (incluida cuando no hay nada pulsado), y
+  `Player_updateRoom`/`movePlayer` (sin cambios desde el §40) ya se
+  encargan de mover 1px/frame constantemente mientras no haya
+  colisión.
+- Efecto colateral necesario: `Player_spawnAtRoomCenter` fija
+  `dir=DIR_DOWN` por defecto (pensado para que el modo BORRACHO
+  arranque avanzando solo, como el original). Con el nuevo modelo de
+  flanco del modo NORMAL, si no se corrige, la nave arrancaría
+  moviéndose sola hacia abajo desde el primer frame sin que el
+  jugador tocara nada (el flanco nunca se dispara para forzar
+  `DIR_NONE`). `newGame()` ahora sobreescribe `player.dir = DIR_NONE`
+  justo después del spawn cuando `controlMode == CONTROL_NORMAL`, así
+  que la nave empieza quieta hasta la primera pulsación, coherente con
+  un control directo.
+- No se ha tocado `player.c` en este cambio -- toda la lógica de
+  movimiento/colisión del §40 (incluido su test en el host) sigue
+  siendo válida sin cambios; esto es puramente cómo `main.c` traduce
+  el joypad a `player.dir` en modo NORMAL. No hay una forma nueva de
+  testear esto en el host (depende del bucle principal real de SGDK),
+  así que se verificó a mano releyendo la lógica de flancos y el
+  punto de reseteo en el spawn.
+- `make clean && make` sin errores ni warnings nuevos.
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  log sin errores. Sigue sin poder verificarse visualmente en esta
+  sesión — pendiente de que el usuario confirme que en modo NORMAL
+  basta con pulsar una vez una dirección para que la nave siga
+  moviéndose sola a velocidad constante hasta chocar o hasta la
+  siguiente pulsación.
+
+## 42. Modo NORMAL más rápido (sub-pasos, no un salto mayor)
+
+Petición del usuario: "que vaya más rápido en el modo normal."
+
+- **Por qué no un salto mayor**: `movePlayer()` sólo comprueba
+  colisión en la posición FINAL de destino, no en el camino. Con un
+  salto de N>1 píxeles de una vez, dos problemas reales (no
+  hipotéticos, reproducidos con un test antes de descartar este
+  enfoque): (1) puede atravesar un muro de un solo golpe si N es lo
+  bastante grande (tunneling); (2) puede pasarse del píxel exacto que
+  buscan las comprobaciones de borde/puerta (`p->y <= 0`, etc.) y
+  aterrizar en una coordenada fuera de rango que cuenta como muro,
+  quedándose bloqueado para siempre 1px antes de la salida, sin poder
+  disparar nunca el cruce de puerta -- depende de la paridad exacta
+  de la posición de partida frente al tamaño del salto.
+- **Solución**: `speed` en `Player_updateRoom` (nuevo parámetro) no es
+  un salto mayor, es repetir la lógica de 1px de siempre varias veces
+  dentro de la misma llamada/frame -- cada repetición es exactamente
+  la misma comprobación que un juego a velocidad 1 haría en su propio
+  frame separado, sólo que comprimidas en una. Nueva `updateRoomStep()`
+  (factor común, código sin tocar) hace un paso; `Player_updateRoom`
+  la llama en bucle hasta `speed` veces, devolviendo la salida de
+  inmediato en cuanto cualquier sub-paso cruza una puerta (así un
+  frame rápido tampoco puede "pasarse" de una puerta a mitad de
+  camino).
+- `main.c`: `NORMAL_MODE_SPEED=2` (doble de rápido), `DRUNK_MODE_SPEED=1`
+  (sin cambios, el borracho no se ha tocado). Los 2 sitios donde se
+  llama a `Player_updateRoom()` pasan el valor correspondiente según
+  `controlMode`.
+- **Verificado**: nuevo test en el host (`test_speed.c`, scratchpad de
+  la sesión) con un `Maze_isWall` de prueba: (1) equivalencia exacta —
+  velocidad 2 durante N frames llega EXACTAMENTE a la misma posición
+  que velocidad 1 durante 2N frames, probado con las 2 paridades de
+  arranque posibles; (2) sin tunneling — un muro de 1 celda sigue
+  bloqueando incluso a velocidad 3; (3) detección de salida — probado
+  en las 6 posiciones de partida × 4 velocidades (1 a 4) que
+  reproducen exactamente el escenario de "atascado 1px antes de la
+  puerta" que preocupaba, confirmando que SIEMPRE se dispara la
+  salida, nunca se queda atascado. (La primera versión del test
+  fallaba por un error del propio test, no del código: pasaba una
+  coordenada en píxeles donde `doorOffsetN` espera una columna de
+  laberinto en unidades de tile -- corregido antes de confiar en el
+  resultado.)
+- `make clean && make` sin errores ni warnings nuevos.
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  log sin errores. Sigue sin poder verificarse visualmente en esta
+  sesión — pendiente de que el usuario confirme que el modo NORMAL se
+  siente notablemente más rápido y sigue sin atravesar paredes ni
+  atascarse en las puertas.
+
+## 43. Cuatro esquemas de control, ciclados con el combo de debug
+
+Petición del usuario: "quiero probar varias [propuestas de control]
+quiero una interfaz para cambiarlas en debug... combo por ahora" (tras
+proponerle 3 alternativas de control: A. afinar lo actual, B. rotar +
+empuje sin rebote, C. control directo con inercia).
+
+- `ControlMode` pasa de 2 a 4 valores: `CONTROL_NORMAL` (igual que
+  antes, spec §40/§41), `CONTROL_DRUNK` (igual que antes, el control
+  original), `CONTROL_THRUST` (nuevo, "opción B" de la propuesta:
+  LEFT/RIGHT rotan como en BORRACHO, pero sólo se mueve mientras se
+  mantiene pulsado UP -- empuje real, no avance automático -- y se
+  para en vez de rebotar al chocar, como NORMAL), `CONTROL_INERTIA`
+  (nuevo, "opción C": mismo control directo que NORMAL, pero la
+  velocidad sube 1 punto cada frame que se sigue en la misma
+  dirección, hasta `INERTIA_MAX_SPEED`, y baja a 1 en cuanto se pulsa
+  una dirección nueva).
+- El combo de debug (`UP+B+C`, spec §40) deja de ser un toggle de 2 y
+  pasa a CICLAR por los 4 modos en orden (`(controlMode+1) %
+  CONTROL_MODE_COUNT`), reseteando el estado de inercia al cambiar
+  para que INERCIA siempre arranque desde 0 al entrar en ese modo.
+- Implementación de THRUST notablemente simple gracias al diseño de
+  sub-pasos del §42: pasar `speed=0` a `Player_updateRoom` cuando UP
+  no está pulsado hace que su bucle interno itere cero veces --ni
+  movimiento ni comprobación de salida-- sin necesitar ningún cambio
+  en `player.c`. INERCIA reutiliza el mismo mecanismo con un `speed`
+  que sube/baja en `main.c` en vez de ser una constante fija --
+  también sin tocar `player.c`, ya que el bucle de sub-pasos ya estaba
+  probado como seguro para cualquier valor de `speed` (spec §42).
+- El indicador de modo en pantalla (esquina superior izquierda, spec
+  §40) ahora usa una tabla de 4 etiquetas de 8 caracteres cada una
+  ("NORMAL  ", "BORRACHO", "IMPULSO ", "INERCIA "), indexada
+  directamente por `controlMode`.
+- Efecto colateral necesario: el arranque forzado a `DIR_NONE` (para
+  que la nave no se mueva sola nada más entrar en una sala, spec §41)
+  ahora se aplica también en `CONTROL_INERTIA`, no sólo en NORMAL --
+  usa el mismo modelo de control directo, así que tenía el mismo
+  problema (arrancaría moviéndose sola hacia abajo, el `DIR_DOWN` por
+  defecto de `Player_spawnAtRoomCenter`). THRUST no lo necesita: su
+  velocidad ya es 0 salvo que se mantenga pulsado UP,
+  independientemente del `dir` inicial.
+- No ha hecho falta tocar `player.c` en absoluto para añadir estos 2
+  modos nuevos -- toda la lógica de movimiento/colisión ya validada en
+  los tests de los §40/§42 (bounce vs. stop, sub-pasos sin túnel,
+  detección de salida en cualquier paridad/velocidad) sigue cubriendo
+  exactamente los mismos caminos de código, sólo orquestados de forma
+  distinta desde `main.c`.
+- `make clean && make` sin errores ni warnings nuevos.
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  log sin errores. Sigue sin poder verificarse visualmente en esta
+  sesión — pendiente de que el usuario pruebe los 4 modos con el combo
+  UP+B+C y confirme cuál(es) prefiere.
+
+## 44. Rotación tipo Asteroids en IMPULSO, más ajuste de velocidades, modo TUMBA
+
+Petición del usuario: "implementa impulso correctamente, creo que la
+nave tiene que rotar tipo asteroids? Ok además inercia tiene que
+tener más umbral de acceleracion? y normal dale más velocidad.
+Implementa ademas un modo que sea como tomb of the mask, se mueve
+hasta las paredes muy rapido."
+
+- **IMPULSO rota tipo Asteroids** (dentro de lo que permite la
+  colisión de este juego, sólo 4 direcciones cardinales -- rotación
+  libre de ángulo no es viable sin reescribir todo el sistema de
+  colisión): mantener LEFT/RIGHT pulsado ahora sigue rotando cada
+  `THRUST_ROTATE_REPEAT_FRAMES=8` frames, no sólo una vez por
+  pulsación como antes -- se siente más a "mantener para girar" que a
+  "un toque, un giro de 90°". Sólo afecta a IMPULSO; BORRACHO
+  conserva su rotación original de un toque = un giro, sin tocar.
+- **Más velocidad/umbral**: `NORMAL_MODE_SPEED` 2→3,
+  `THRUST_MODE_SPEED` 2→3 (a juego con NORMAL), `INERTIA_MAX_SPEED`
+  2→4 (la rampa ahora sube en 4 pasos, 1→2→3→4, en vez de un único
+  salto de 1 a 2 -- eso es lo que pedía "más umbral de aceleración").
+  `DRUNK_MODE_SPEED` se mantiene en 1, sin tocar (es el control
+  original, no se pidió cambiarlo).
+- **Nuevo modo TUMBA ("Tomb of the Mask")**: mismo control directo que
+  NORMAL/INERCIA (D-pad fija la dirección, no hay que mantener
+  pulsado), pero con `TOMB_MODE_SPEED=250` sub-pasos por frame -- una
+  sola pulsación desliza la nave casi instantáneamente hasta la
+  siguiente pared o puerta, exactamente el movimiento característico
+  de ese juego. 250 se eligió a propósito por encima del tramo recto
+  más largo posible en una sala de `MAZE_W x MAZE_H` (20x14 celdas *
+  16px), así que en la práctica el deslizamiento cabe en 1-2 frames
+  visuales, prácticamente instantáneo.
+- `ControlMode` pasa de 4 a 5 valores (`CONTROL_TOMB` añadido); el
+  combo de debug (`UP+B+C`) sigue ciclando por todos automáticamente
+  vía `CONTROL_MODE_COUNT`, sin tocar esa lógica. Nueva etiqueta
+  "TUMBA   " añadida a la tabla del indicador en pantalla.
+- Sin cambios en `player.c`: TUMBA e IMPULSO (repetición de rotación
+  aparte, que vive enteramente en `main.c`) reutilizan exactamente el
+  mismo mecanismo de sub-pasos ya validado en los tests de los
+  §40/§42 (rebote vs. parada, sin túnel a cualquier velocidad,
+  detección de salida en cualquier paridad) -- sólo cambia qué valor
+  de `speed`/`bounceMode` orquesta `main.c` según el modo activo.
+- `make clean && make` sin errores ni warnings nuevos.
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  log sin errores. Sigue sin poder verificarse visualmente en esta
+  sesión — pendiente de que el usuario pruebe los 5 modos y confirme
+  que IMPULSO ahora gira "a lo Asteroids" al mantener pulsado, y que
+  TUMBA se siente como el deslizamiento instantáneo de Tomb of the
+  Mask.
+
+## 45. Planetas completados, pintados de amarillo en el menú
+
+Petición del usuario: "Los planetas que se han completados pintalos
+de amarillo."
+
+- Los 7 sprites de planeta usan PAL3 (dark+violeta, compartida con el
+  cursor). Para pintar uno de amarillo sin afectar a los demás (que
+  comparten la misma paleta PAL3), se aprovecha el mismo truco ya
+  usado para el sol (spec §32septies): PAL2 -- la paleta de
+  `enemyShip` -- está completamente libre mientras se muestra el
+  menú, porque los enemigos siempre están ocultos en ese momento
+  (arranque, `resetToMenu()`, pantalla de victoria). `Menu_setVisible`
+  ahora también pone el índice1 de PAL2 en amarillo al mostrar el
+  menú, y lo restaura al violeta propio de `enemyShip` al salir --
+  mismo patrón "override + restaurar" que ya usa PAL1 para el sol.
+- `Menu_update()` gana un parámetro `completed[MENU_PLANET_COUNT]`:
+  por cada planeta, `SPR_setPalette(planetSprites[i], completed[i] ?
+  PAL2 : PAL3)` -- mismo dato de píxeles (dark+violeta) en el sprite,
+  sólo cambia de qué línea de paleta lee su color, así que no hace
+  falta arte nuevo para el planeta "completado".
+  `main.c` calcula ese array cada frame en el estado de menú, a partir
+  de `presetSave[i].hasSave && presetSave[i].collectedCount >=
+  sizePresets[i].letters` -- el mismo guardado persistente por
+  planeta del §35/§38 (recordar: completar ya NO borra el guardado
+  desde el §38, así que esta condición se mantiene TRUE
+  indefinidamente tras completar esa fase, hasta que se vuelva a
+  jugar y se abandone a medias).
+- `make clean && make` sin errores ni warnings nuevos.
+- Verificado en BlastEm: mismo lanzamiento que el §44 (misma sesión de
+  build), proceso estable, log sin errores. Sigue sin poder
+  verificarse visualmente en esta sesión — pendiente de que el
+  usuario complete algún planeta y confirme que se pinta de amarillo
+  en el menú, sin afectar al color de los demás.

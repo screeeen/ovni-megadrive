@@ -963,6 +963,83 @@ void GuideMap_drawOverlay(void)
             VDP_drawText(s, rx + (ROOM_BOX_W / 2), ry);
         }
     }
+
+    // Insertion/extraction room (spec §37, user request: "quiero que la
+    // habitación de inserción/extracción figure en el mapa") -- always
+    // drawn (the player has definitely "visited" it, every run starts
+    // there), just outside the grid on insertLinkDir's side of
+    // (insertLinkCol,insertLinkRow), the same spatial relationship the
+    // real door already has to it (maze.c/main.c). Solid fill, same look
+    // as any other visited room -- it's not a special/locked place, just
+    // physically outside the room tree.
+    {
+        s16 insCol = insertLinkCol, insRow = insertLinkRow;
+        s16 rx, ry;
+        u16 linkRx, linkRy;
+
+        switch (insertLinkDir)
+        {
+            case DOOR_N: insRow--; break;
+            case DOOR_S: insRow++; break;
+            case DOOR_E: insCol++; break;
+            default:     insCol--; break; // DOOR_W
+        }
+
+        {
+            const s16 totalW = (mapCols * ROOM_STRIDE_W) - 1;
+            const s16 totalH = (mapRows * ROOM_STRIDE_H) - 1;
+            const s16 offsetX = (TEXT_COLS - totalW) / 2;
+            const s16 offsetY = (TEXT_ROWS - totalH) / 2;
+
+            rx = offsetX + (insCol * ROOM_STRIDE_W);
+            ry = offsetY + (insRow * ROOM_STRIDE_H);
+        }
+
+        // Clamp fully on-screen: exact adjacency to the grid isn't
+        // always possible for the biggest presets (10x8 leaves almost
+        // no margin around the grid itself) -- degrades to "as close as
+        // fits" instead of drawing off-plane.
+        if (rx < 0) rx = 0;
+        if (rx > (TEXT_COLS - ROOM_BOX_W)) rx = TEXT_COLS - ROOM_BOX_W;
+        if (ry < 0) ry = 0;
+        if (ry > (TEXT_ROWS - ROOM_BOX_H)) ry = TEXT_ROWS - ROOM_BOX_H;
+
+        {
+            s16 x, y;
+
+            for (y = 0; y < ROOM_BOX_H; y++)
+                for (x = 0; x < ROOM_BOX_W; x++)
+                    putTile(MAP_TILE_FILL, PAL0, (u16) (rx + x), (u16) (ry + y));
+        }
+
+        // Corridor stub from the periphery room's own side, toward the
+        // insertion room -- same single-tile-gap convention the main
+        // per-room loop above uses for real inter-room corridors.
+        // Bounds-checked (unlike the main loop's, which never needs it --
+        // a real neighbor is always inside the grid): the periphery room
+        // can sit right at column/row 0 of the widest/tallest presets,
+        // where there's no on-screen tile left for a stub on that side.
+        roomBoxOriginTiles(insertLinkCol, insertLinkRow, &linkRx, &linkRy);
+        switch (insertLinkDir)
+        {
+            case DOOR_N:
+                if (linkRy > 0)
+                    putTile(MAP_TILE_CORRIDOR_V, PAL0, linkRx + (ROOM_BOX_W / 2), linkRy - 1);
+                break;
+            case DOOR_S:
+                if ((linkRy + ROOM_BOX_H) < TEXT_ROWS)
+                    putTile(MAP_TILE_CORRIDOR_V, PAL0, linkRx + (ROOM_BOX_W / 2), linkRy + ROOM_BOX_H);
+                break;
+            case DOOR_E:
+                if ((linkRx + ROOM_BOX_W) < TEXT_COLS)
+                    putTile(MAP_TILE_CORRIDOR_H, PAL0, linkRx + ROOM_BOX_W, linkRy);
+                break;
+            default: // DOOR_W
+                if (linkRx > 0)
+                    putTile(MAP_TILE_CORRIDOR_H, PAL0, linkRx - 1, linkRy);
+                break;
+        }
+    }
 }
 
 bool GuideMap_hasDoor(u8 col, u8 row, u8 dir)

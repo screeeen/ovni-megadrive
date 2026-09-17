@@ -91,20 +91,30 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
 // matching real border opening on that specific side of the target room
 // -- spec §29, not a blind teleport into its center). Deterministic from
 // roomSeed, same carve algorithm as Maze_generateRoom, seeded from the
-// room's own center exactly like every other room. Always exactly one
-// door and a single fixed wall-dither cell throughout instead of the
-// usual random mix -- a deliberately uniform look distinct from every
-// other room in the game. doorDir picks which border that one door sits
-// on (spec §29ter: randomized once per game via the opposite of
-// insertLinkDir, spec §29quat) -- accepts guidemap.h's DOOR_N/E/S/W
-// values (0/1/2/3) by numeric convention rather than #including
-// guidemap.h here, to keep maze.c decoupled from the guide-map module
-// the way Maze_generateRoom's plain bool doorN/E/S/W parameters already
-// do. doorOffset (spec §30) is the column (doorDir N/S) or row (doorDir
-// E/W) that one door sits at -- callers pass insertLinkOffset here, the
-// same value the periphery room's own matching opening uses, since N/S
-// and their opposite S/N (same for E/W) always share that axis.
-void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u16 roomSeed);
+// room's own center exactly like every other room. Always a single fixed
+// wall-dither cell throughout instead of the usual random mix -- a
+// deliberately uniform look distinct from every other room in the game.
+// Two doors now (spec §36, user request: "tiene que haber una salida en
+// la sala de extracción para que el usuario vuelva a salir al menu"):
+// doorDir/doorOffset is the ORIGINAL mission door -- picks which border
+// it sits on (spec §29ter: randomized once per game via the opposite of
+// insertLinkDir, spec §29quat) and where along it (spec §30, same value
+// the periphery room's own matching opening uses, since N/S and their
+// opposite S/N -- same for E/W -- always share that axis); walking
+// through it leads to/from insertLinkCol/insertLinkRow. menuDoorDir is
+// the NEW menu-exit door, always perpendicular to doorDir (main.c picks
+// it as (doorDir+1)&3, so it's never the same or opposite side) -- walking
+// through it always returns straight to the menu (main.c), regardless of
+// how much progress this run has made; menuDoorOffset is caller-supplied
+// too, same as doorOffset, even though (unlike the mission door) it never
+// needs to line up with any other room's opening -- main.c just picks a
+// fixed centered value once, kept there as the single source of truth
+// instead of duplicating a centering formula in both files. Both
+// directions accept guidemap.h's DOOR_N/E/S/W values (0/1/2/3) by
+// numeric convention rather than #including guidemap.h here, to keep
+// maze.c decoupled from the guide-map module the way Maze_generateRoom's
+// plain bool doorN/E/S/W parameters already do.
+void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 menuDoorOffset, u16 roomSeed);
 
 // Draws the current maze to plane BG_A.
 void Maze_draw(void);

@@ -31,14 +31,20 @@ void Menu_loadGraphics(void);
 // leaving it (both ways: starting a game, or the reset combo bringing
 // the menu back). Also flips the sun's color between white (visible)
 // and playerShip's own violet (hidden) on PAL1's shared slot -- see
-// SUN_INK_INDEX in menu.c.
+// SUN_INK_INDEX in menu.c -- and, the same way, PAL2's slot between
+// yellow and enemyShip's own violet (spec §45, for completed planets --
+// see Menu_update below).
 void Menu_setVisible(bool visible);
 
 // Advances each planet's orbit position by one frame and repositions its
 // sprite; repositions the cursor arrow directly above whichever planet
 // selectedIndex (0..MENU_PLANET_COUNT-1, same indexing as main.c's
-// sizePresets[]) names, tracking its current (moving) position. Call
-// once per frame while the menu is showing.
-void Menu_update(u8 selectedIndex);
+// sizePresets[]) names, tracking its current (moving) position.
+// completed[MENU_PLANET_COUNT] (spec §45, user request: "Los planetas
+// que se han completados pintalos de amarillo") -- TRUE paints that
+// planet's sprite yellow instead of its usual violet (caller, main.c,
+// derives this from its own presetSave[]). Call once per frame while
+// the menu is showing.
+void Menu_update(u8 selectedIndex, const bool *completed);
 
 #endif

@@ -37,6 +37,20 @@
 // same slot.
 #define SUN_INK_INDEX ((PAL1 * 16) + 1)
 
+// Absolute CRAM index of PAL2's index1 (spec §45, user request: "Los
+// planetas que se han completados pintalos de amarillo") -- PAL2 is
+// enemyShip's palette, otherwise completely unused for the entire time
+// the menu is shown: enemySprites are always hidden then (main.c hides
+// them at boot, in resetToMenu(), and when a run's own victory screen
+// starts), exactly like PAL1/SUN_INK_INDEX's own reasoning above. A
+// completed planet's sprite is pointed at PAL2 instead of PAL3 (see
+// Menu_update's SPR_setPalette calls) -- same 2-color dark+violet pixel
+// data every planet sprite already has, just reading its violet pixel
+// from a CRAM slot this file pokes to yellow instead. Menu_setVisible
+// flips it to yellow on entry and restores enemyShip's own violet on
+// exit, mirroring SUN_INK_INDEX's override/restore pattern exactly.
+#define COMPLETED_INK_INDEX ((PAL2 * 16) + 1)
+
 // Elliptical, not circular (spec §31) -- makes better use of the
 // 320x224 screen's aspect ratio than a true circle would. Radii grow
 // with MENU_PLANET_COUNT so every orbit reads as a clearly nested ring,
@@ -143,6 +157,15 @@ void Menu_setVisible(bool visible)
     else
         PAL_setColor(SUN_INK_INDEX, playerShip.palette->data[1]);
 
+    // Same idea on PAL2's index1 (spec §45): yellow while the menu
+    // shows (for completed-planet sprites, see Menu_update), restored
+    // to enemyShip's own violet on the way out -- safe for the same
+    // reason, enemySprites are always hidden while the menu is visible.
+    if (visible)
+        PAL_setColor(COMPLETED_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFF00));
+    else
+        PAL_setColor(COMPLETED_INK_INDEX, enemyShip.palette->data[1]);
+
     // Fresh entry into the menu always restarts the orbit animation from
     // the same spread-out starting angles -- simpler and just as good
     // visually as trying to resume mid-orbit, and avoids needing to
@@ -156,7 +179,7 @@ void Menu_setVisible(bool visible)
     }
 }
 
-void Menu_update(u8 selectedIndex)
+void Menu_update(u8 selectedIndex, const bool *completed)
 {
     u8 i;
     s16 selCx = SUN_CENTER_X, selCy = SUN_CENTER_Y; // fallback, always overwritten below
@@ -177,6 +200,10 @@ void Menu_update(u8 selectedIndex)
         cy = F16_toRoundedInt(fy);
 
         SPR_setPosition(planetSprites[i], cx - planetHalfSize[i], cy - planetHalfSize[i]);
+        // Completed planets read PAL2 (yellow, see COMPLETED_INK_INDEX)
+        // instead of PAL3 (violet) -- same pixel data either way, spec
+        // §45.
+        SPR_setPalette(planetSprites[i], completed[i] ? PAL2 : PAL3);
 
         if (i == selectedIndex)
         {

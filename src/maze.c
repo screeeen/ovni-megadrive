@@ -324,10 +324,38 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
 // the grid/tree entirely, so wallHueBase is left untouched here).
 #define INSERT_WALL_VARIANT 1
 
-void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u16 roomSeed)
+// Punches a room's 2-cell-wide door open on grid border dir, at anchor
+// (ax,ay) -- shared by both of the insertion room's doors (spec §36) so
+// their carving logic can't drift apart. Same 4-case shape
+// Maze_generateInsertionRoom's single door used to open inline.
+static void punchBorderDoor(u8 dir, s16 ax, s16 ay)
+{
+    switch (dir)
+    {
+        case MAZE_DIR_N:
+            grid[0][ax] = PATH; grid[0][ax + 1] = PATH;
+            grid[1][ax] = PATH; grid[1][ax + 1] = PATH;
+            break;
+        case MAZE_DIR_S:
+            grid[MAZE_H - 1][ax] = PATH; grid[MAZE_H - 1][ax + 1] = PATH;
+            grid[MAZE_H - 2][ax] = PATH; grid[MAZE_H - 2][ax + 1] = PATH;
+            break;
+        case MAZE_DIR_E:
+            grid[ay][MAZE_W - 1] = PATH; grid[ay + 1][MAZE_W - 1] = PATH;
+            grid[ay][MAZE_W - 2] = PATH; grid[ay + 1][MAZE_W - 2] = PATH;
+            break;
+        default: // MAZE_DIR_W
+            grid[ay][0] = PATH; grid[ay + 1][0] = PATH;
+            grid[ay][1] = PATH; grid[ay + 1][1] = PATH;
+            break;
+    }
+}
+
+void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 menuDoorOffset, u16 roomSeed)
 {
     s16 x, y;
     s16 anchorX, anchorY;
+    s16 menuAnchorX, menuAnchorY;
 
     setRandomSeed(roomSeed);
 
@@ -336,15 +364,20 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u16 roomSeed)
             grid[y][x] = INSERT_WALL_VARIANT;
 
     anchorForDoor(doorDir, doorOffset, &anchorX, &anchorY);
+    anchorForDoor(menuDoorDir, menuDoorOffset, &menuAnchorX, &menuAnchorY);
 
-    forcedTargetCount = 1;
+    forcedTargetCount = 2;
     forcedTargetX[0] = anchorX;
     forcedTargetY[0] = anchorY;
+    forcedTargetX[1] = menuAnchorX;
+    forcedTargetY[1] = menuAnchorY;
 
     carve(ROOM_SEED_COL, ROOM_SEED_ROW);
 
     if (grid[anchorY][anchorX] != PATH)
         bridgeToSeed(anchorX, anchorY);
+    if (grid[menuAnchorY][menuAnchorX] != PATH)
+        bridgeToSeed(menuAnchorX, menuAnchorY);
 
     for (x = 0; x < MAZE_W; x++)
     {
@@ -357,33 +390,20 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u16 roomSeed)
         grid[y][MAZE_W - 1] = INSERT_WALL_VARIANT;
     }
 
-    // The room's single door, on whichever border/offset doorDir/
-    // doorOffset picked (spec §29ter/§30: randomized once per game, no
-    // longer always centered on the south border) -- its one exit "into
-    // the world", leading to insertLinkCol/Row's own insertLinkDir
-    // border (guidemap.c), which main.c punches open as a genuine
-    // matching door on that room too (spec §29), so the player arrives
-    // at (and can walk back out through) a real opening, not a blind
-    // teleport into the room's center.
-    switch (doorDir)
-    {
-        case MAZE_DIR_N:
-            grid[0][anchorX] = PATH; grid[0][anchorX + 1] = PATH;
-            grid[1][anchorX] = PATH; grid[1][anchorX + 1] = PATH;
-            break;
-        case MAZE_DIR_S:
-            grid[MAZE_H - 1][anchorX] = PATH; grid[MAZE_H - 1][anchorX + 1] = PATH;
-            grid[MAZE_H - 2][anchorX] = PATH; grid[MAZE_H - 2][anchorX + 1] = PATH;
-            break;
-        case MAZE_DIR_E:
-            grid[anchorY][MAZE_W - 1] = PATH; grid[anchorY + 1][MAZE_W - 1] = PATH;
-            grid[anchorY][MAZE_W - 2] = PATH; grid[anchorY + 1][MAZE_W - 2] = PATH;
-            break;
-        default: // MAZE_DIR_W
-            grid[anchorY][0] = PATH; grid[anchorY + 1][0] = PATH;
-            grid[anchorY][1] = PATH; grid[anchorY + 1][1] = PATH;
-            break;
-    }
+    // The mission door, on whichever border/offset doorDir/doorOffset
+    // picked (spec §29ter/§30: randomized once per game, no longer
+    // always centered on the south border) -- leads to/from
+    // insertLinkCol/Row's own insertLinkDir border (guidemap.c), which
+    // main.c punches open as a genuine matching door on that room too
+    // (spec §29), so the player arrives at (and can walk back out
+    // through) a real opening, not a blind teleport into the room's
+    // center.
+    punchBorderDoor(doorDir, anchorX, anchorY);
+    // The menu-exit door (spec §36) -- always perpendicular to doorDir,
+    // so it's never the same wall and can never collide with it. Walking
+    // through it always returns to the menu (main.c), unlike the mission
+    // door whose outcome depends on progress.
+    punchBorderDoor(menuDoorDir, menuAnchorX, menuAnchorY);
 }
 
 void Maze_loadGraphics(void)

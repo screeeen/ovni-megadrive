@@ -59,6 +59,26 @@ bool Items_isUnlocked(u8 index)
     return index <= nextIndex;
 }
 
+bool Items_allCollected(void)
+{
+    return nextIndex >= itemCount;
+}
+
+u8 Items_collectedCount(void)
+{
+    return nextIndex;
+}
+
+void Items_fastForward(u8 count)
+{
+    u8 i;
+
+    for (i = 0; i < count; i++)
+        collected[i] = TRUE;
+
+    nextIndex = count;
+}
+
 bool Items_tryCollect(u8 col, u8 row, s16 playerX, s16 playerY)
 {
     s16 i;
