@@ -9,7 +9,7 @@ void Items_reset(void)
 {
     u8 i;
 
-    for (i = 0; i < ITEM_COUNT; i++)
+    for (i = 0; i < itemCount; i++)
         collected[i] = FALSE;
 
     nextIndex = 0;
@@ -19,7 +19,7 @@ static s16 findItemAt(u8 col, u8 row)
 {
     u8 i;
 
-    for (i = 0; i < ITEM_COUNT; i++)
+    for (i = 0; i < itemCount; i++)
         if ((itemCol[i] == col) && (itemRow[i] == row))
             return i;
 
@@ -63,7 +63,7 @@ bool Items_tryCollect(u8 col, u8 row, s16 playerX, s16 playerY)
 {
     s16 i;
 
-    if (nextIndex >= ITEM_COUNT)
+    if (nextIndex >= itemCount)
         return FALSE; // all collected already
 
     i = findItemAt(col, row);
@@ -103,15 +103,18 @@ void Items_drawInRoom(u8 col, u8 row)
 
 void Items_drawHud(void)
 {
+    // Sized for the largest itemCount any preset can pick (ITEM_COUNT,
+    // spec §33) -- only the first itemCount slots actually get filled
+    // and printed below.
     char line[2 * ITEM_COUNT];
     u8 i;
 
-    for (i = 0; i < ITEM_COUNT; i++)
+    for (i = 0; i < itemCount; i++)
     {
         line[2 * i] = collected[i] ? (char) ('A' + i) : '_';
         line[(2 * i) + 1] = ' ';
     }
-    line[(2 * ITEM_COUNT) - 1] = '\0'; // drop the trailing space
+    line[(2 * itemCount) - 1] = '\0'; // drop the trailing space
 
     VDP_setTextPriority(1); // draw above BG_A's low-priority maze tiles
     VDP_drawTextBG(BG_B, line, 1, 1);

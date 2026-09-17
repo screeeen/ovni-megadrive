@@ -5,18 +5,32 @@
 #include "guidemap.h"
 #include "enemy.h"
 #include "items.h"
+#include "menu.h"
 
 typedef enum { STATE_MENU, STATE_PLAYING } GameState;
 
-typedef struct { u8 cols, rows; } SizePreset;
+typedef struct { u8 cols, rows, letters; } SizePreset;
 
+// 4 new smaller/shorter phases (spec §33, user request: "fases mas
+// pequeñas, con 1,2,3,4 letras y grids mas pequeñas") ahead of the
+// original 3 (always 5 letters, spec §0/§32bis) -- letters is the new
+// per-preset item count (guidemap.h's itemCount, no longer a fixed
+// ITEM_COUNT=5 for every game). Fuzz-tested (host-side, 20000 seeds per
+// preset) via a full simulated playthrough of each -- see spec §33.
 static const SizePreset sizePresets[] = {
-    { 6, 4 },
-    { 8, 6 },
-    { 10, 8 },
+    { 3, 3, 1 },
+    { 4, 3, 2 },
+    { 5, 3, 3 },
+    { 5, 4, 4 },
+    { 6, 4, 5 },
+    { 8, 6, 5 },
+    { 10, 8, 5 },
 };
-#define SIZE_PRESET_COUNT 3
-#define SIZE_PRESET_DEFAULT 1 // 8x6, the size the spec settled on (§0)
+// Must equal menu.h's MENU_PLANET_COUNT (spec §31) -- sizePresetIndex
+// (0..SIZE_PRESET_COUNT-1) is passed straight into Menu_update() as the
+// selected planet index, indexing menu.c's own per-planet arrays.
+#define SIZE_PRESET_COUNT 7
+#define SIZE_PRESET_DEFAULT 4 // 6x4/5 letters, the original smallest full preset (§0)
 
 #define ENEMY_COUNT 2
 
@@ -220,6 +234,7 @@ static void newGame(void)
 
     mapCols = sizePresets[sizePresetIndex].cols;
     mapRows = sizePresets[sizePresetIndex].rows;
+    itemCount = sizePresets[sizePresetIndex].letters; // spec §33
 
     GuideMap_generate();
     Items_reset();
@@ -260,20 +275,32 @@ static void newGame(void)
     }
 }
 
+// Solar-system start menu (spec §31): each planet is one of
+// sizePresets[] (same order, innermost orbit = smallest map). Redrawn
+// on every LEFT/RIGHT (like the old text-only menu was) since
+// VDP_clearPlane wipes the title/hint text along with everything else on
+// BG_A -- the sun and planets are sprites now (spec §32septies), so they
+// don't need to be redrawn here at all, only the text.
 static void drawMenu(void)
 {
-    char buf[16];
+    char buf[24];
     int len;
+    const u8 letters = sizePresets[sizePresetIndex].letters;
 
     VDP_clearPlane(BG_A, TRUE);
 
-    VDP_drawText("OVNI", 18, 6);
-    VDP_drawText("TAMANO DE MAPA", 13, 11);
+    // Title moved up and the bottom text pushed down (spec §32quat) to
+    // free the extra vertical room the widened orbits need (menu.c).
+    VDP_drawText("OVNI", 18, 3);
 
-    len = sprintf(buf, "< %d x %d >", sizePresets[sizePresetIndex].cols, sizePresets[sizePresetIndex].rows);
-    VDP_drawText(buf, (40 - len) / 2, 13);
+    // Letter count shown alongside the grid size (spec §33) -- the
+    // preset's real difficulty is the combination of both, not the grid
+    // size alone, now that they vary independently.
+    len = sprintf(buf, "%d x %d - %d %s", sizePresets[sizePresetIndex].cols, sizePresets[sizePresetIndex].rows,
+                  letters, (letters == 1) ? "LETRA" : "LETRAS");
+    VDP_drawText(buf, (40 - len) / 2, 25);
 
-    VDP_drawText("PULSA START", 14, 18);
+    VDP_drawText("PULSA A PARA EMPEZAR", 10, 27);
 }
 
 // Hard reset combo (user request): A+B+C+UP together, from anywhere
@@ -295,6 +322,7 @@ static void resetToMenu(void)
     for (i = 0; i < ENEMY_COUNT; i++)
         SPR_setVisibility(enemySprites[i], HIDDEN);
 
+    Menu_setVisible(TRUE);
     drawMenu();
 }
 
@@ -307,6 +335,7 @@ int main(bool hardReset)
 
     Maze_loadGraphics();
     GuideMap_loadGraphics();
+    Menu_loadGraphics(); // spec §31 -- must come after both above, its tiles stack right after theirs in VRAM
 
     PAL_setPalette(PAL1, playerShip.palette->data, DMA);
     playerSprite = SPR_addSprite(&playerShip, 0, 0, TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
@@ -332,6 +361,7 @@ int main(bool hardReset)
         for (i = 0; i < ENEMY_COUNT; i++)
             SPR_setVisibility(enemySprites[i], HIDDEN);
     }
+    Menu_setVisible(TRUE);
     drawMenu();
 
     while (TRUE)
@@ -344,6 +374,12 @@ int main(bool hardReset)
         }
         else if (gameState == STATE_MENU)
         {
+            // Cursor arrow tracks the selected planet's live orbit
+            // position (spec §31) -- advanced every frame regardless of
+            // input, same as the enemies keep patrolling during
+            // gameplay.
+            Menu_update(sizePresetIndex);
+
             if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
             {
                 sizePresetIndex = (sizePresetIndex + SIZE_PRESET_COUNT - 1) % SIZE_PRESET_COUNT;
@@ -354,8 +390,9 @@ int main(bool hardReset)
                 sizePresetIndex = (sizePresetIndex + 1) % SIZE_PRESET_COUNT;
                 drawMenu();
             }
-            if ((state & BUTTON_START) && !(prevState & BUTTON_START))
+            if ((state & BUTTON_A) && !(prevState & BUTTON_A))
             {
+                Menu_setVisible(FALSE);
                 gameState = STATE_PLAYING;
                 newGame();
             }

@@ -3,3 +3,8 @@ TILESET mapTiles "sprite/map_tiles.png" NONE NONE ROW
 SPRITE playerShip "sprite/player.png" 2 2 BEST
 SPRITE enemyShip "sprite/enemy.png" 2 2 BEST
 SPRITE mapShip "sprite/map_ship.png" 1 1 BEST
+SPRITE planetSmall "sprite/planet_small.png" 1 1 BEST
+SPRITE planetMedium "sprite/planet_medium.png" 2 2 BEST
+SPRITE planetLarge "sprite/planet_large.png" 3 3 BEST
+SPRITE cursorArrow "sprite/cursor_arrow.png" 1 1 BEST
+SPRITE menuSun "sprite/menu_sun.png" 4 4 BEST

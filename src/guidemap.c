@@ -11,6 +11,7 @@ u8 goalCol, goalRow;
 u8 insertLinkCol, insertLinkRow, insertLinkDir, insertLinkOffset;
 u8 itemCol[ITEM_COUNT], itemRow[ITEM_COUNT];
 u8 mapCols = 8, mapRows = 6; // sane default if a caller forgets to set these
+u8 itemCount = 5; // sane default if a caller forgets to set this (spec §33)
 
 // Worst case: every CELL_EMPTY cell gets pushed once per already-carved
 // neighbor (up to 4 times) before it's claimed. See spec §8. Sized for the
@@ -312,7 +313,7 @@ static s16 itemIndexAtRoom(u8 col, u8 row)
 {
     u8 i;
 
-    for (i = 0; i < ITEM_COUNT; i++)
+    for (i = 0; i < itemCount; i++)
         if ((itemCol[i] == col) && (itemRow[i] == row))
             return i;
 
@@ -455,18 +456,19 @@ static void selectGoal(void)
     }
 }
 
-// Picks itemCol[]/itemRow[] (spec §13): ITEM_COUNT dead-end rooms (exactly
+// Picks itemCol[]/itemRow[] (spec §13): itemCount dead-end rooms (exactly
 // 1 door, never the start room), spread apart from each other via greedy
 // farthest-point sampling -- each pick maximizes the MINIMUM door-graph
 // distance to every room already picked (seeded with distance-from-start
 // so item 0 isn't just an arbitrary first leaf). Needs one bfsFromRoom()
-// call per already-picked item (cheap: <=ITEM_COUNT passes over a map of
+// call per already-picked item (cheap: <=itemCount passes over a map of
 // at most MAX_MAP_COLS*MAX_MAP_ROWS cells).
 static void selectItemRooms(void)
 {
     static Coord candidates[MAX_MAP_COLS * MAX_MAP_ROWS];
     static u16 minDistToChosen[MAX_MAP_COLS * MAX_MAP_ROWS];
     u16 candidateCount = 0;
+    bool startUsedAsFallback = FALSE;
     s16 col, row;
     u8 n;
     u16 i;
@@ -490,18 +492,38 @@ static void selectItemRooms(void)
     for (i = 0; i < candidateCount; i++)
         minDistToChosen[i] = dist[candidates[i].row][candidates[i].col];
 
-    for (n = 0; n < ITEM_COUNT; n++)
+    for (n = 0; n < itemCount; n++)
     {
         u16 bestIdx = 0;
         u16 bestScore = 0;
 
         if (candidateCount == 0)
         {
-            // Not enough dead-end rooms (degenerate tiny/heavily-pruned
-            // map): fall back to the start room rather than crash. Not
-            // expected to trigger at the grid sizes in play (spec §0).
+            // Not enough dead-end rooms for the requested itemCount
+            // (small/heavily-pruned map, much more likely now that spec
+            // §33 added 1-4 letter presets on tiny grids) -- the start
+            // room is the only fallback, but it can only stand in for
+            // ONE item: a second item placed there too would be an
+            // undetectable duplicate (findItemAt only ever returns the
+            // FIRST match at a given position), silently stranding
+            // whichever later letter never gets its own distinct room
+            // (this exact bug, previously reachable a different way --
+            // the farthest-point sampling above re-picking an already-
+            // chosen dead-end room once every remaining candidate's
+            // score degraded to 0 -- is what the swap-remove below
+            // fixes). So: use the start room for at most one item, and
+            // if the map is too small even for that, gracefully lower
+            // itemCount for the rest of THIS game instead -- better to
+            // offer fewer letters than the preset nominally asked for
+            // than to ship an uncollectible one.
+            if (startUsedAsFallback)
+            {
+                itemCount = n;
+                break;
+            }
             itemCol[n] = startCol;
             itemRow[n] = startRow;
+            startUsedAsFallback = TRUE;
             continue;
         }
 
@@ -525,7 +547,21 @@ static void selectItemRooms(void)
             if (d < minDistToChosen[i])
                 minDistToChosen[i] = d;
         }
-        minDistToChosen[bestIdx] = 0; // never picked again
+
+        // Remove the just-picked candidate outright (spec §33 bugfix) --
+        // a candidate's score can only ever decrease afterwards (its
+        // distance to itself is always 0), so once every remaining
+        // candidate has also degraded to score 0 -- easy to reach on a
+        // small map with few dead ends relative to itemCount -- the
+        // >= comparison above would otherwise re-select this exact same
+        // room on a later round (a tie at score 0), producing a
+        // duplicate itemCol/itemRow entry that silently strands
+        // whichever later letter never actually gets its own room.
+        // Swap-remove (order doesn't matter here), same pattern
+        // carveTree's frontier consumption already uses.
+        candidateCount--;
+        candidates[bestIdx] = candidates[candidateCount];
+        minDistToChosen[bestIdx] = minDistToChosen[candidateCount];
     }
 }
 
@@ -845,9 +881,9 @@ void GuideMap_drawOverlay(void)
                           // -- not just shown differently. A locked room
                           // (spec §16) can never be visited either (the
                           // unlock is monotonic), so this also covers it.
-                          // The 5 item rooms are the one exception, drawn
-                          // in a separate pass below (spec §21) regardless
-                          // of visited state.
+                          // The itemCount item rooms are the one
+                          // exception, drawn in a separate pass below
+                          // (spec §21) regardless of visited state.
 
             // Every visited room (current or not) is fully solid (spec
             // §23) -- the blinking white ship sprite (main.c) is what
@@ -892,18 +928,18 @@ void GuideMap_drawOverlay(void)
         }
     }
 
-    // All 5 item rooms (spec §21, replaces §20's single-letter beacon):
-    // regardless of visited/locked state, show that room's letter AND a
-    // hollow-border box -- the "known, unvisited" look the map used
-    // before the §17 fog-of-war tightened things, now scoped to only
-    // these 5 rooms instead of every explored-but-unvisited cell. A room
-    // already drawn by the main pass above (visited, including the
-    // current room) is skipped here -- it already shows its letter via
-    // Items_revealedOnMap and keeps its normal solid/dither look.
+    // All itemCount item rooms (spec §21, replaces §20's single-letter
+    // beacon): regardless of visited/locked state, show that room's
+    // letter AND a hollow-border box -- the "known, unvisited" look the
+    // map used before the §17 fog-of-war tightened things, now scoped to
+    // only these itemCount rooms instead of every explored-but-unvisited
+    // cell. A room already drawn by the main pass above (visited,
+    // including the current room) is skipped here -- it already shows
+    // its letter via Items_revealedOnMap and keeps its normal solid look.
     {
         u8 n;
 
-        for (n = 0; n < ITEM_COUNT; n++)
+        for (n = 0; n < itemCount; n++)
         {
             const u8 icol = itemCol[n];
             const u8 irow = itemRow[n];

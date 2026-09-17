@@ -6,7 +6,7 @@
 // Clears all collected flags -- call once per newGame() (spec §13).
 void Items_reset(void);
 
-// True (and fills *outLetter with 'A'..'A'+ITEM_COUNT-1) if room (col,row)
+// True (and fills *outLetter with 'A'..'A'+itemCount-1) if room (col,row)
 // holds an item that hasn't been collected yet. Used for the in-room
 // letter draw -- a room can hold at most one item by construction
 // (itemCol/itemRow are distinct dead-end rooms).
@@ -19,7 +19,7 @@ bool Items_uncollectedAt(u8 col, u8 row, char *outLetter);
 // shown, anything further ahead in the sequence is not revealed yet.
 bool Items_revealedOnMap(u8 col, u8 row, char *outLetter);
 
-// True if item `index` (0..ITEM_COUNT-1) is at or before the one currently
+// True if item `index` (0..itemCount-1) is at or before the one currently
 // due -- same threshold Items_revealedOnMap uses. guidemap.c calls this to
 // decide which branches of the room tree stay open vs. get sealed (spec
 // §16), without needing to know about collected[]/nextIndex directly.

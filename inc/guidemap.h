@@ -7,8 +7,18 @@
 // static array sizes below. The ACTIVE size for the current game is
 // (mapCols, mapRows), set by main.c before calling GuideMap_generate();
 // every loop/bounds-check in guidemap.c uses those, not these two.
+// Reverted to 10x8 (spec §32bis, user request) -- spec §32's 2 larger
+// presets (which needed 14x12) are gone again.
 #define MAX_MAP_COLS 10
 #define MAX_MAP_ROWS 8
+
+// mapTiles occupies this many contiguous VRAM tiles right after
+// maze.c's own tileset (guidemap.c's MAP_TILE_BASE = TILE_USER_INDEX +
+// MAZE_TILE_COUNT). Exposed publicly so other modules that load their
+// own tileset after both of these (e.g. menu.c) can compute where their
+// own tiles start, the same way maze.h's MAZE_TILE_COUNT already lets
+// guidemap.c do this for itself.
+#define GUIDEMAP_TILE_COUNT 10
 
 typedef enum { CELL_EMPTY, CELL_ROOM } CellType;
 
@@ -75,12 +85,17 @@ extern u8 goalCol, goalRow;
 extern u8 insertLinkOffset;
 extern u8 insertLinkCol, insertLinkRow, insertLinkDir;
 
-// Item rooms (spec §13): letters A..A+ITEM_COUNT-1, one per dead-end room
+// Item rooms (spec §13): letters A..A+itemCount-1, one per dead-end room
 // (exactly 1 door), picked by farthest-point sampling so they end up
 // spread apart from the start AND from each other, not clustered.
 // itemCol[n]/itemRow[n] is where letter n lives; items.c owns which ones
-// are collected.
+// are collected. ITEM_COUNT is the largest itemCount any preset can pick
+// (main.c) -- fixes the static array sizes below, same MAX_/active
+// relationship as MAX_MAP_COLS/mapCols above. itemCount itself is set by
+// main.c before calling GuideMap_generate() (spec §33: "fases mas
+// pequeñas", 1-4 letter presets alongside the original 5-letter ones).
 #define ITEM_COUNT 5
+extern u8 itemCount;
 extern u8 itemCol[ITEM_COUNT];
 extern u8 itemRow[ITEM_COUNT];
 

@@ -1902,3 +1902,533 @@ comparte un lado completo, nunca solo una esquina.
   relacionada con esto, sin cambios).
 - Verificado en BlastEm: build limpio (`make`, sin warnings), arranque
   limpio sin errores en el log tras el rebuild.
+
+## 31. Menú de inicio: sistema solar animado
+
+Petición del usuario: sustituir el menú de texto por una pantalla con
+varios planetas girando alrededor de un sol, con las líneas de su
+órbita visibles, y una flecha/cursor justo encima del planeta
+seleccionado. Botón A confirma y empieza la partida.
+
+Decisión de mapeo (no requería preguntar, era la única lectura
+razonable dado que el menú solo elegía tamaño de mapa hasta ahora):
+cada planeta = uno de los 3 `sizePresets[]` existentes (6x4/8x6/10x8),
+mismo orden — órbita interior = mapa más pequeño. `LEFT`/`RIGHT` sigue
+cambiando `sizePresetIndex` exactamente igual que antes; solo cambió
+la representación visual y el botón de confirmación (`A` en vez de
+`START`, tal como pidió el usuario).
+
+Implementación:
+- **Módulo nuevo `menu.c`/`.h`**: separado de `main.c` para mantener
+  la responsabilidad de la animación/render del sistema solar aislada,
+  siguiendo el mismo patrón modular que `maze.c`/`guidemap.c`/etc.
+  Expone `Menu_loadGraphics()` (una vez, boot), `Menu_draw()` (arte
+  estático: sol + líneas de órbita, sobre `BG_A`), `Menu_setVisible(bool)`
+  (mostrar/ocultar los 4 sprites del menú y reiniciar los ángulos de
+  órbita al entrar), `Menu_update(u8 selectedIndex)` (cada frame:
+  avanza cada órbita, reposiciona los 3 planetas y el cursor).
+- **Matemática de órbita**: usa `F16_computePositionEx` (SGDK,
+  `maths.h`, confirmada su fórmula exacta leyendo `maths.c`:
+  `x2 = x1 + dist·cos(áng)·cosMul`, `y2 = y1 + dist·sin(áng)·sinMul`) —
+  con `dist=FIX16(1)` y `cosMul`/`sinMul` = radio X/Y de cada órbita,
+  da directamente una posición elíptica (no circular, para aprovechar
+  mejor la pantalla 320x224) sin necesitar llamar a seno/coseno a
+  mano. Cada planeta tiene su propio ángulo (`orbitAngle[3]`,
+  persistente entre frames) y velocidad angular fija
+  (interior más rápido, como un sistema solar real) — puramente
+  decorativo, sin significado de jugabilidad.
+- **Líneas de órbita**: en vez de un dibujo pixel-perfecto (no hay
+  motor de líneas en este proyecto), se recorre cada elipse en pasos
+  de `ORBIT_DOT_STEP_DEG=4` grados, convirtiendo cada punto muestreado
+  a coordenadas de tile (8px) y colocando ahí un tile "punto" — a esta
+  resolución de muestreo, tiles consecutivos quedan iguales o
+  contiguos, leyéndose como un anillo punteado continuo. El sol usa la
+  misma técnica que ya usaba `guidemap.c` para el relleno sólido de la
+  sala actual (spec §18/§23): recorrer una caja de tiles y comprobar
+  `dx²+dy² <= radio²` contra el centro de cada tile.
+- **Arte nuevo** (`res/sprite/`, todo duotono `#252525`/`#987DFA`,
+  mismo estilo que el resto del juego): `menu_tiles.png` (16x8, 2
+  celdas: punto de órbita + relleno de sol, plano `BG_A`, reutiliza
+  `PAL0` ya cargada por `Maze_loadGraphics`); `planet_small.png` (8x8),
+  `planet_medium.png` (16x16), `planet_large.png` (24x24) — el tamaño
+  del planeta crece con el tamaño del mapa que representa, una pista
+  visual gratuita que sustituye parte de lo que antes solo decía el
+  texto; `cursor_arrow.png` (8x8, triángulo apuntando hacia abajo con
+  un pequeño "rabo", para que se lea claramente como cursor). Los 4
+  sprites nuevos usan `PAL3`, la única paleta que no usaba nada más en
+  todo el juego (`PAL0`=maze/texto, `PAL1`=nave/mapShip,
+  `PAL2`=enemigos) — así el menú nunca pisa ningún color en uso.
+- **VRAM**: `menuTiles` se carga justo después del tileset de
+  `guidemap.c`, apilando tiles igual que `guidemap.c` ya hacía tras
+  `maze.c`. Como `MAP_TILE_BASE` (guidemap.c) es privado, se expuso un
+  nuevo `GUIDEMAP_TILE_COUNT=10` público en `guidemap.h` (mismo rol
+  que `MAZE_TILE_COUNT` de `maze.h`) para que `menu.c` pueda calcular
+  su propia base sin necesitar acceso a nada privado de `guidemap.c`.
+- **Cursor "justo encima del planeta"**: se recalcula cada frame a
+  partir de la posición YA computada del planeta seleccionado ese
+  mismo frame (no un ángulo aparte) — horizontalmente centrado, con el
+  borde inferior del cursor a `CURSOR_GAP_PX=4` px del borde superior
+  real de ESE planeta en concreto (`planetHalfSize[i]` varía por
+  tamaño: 4/8/12px), así que la flecha se pega igual de cerca al
+  planeta pequeño que al grande, no queda "flotando" más lejos en unos
+  que en otros.
+- **`main.c`**: `drawMenu()` ya no dibuja "TAMANO DE MAPA" con flechas
+  de texto "< 6 x 4 >" (el cursor visual las sustituye) — solo el
+  título, el sistema solar (`Menu_draw()`), el tamaño en texto plano
+  como confirmación legible, y "PULSA A PARA EMPEZAR". `Menu_update()`
+  se llama cada frame mientras `gameState==STATE_MENU` (las órbitas
+  siguen moviéndose aunque no se pulse nada, igual que las patrullas
+  de los enemigos durante la partida). `Menu_setVisible(TRUE)` al
+  entrar al menú (boot y `resetToMenu()`, spec §28) y `FALSE` justo
+  antes de `newGame()`. Botón `START` queda libre/sin uso en el menú;
+  `BUTTON_A` confirma — comprobado que no colisiona con el combo de
+  reset (`A+B+C+ARRIBA`, spec §28), ya que ese combo se comprueba
+  primero y tiene prioridad ese frame, así que pulsar solo A en el
+  menú nunca se confunde con el combo completo.
+- **Verificado**: build limpio (`make`, sin warnings más allá de los
+  ya conocidos de `rom_header.c`, ajenos a este cambio), arranque
+  limpio en BlastEm sin errores en el log. La fórmula de
+  `F16_computePositionEx` se confirmó leyendo el código fuente de SGDK
+  (`src/maths.c`) en vez de asumirla por la documentación, para evitar
+  una malinterpretación de qué representa cada parámetro. **No se
+  pudo verificar visualmente** en esta sesión (la captura de pantalla
+  del emulador no funcionó en este entorno, solo devolvía el
+  escritorio) — pendiente de que el usuario lo confirme visualmente
+  él mismo.
+
+## 32. Más planetas (tamaños de mapa reales) y órbitas con líneas continuas
+
+Dos peticiones del usuario tras probar el §31: más planetas, y que las
+órbitas se vean como líneas continuas en vez de punteadas.
+
+Decisión confirmada (preguntada antes de implementar, ya que afectaba
+a la jugabilidad): los planetas nuevos son tamaños de mapa **reales**
+y seleccionables, no decoración — de 3 a 5 planetas/presets en total.
+
+**Más planetas**:
+- `main.c`: `sizePresets[]` pasa de 3 a 5 entradas, extendiendo la
+  misma progresión `+2/+2` que ya tenían las 3 originales:
+  `{6,4},{8,6},{10,8},{12,10},{14,12}`. Se extendió hacia arriba
+  (mapas más grandes), no hacia abajo — reducir por debajo de 6x4
+  arriesgaba agravar el problema de asignación duplicada de items ya
+  documentado en el §16 para mapas pequeños. `SIZE_PRESET_COUNT` pasa
+  a 5.
+- `guidemap.h`: `MAX_MAP_COLS`/`MAX_MAP_ROWS` suben de 10x8 a 14x12
+  para dar cabida a los 2 presets nuevos — el coste extra en RAM
+  estática de los arrays de scratch de `guidemap.c` (aprox. el doble,
+  pero sigue siendo del orden de unos pocos KB) es insignificante
+  frente a los 64KB de RAM de la Genesis.
+- `menu.h`: `MENU_PLANET_COUNT` pasa a 5 (con su comprobación cruzada
+  ya existente contra `SIZE_PRESET_COUNT` del §31).
+- **Arte nuevo**: `planet_huge.png` (32x32, 4x4 tiles — el tamaño
+  máximo que admite un sprite de hardware en Genesis, 4 tiles por
+  eje). Solo existen 4 tamaños de sprite distintos posibles en
+  múltiplos de 8px hasta ese límite (8/16/24/32), así que para 5
+  planetas los dos más grandes comparten el mismo sprite
+  `planetHuge` — no se pierde precisión real, ya que el tamaño exacto
+  en celdas siempre se muestra además como texto plano debajo del
+  sistema solar.
+- `menu.c`: `orbitRadiusX/Y`, `orbitSpeed`, `planetHalfSize` pasan de
+  3 a 5 entradas cada uno, con radios/velocidades reescalados para
+  que las 5 órbitas quepan holgadas en la pantalla sin invadir el
+  texto de arriba/abajo. `Menu_setVisible`'s reinicio de ángulos
+  iniciales se generalizó de 3 valores fijos a un bucle
+  (`360/MENU_PLANET_COUNT * i`), repartiendo cualquier número de
+  planetas uniformemente sin tocar el código si este número vuelve a
+  cambiar en el futuro.
+
+**Órbitas como líneas continuas** (antes: puntos aislados por tile,
+spec §31):
+- `menu_tiles.png` se simplifica a 2 celdas: una de fondo oscuro sin
+  uso directo (ancla para que rescomp asigne el índice 0 de paleta al
+  fondo, igual que en todos los demás tilesets del juego) y una
+  única celda sólida violeta, reutilizada tanto para el sol como para
+  las líneas de órbita — ya no hace falta un tile de "punto"
+  independiente.
+- Nueva `drawTileLine(x0,y0,x1,y1)` en `menu.c`: algoritmo de
+  Bresenham clásico, en unidades de TILE (no píxel) — conecta con un
+  tramo ininterrumpido de tiles sólidos cada dos muestras consecutivas
+  de la elipse, en vez de colocar cada muestra de forma aislada. Es
+  la misma categoría de problema que el bug del §30bis
+  (`bridgeToSeed`): dos puntos "sueltos" necesitan que se rellenen
+  también las celdas intermedias, no solo sus propios extremos, o la
+  línea se ve rota allí donde dos muestras consecutivas no caen ya en
+  tiles contiguos. `drawOrbit` ahora conecta cada muestra con la
+  anterior (y la última con la primera, para cerrar el óvalo) en vez
+  de solo colocar un tile por muestra; el paso entre muestras
+  (`ORBIT_SAMPLE_STEP_DEG`) pudo subir de 4 a 12 grados (menos
+  muestras) precisamente porque ya no depende de caer en tiles
+  contiguos por casualidad — `drawTileLine` lo garantiza
+  explícitamente.
+- **Verificado**: `make clean && make` sin ningún warning (más allá
+  de los ya conocidos de `rom_header.c`). Nuevo `test_bigmaps.c`
+  (2000 generaciones entre los 2 presets nuevos, 12x10 y 14x12):
+  `insertLinkCol/Row` sigue siendo siempre válido y nunca queda
+  bloqueado en ningún punto de la partida (misma comprobación central
+  que `test_door_offsets.c`/`test_insertion.c` del §30bis, aplicada
+  ahora a los tamaños de mapa más grandes que existen) — 0 fallos.
+  Re-ejecutados `test_locks.c`, `test_sections.c`, `test_insertion.c`
+  y `test_door_offsets.c` (con los presets originales) sin fallos —
+  subir `MAX_MAP_COLS`/`MAX_MAP_ROWS` no cambia nada para los tamaños
+  que ya funcionaban.
+- Verificado en BlastEm: build limpio, arranque limpio sin errores en
+  el log tras el rebuild. **Tampoco se pudo verificar visualmente en
+  esta sesión** (mismo problema de captura de pantalla que en el
+  §31) — sigue pendiente de confirmación visual del usuario.
+
+## 32bis. Revertido el aumento a 5 planetas (líneas continuas se mantienen)
+
+El usuario probó el §32 y pidió revertir solo la parte de "más
+planetas", volviendo a los 3 tamaños de mapa originales — las líneas
+de órbita continuas (también del §32) no se mencionaron para revertir
+y se mantienen sin cambios.
+
+Revertido:
+- `main.c`: `sizePresets[]` vuelve a `{6,4},{8,6},{10,8}`;
+  `SIZE_PRESET_COUNT` vuelve a 3.
+- `guidemap.h`: `MAX_MAP_COLS`/`MAX_MAP_ROWS` vuelven a 10x8.
+- `menu.h`: `MENU_PLANET_COUNT` vuelve a 3.
+- `menu.c`: `orbitRadiusX/Y`, `orbitSpeed`, `planetHalfSize` vuelven a
+  sus 3 valores originales del §31 (`SUN_CENTER_Y` también vuelve de
+  136 a 128, ajustado en el §32 solo para dar cabida a las 5 órbitas).
+  Se quitan las 2 líneas de `Menu_loadGraphics()` que creaban sprites
+  con `planetHuge`.
+- Se elimina la entrada `SPRITE planetHuge` de `resources.res` y se
+  borra `res/sprite/planet_huge.png` (ya sin ningún uso).
+
+Sin cambios (deliberadamente, no pedido): `drawTileLine()` (Bresenham)
+y el resto de la mecánica de líneas continuas del §32 -- `Menu_draw`
+sigue conectando cada muestra de la elipse con la anterior en vez de
+colocar tiles aislados, con el mismo tile `MENU_TILE_FILL` único.
+- **Verificado**: `make clean && make` sin warnings nuevos.
+  Re-ejecutados `test_locks.c`, `test_sections.c`, `test_insertion.c`
+  y `test_door_offsets.c` sin fallos (vuelven a operar sobre los
+  tamaños de rejilla originales, ya cubiertos de sobra por corridas
+  previas de estos mismos tests).
+- Verificado en BlastEm: build limpio, arranque limpio sin errores en
+  el log tras el rebuild. Sigue sin poder verificarse visualmente en
+  esta sesión (mismo problema de captura de pantalla).
+
+## 32ter. Órbitas con líneas finas de 2px (auto-tiling por dirección)
+
+Petición del usuario: en vez del tile sólido de 8px (§32) o los
+puntos aislados (§31), que las órbitas se vean como líneas finas de
+2px de grosor.
+
+Solución (una forma ligera de "auto-tiling"): dado que cada paso
+individual del algoritmo de Bresenham solo puede ser uno de 4 tipos
+exactos — horizontal, vertical, o una de las dos diagonales — se
+crearon 4 tiles nuevos, uno por tipo, y se elige el correcto en cada
+paso según su dirección real, en vez de usar siempre el mismo tile
+sólido.
+
+Implementación:
+- **Arte nuevo** en `menu_tiles.png` (ahora 6 celdas: ancla oscura +
+  relleno del sol + 4 líneas finas): `menu_line_h.png` (barra
+  horizontal, filas 3-4 de 2px), `menu_line_v.png` (barra vertical,
+  columnas 3-4), y dos diagonales de 2px de grosor dibujadas con
+  `-strokewidth 2` (`menu_line_bslash.png` de esquina superior-
+  izquierda a inferior-derecha, `menu_line_fslash.png` la contraria).
+  El relleno sólido del sol se mantiene sin cambios.
+- `menu.c`: nueva `orbitTileForStep(dx,dy)` — clasifica el paso según
+  `dx==0` (vertical), `dy==0` (horizontal), `dx==dy` (diagonal "\") o
+  ninguno de los anteriores (diagonal "/"); son los 4 únicos casos
+  posibles que un paso de Bresenham puede producir (cada paso mueve
+  como mucho ±1 en cada eje). `drawTileLine` se renombra/reescribe
+  como `lineTo(curX,curY,targetX,targetY)`: en vez de recibir dos
+  puntos fijos y plantar el tile de inicio Y fin, avanza desde la
+  posición ACTUAL (puntero, se actualiza al terminar) hacia el
+  objetivo, plantando solo las celdas NUEVAS (la de partida ya la
+  plantó la llamada anterior, evitando plantarla dos veces con
+  posiblemente dos direcciones distintas) — cada una con el tile que
+  corresponde a la dirección real de ESE paso concreto. `drawOrbit`
+  planta el primer punto de la elipse a mano (con un tile arbitrario,
+  irrelevante entre las ~30 celdas del resto del anillo) y encadena
+  llamadas a `lineTo` para cada muestra siguiente, cerrando el óvalo
+  al final con una llamada más de vuelta al primer punto.
+- **Verificado**: `make clean && make` sin warnings nuevos en
+  `menu.c`. Se escribió una simulación aparte en el host
+  (matemática en coma flotante estándar, no la trigonometría fix16
+  real de SGDK, así que no valida bit a bit el resultado en consola
+  pero sí la lógica de conectividad/selección de tile) que renderiza
+  los 3 anillos como arte ASCII: confirma que las 3 elipses quedan
+  completamente conectadas, sin huecos, y que el carácter elegido en
+  cada celda (`-`/`|`/`\`/`/`) sigue la pendiente local real de la
+  curva en cada tramo.
+- Verificado en BlastEm: build limpio, arranque limpio sin errores en
+  el log tras el rebuild. Sigue sin poder verificarse visualmente
+  (renderizado real) en esta sesión (mismo problema de captura de
+  pantalla que en el §31/§32) — pendiente de confirmación del
+  usuario.
+
+## 32quat. Órbitas más amplias
+
+Petición del usuario: las órbitas del menú, más amplias.
+
+Implementación:
+- `menu.c`: `orbitRadiusX`/`orbitRadiusY` pasan de `{40,70,100}`/
+  `{20,34,48}` (spec §32bis) a `{55,90,130}`/`{26,41,56}` — el eje X
+  se ensancha con más margen (la pantalla es de 320px de ancho, sobra
+  espacio) que el Y (más limitado por el texto de arriba/abajo).
+  `SUN_CENTER_Y` baja de 128 a 120 para repartir mejor el espacio
+  vertical disponible entre las órbitas y el texto.
+- `main.c`, `drawMenu()`: el título ("OVNI") sube de la fila 6 a la 3,
+  y el texto de tamaño/instrucción baja de las filas 24/26 a las
+  25/27 (la última fila válida de la pantalla, 28 filas de texto en
+  total) — liberando el margen vertical extra que necesitan las
+  órbitas más anchas sin que el texto se solape con ellas.
+- **Verificado**: `make clean && make` sin warnings nuevos. Se
+  reutilizó la simulación en el host del §32ter (matemática en coma
+  flotante estándar, no la trigonometría fix16 real de SGDK) con los
+  radios nuevos: los 3 anillos siguen quedando completamente
+  conectados y dentro de los límites de la rejilla de 40x28 tiles,
+  visiblemente más anchos que antes y con margen de sobra respecto al
+  sol y a los bordes de la pantalla.
+- Verificado en BlastEm: build limpio, arranque limpio sin errores en
+  el log tras el rebuild. Sigue sin poder verificarse visualmente
+  (renderizado real) en esta sesión — pendiente de confirmación del
+  usuario.
+
+## 32quinquies. Órbitas aún más amplias, cerca del límite físico de la pantalla
+
+El usuario pidió una segunda vuelta de "más amplias" tras el §32quat.
+Esta vez se calculó explícitamente el techo real de cada eje en vez
+de solo escalar a ojo:
+- **Eje X**: limitado por el ancho de pantalla (320px, mitad=160)
+  menos el semi-ancho del planeta más grande (12px) y un margen
+  pequeño (4px) → máximo `160-12-4=144`.
+- **Eje Y**: limitado por el hueco entre el título (fila 3) y el
+  texto inferior (filas 25/27) menos el espacio que necesita la
+  flecha del cursor sobre el planeta más grande (hueco 4px + flecha
+  8px + semi-alto del planeta 12px = 24px) — resolviendo las dos
+  restricciones (que el borde superior de la órbita más grande no
+  choque con el título, que el borde inferior no choque con el texto)
+  a la vez da `SUN_CENTER_Y=122` y radio Y máximo `≈62`.
+- `orbitRadiusX`/`orbitRadiusY` pasan de `{55,90,130}`/`{26,41,56}`
+  (spec §32quat) a `{65,105,144}`/`{30,46,62}` — ya cerca del límite
+  físico real, no queda mucho margen para ensanchar más sin tocar
+  también la disposición del texto.
+- **Verificado**: `make clean && make` sin warnings nuevos.
+  Reutilizada la simulación en el host con los radios nuevos: los 3
+  anillos siguen conectados y dentro de los límites de la rejilla de
+  40x28 tiles (comprobado también a mano: `tx` cae en [2,38] de 40
+  columnas, `ty` en [8,23] de 28 filas — ambos con margen, sin
+  desbordar).
+- Verificado en BlastEm: build limpio, arranque limpio sin errores en
+  el log tras el rebuild. Sigue sin poder verificarse visualmente en
+  esta sesión — pendiente de confirmación del usuario.
+
+## 32sexies. Sin líneas de órbita, sol blanco
+
+Petición del usuario: "no pintes las lineas de las órbitas y el
+centro es una bola blanca".
+
+- Eliminado por completo el dibujado de las órbitas: las funciones
+  `orbitTileForStep`, `lineTo` y `drawOrbit` (introducidas en §32ter)
+  se borran de `menu.c`, junto con las 4 variantes de tile de línea
+  fina (`MENU_TILE_LINE_H/V/BACK/FWD`) y la constante
+  `ORBIT_SAMPLE_STEP_DEG`, todas ya sin uso. `Menu_draw()` queda
+  reducido a una sola llamada: `drawSun();`.
+- `orbitRadiusX[]`/`orbitRadiusY[]` (§32quinquies) se conservan sin
+  cambios — siguen marcando la trayectoria elíptica que anima la
+  posición de cada planeta en `Menu_update()`, solo que ya no hay
+  ninguna línea dibujada bajo esa trayectoria.
+- `menu_tiles.png` pasa de un tileset de varias celdas (fondo oscuro +
+  4 variantes de línea + relleno violeta) a solo 3 celdas: celda0 =
+  fondo oscuro sin uso (ancla para que rescomp asigne el índice0 al
+  color oscuro, convención de todo el proyecto), celda1 = placeholder
+  violeta sin uso (reserva el índice1, que ya es violeta de forma
+  permanente por `Maze_loadGraphics`, para que la celda2 caiga en el
+  índice2), celda2 = relleno sólido, con `PAL_setColor(2,
+  RGB24_TO_VDPCOLOR(0xFFFFFF))` en `Menu_loadGraphics()` poniendo ese
+  índice2 en blanco. `MENU_TILE_FILL` pasa a apuntar a esa celda2.
+  Verificado el orden de escaneo raster con
+  `magick menu_tiles_v4.png -unique-colors txt:-`: exactamente 3
+  colores, en el orden esperado (oscuro, violeta, blanco).
+- Nota de recuperación: durante esta sesión se detectó que
+  `res/sprite/` había quedado vacío en disco (los 5 PNG trackeados
+  por git como borrados sin commit, y los PNG nuevos del menú
+  --nunca añadidos a git-- directamente ausentes). Todos los
+  orígenes seguían disponibles sin tocar en el scratchpad de trabajo
+  (`/tmp/mazepeek/`), así que se restauraron los trackeados con
+  `git checkout -- res/sprite/...` y se recopiaron los del menú
+  (`menu_tiles_v4.png`, `planet_small/medium/large.png`,
+  `cursor_arrow.png`) desde ahí. Ningún asset se perdió, pero conviene
+  hacer `git add`/commit de los sprites del menú en algún momento para
+  que dejen de depender de esa copia temporal.
+- **Verificado**: `make clean && make` sin errores ni warnings nuevos
+  (solo los habituales, inofensivos, de `rom_header.c`). `grep` en
+  `src/`, `inc/`, `res/` confirma que no queda ninguna referencia a
+  los símbolos eliminados (`MENU_TILE_LINE_*`, `orbitTileForStep`,
+  `lineTo`, `drawOrbit`, `ORBIT_SAMPLE_STEP_DEG`).
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  sin errores en el log. Sigue sin poder verificarse visualmente en
+  esta sesión (limitación de captura de pantalla ya documentada en
+  §31/§32) — pendiente de confirmación del usuario.
+
+## 32septies. El sol como sprite circular real, no relleno de tiles
+
+Pregunta del usuario: "pero por que el bloque del centro no es un
+círculo?" — tras §32sexies el sol se pintaba rellenando tiles de BG_A
+de 8x8 cuyo centro cayera dentro del radio. Con `SUN_RADIUS_PX=12` esa
+prueba por tile, calculada a mano, sólo dejaba pasar un bloque limpio
+de 2x3 tiles (16x24px) — un rectángulo, cero curvatura, ninguna tile
+de esquina pasaba parcialmente. La resolución de 8px por tile es
+demasiado gruesa para aproximar un círculo tan pequeño.
+
+- El sol pasa a ser un sprite real de 32x32px (4x4 tiles),
+  `res/sprite/menu_sun.png`, con una máscara circular por píxel — la
+  misma técnica que ya usan con éxito los sprites de los planetas
+  (`planet_large.png` a 24x24 ya se ve razonablemente redondo con este
+  método). Generado con ImageMagick dibujando el círculo y luego
+  remapeando (`-remap`) a los 2 colores exactos del proyecto para
+  eliminar el antialiasing (que habría introducido colores
+  intermedios no válidos en una paleta de 4 bits) — confirmado con
+  `-unique-colors`: exactamente 2 colores, 471 oscuro / 553 violeta,
+  esquina superior-izquierda oscura (así que rescomp escanea oscuro
+  primero → index0, violeta segundo → index1).
+- Ese orden de escaneo (oscuro=index0, violeta=index1) es EL MISMO que
+  usan playerShip, enemyShip, mapShip, los 3 planetas y el cursor — es
+  decir, `menu_sun.png` no necesita ningún truco de reserva de índice
+  de paleta: compila con la paleta de dos colores ya usada por todos
+  esos sprites. Confirmado directamente en `out/release/res/resources.s`:
+  el struct compilado de `menuSun` apunta al símbolo
+  `playerShip_palette` (rescomp deduplica paletas byte-idénticas), la
+  misma paleta que ya usan `cursorArrow`/`planetSmall`/etc. — prueba
+  concluyente sin necesitar captura de pantalla.
+- Como el color real (violeta) no sirve — el usuario pidió blanco — el
+  sprite se engancha a PAL1 (la paleta de playerShip/mapShip) en vez de
+  crear una paleta nueva o pelear por un índice libre en PAL0/PAL3
+  (los 4 líneas de paleta del Genesis ya estaban repartidas: PAL0
+  mapa/texto, PAL1 nave/mapShip, PAL2 enemigos, PAL3 planetas/cursor).
+  playerShip y mapShip están SIEMPRE ocultos mientras se muestra el
+  menú (main.c los oculta en el arranque y en `resetToMenu()`), así
+  que nada más depende del color de PAL1 índice1 en ese momento.
+  `Menu_setVisible()` ahora hace `PAL_setColor(SUN_INK_INDEX, ...)`
+  para poner ese slot en blanco al mostrar el menú, y lo restaura al
+  violeta original de `playerShip.palette->data[1]` al ocultarlo —
+  exactamente el mismo patrón de "override temporal + restauración"
+  que ya usaba el código del parpadeo del §23
+  (`PLAYER_SHIP_INK_INDEX`), sólo que aplicado desde `menu.c` en vez
+  de `main.c`.
+- Eliminado por completo lo que quedaba de la versión basada en tiles
+  de BG: `menuTiles` (TILESET + `menu_tiles.png`), `MENU_TILE_BASE`/
+  `MENU_TILE_FILL`, `putMenuTile()`, `drawSun()`, y `Menu_draw()`
+  entera (ya no queda nada que dibujar en BG_A para el sol/planetas,
+  que ahora son sprites autónomos) — junto con sus 3 referencias en
+  `main.c` (dentro de `drawMenu()`) y su declaración en `menu.h`.
+- **Verificado**: `make clean && make` sin errores ni warnings nuevos.
+  `grep` confirma cero referencias sueltas a los símbolos eliminados.
+  Inspección directa de `out/release/res/resources.s`: `menuSun`
+  comparte paleta con `playerShip` (confirma el mapeo de índices sin
+  necesitar ejecutar el juego).
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  sin errores en el log. Sigue sin poder verificarse visualmente en
+  esta sesión — pendiente de confirmación del usuario de que ahora sí
+  se ve como un círculo blanco.
+
+## 33. Fases más pequeñas (1, 2, 3 y 4 letras), añadidas al menú de planetas
+
+Petición del usuario: "Haz fases mas pequeñas. Con 1,2,3,4 letras y con
+grids de habitaciones mas pequeñas. Incluyelas en el menu de los
+planetas".
+
+- Hasta ahora `ITEM_COUNT` (número de letras) era una constante de
+  compilación fija en 5, usada en todas partes (`guidemap.c`,
+  `items.c`) — cada partida colocaba siempre exactamente 5 letras,
+  fuera cual fuera el preset de tamaño. Pasa a ser una variable en
+  tiempo de ejecución, `itemCount`, con el mismo patrón ya establecido
+  para `mapCols`/`mapRows` vs `MAX_MAP_COLS`/`MAX_MAP_ROWS`: `ITEM_COUNT`
+  sigue existiendo como el máximo (dimensiona los arrays estáticos
+  `itemCol[]`/`itemRow[]`/`collected[]`/el buffer del HUD), pero cada
+  bucle que antes iteraba hasta `ITEM_COUNT` ahora itera hasta el
+  `itemCount` activo de esa partida (`guidemap.c`: `itemIndexAtRoom`,
+  `selectItemRooms`, el bucle de "letra siempre visible" de
+  `GuideMap_drawOverlay`; `items.c`: reset, `findItemAt`,
+  `Items_tryCollect`, `Items_drawHud`).
+- `main.c`: `SizePreset` gana un tercer campo, `letters`. 4 presets
+  nuevos, más pequeños que el mínimo anterior (6x4), añadidos ANTES de
+  los 3 originales (que se mantienen sin cambios, siempre con 5
+  letras):
+  ```
+  { 3, 3, 1 },
+  { 4, 3, 2 },
+  { 5, 3, 3 },
+  { 5, 4, 4 },
+  { 6, 4, 5 },   // original más pequeño
+  { 8, 6, 5 },   // original medio
+  { 10, 8, 5 },  // original más grande
+  ```
+  `newGame()` ahora también fija `itemCount = sizePresets[...].letters`
+  junto a `mapCols`/`mapRows`, antes de `GuideMap_generate()`. El texto
+  del menú (`drawMenu()`) muestra ahora también el número de letras
+  ("6 x 4 - 5 LETRAS"), ya que tamaño de grid y número de letras varían
+  de forma independiente y ambos importan para saber la dificultad
+  real del preset elegido.
+- **Bug real encontrado por fuzzing (no reportado por el usuario,
+  encontrado proactivamente al validar los presets nuevos)**:
+  `selectItemRooms()` (farthest-point sampling de las salas donde van
+  las letras) podía elegir la MISMA sala sin querer dos veces. La
+  puntuación de una sala ya elegida sólo puede bajar con el tiempo
+  (su distancia a sí misma es 0), así que en cuanto TODAS las salas
+  candidatas restantes degradan también a puntuación 0 — algo mucho
+  más fácil de alcanzar en un grid pequeño con pocos callejones sin
+  salida en relación al número de letras pedido — la comparación `>=`
+  del algoritmo podía volver a seleccionar esa misma sala ya elegida
+  en una ronda posterior, produciendo una entrada duplicada en
+  `itemCol[]/itemRow[]`. Eso deja una de las letras sin sala propia:
+  `Items_tryCollect` nunca la reconoce como "la siguiente debida" en
+  esa posición (porque `findItemAt` encuentra primero la ocurrencia
+  anterior, ya recogida), atascando la partida sin poder terminar.
+  Reproducido incluso en el preset ORIGINAL de 6x4/5 letras (no es un
+  bug introducido por los presets nuevos, sólo mucho más fácil de
+  disparar con ellos: ~0.03% de las semillas en 6x4/5 letras, frente a
+  0% observado en los presets nuevos con este primer fix). Corregido
+  eliminando la sala ya elegida del array de candidatas (swap-remove,
+  mismo patrón que ya usa el consumo del `frontier` en `carveTree`) en
+  vez de sólo poner su puntuación a 0.
+- Tras ese primer fix seguía habiendo un segundo caso, más raro
+  (2 fallos en 21000 simulaciones): cuando el grid es TAN pequeño que
+  se queda sin candidatas genuinas para más de una letra, el único
+  fallback (la sala de inicio) se reutilizaba para varias letras a la
+  vez — el mismo bug, sólo que en la sala de inicio en vez de en un
+  callejón sin salida. Corregido: la sala de inicio sólo puede servir
+  de fallback para UNA letra; si el grid es tan pequeño que ni siquiera
+  eso basta, `itemCount` se reduce para el resto de esa partida
+  concreta en vez de crear un duplicado incobrable — mejor ofrecer
+  menos letras de las nominales que una letra imposible de recoger.
+- `menu.c`/`menu.h`: `MENU_PLANET_COUNT` pasa de 3 a 7. Sólo existen 4
+  tamaños de sprite discretos en el hardware real (1 a 4 tiles por
+  lado, y el de 4 tiles ya lo usa el sol, spec §32septies), así que con
+  7 planetas cada tamaño de sprite se reutiliza en un grupo de niveles
+  contiguos (pequeño ×3, medio ×2, grande ×2) — el radio de la órbita
+  (más cerca = preset más pequeño/fácil) pasa a ser la señal visual
+  principal de progresión entre los 7, no el tamaño del sprite.
+  `orbitRadiusX[]`/`orbitRadiusY[]` recalculados desde cero para 7
+  anillos: el anillo exterior (el preset 10x8 original) mantiene
+  exactamente el mismo techo físico que antes (X=144/Y=62); el anillo
+  interior (el preset nuevo 3x3/1 letra) se sitúa lo bastante lejos del
+  propio sprite del sol (radio visual ~13px) más el medio-ancho del
+  planeta (4px) más un margen (X=46/Y=20); los 5 anillos intermedios
+  se interpolan linealmente entre esos dos extremos en cada eje por
+  separado, manteniendo la misma proporción X/Y (~2.32) que ya tenía
+  el anillo exterior.
+- **Verificado**: nuevo test de fuzzing en el host
+  (`test_small_phases.c`, scratchpad de la sesión) que simula una
+  partida COMPLETA (generar mapa, recalcular locks, recoger cada letra
+  en orden en su posición real, recalculando locks tras cada una) para
+  los 7 presets × 20000 semillas cada uno = 140000 simulaciones — 0
+  fallos tras los dos fixes anteriores (71 fallos con el primer bug
+  sin corregir, 2 fallos tras el primer fix pero antes del segundo).
+  `make clean && make` sin errores ni warnings nuevos. `grep` confirma
+  que las únicas referencias a `ITEM_COUNT` que quedan son,
+  correctamente, las de dimensionado de arrays (el máximo), nunca
+  bucles activos.
+- Verificado en BlastEm: cerrada la instancia anterior de este mismo
+  proyecto que aún corría desde una prueba previa de esta sesión, se
+  lanzó una nueva con la ROM reconstruida; proceso estable varios
+  segundos, log sin errores. Sigue sin poder verificarse visualmente
+  en esta sesión — pendiente de que el usuario confirme que los 7
+  planetas y sus tamaños/letras se ven y se seleccionan correctamente.
