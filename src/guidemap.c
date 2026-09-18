@@ -1063,3 +1063,46 @@ u8 GuideMap_doorOffset(u8 col, u8 row, u8 dir)
         default:     return guideMap[row][col].doorOffsetW; // DOOR_W
     }
 }
+
+u8 GuideMap_criticalDoorDir(u8 col, u8 row)
+{
+    const u8 pendingIndex = Items_collectedCount();
+    u8 targetCol, targetRow;
+    u8 d;
+
+    if (pendingIndex >= itemCount)
+        return GUIDEMAP_NO_CRITICAL_DIR; // everything already collected
+
+    targetCol = itemCol[pendingIndex];
+    targetRow = itemRow[pendingIndex];
+
+    if ((col == targetCol) && (row == targetRow))
+        return GUIDEMAP_NO_CRITICAL_DIR; // already in the pending item's own room
+
+    // bfsFromRoom fills dist[][] from the TARGET -- same backward-walk-
+    // by-one-less-distance technique markPathToFirstItem already uses
+    // for item 0 specifically (spec §29bis), generalized here to
+    // whichever item index is currently due. The branch containing
+    // targetCol/targetRow is guaranteed unlocked by construction (it
+    // holds the item at exactly pendingIndex, which trivially satisfies
+    // "at or before pendingIndex" -- guidemap.c's own lock computation
+    // already keeps this path open), so the door this returns is never
+    // one Maze_generateRoom will have sealed as locked.
+    bfsFromRoom(targetCol, targetRow);
+
+    if (dist[row][col] == 0xFF)
+        return GUIDEMAP_NO_CRITICAL_DIR; // unreachable -- defensive, shouldn't happen
+
+    for (d = 0; d < 4; d++)
+    {
+        s16 ncol, nrow;
+
+        if (!GuideMap_hasDoor(col, row, d)) continue;
+
+        neighborInDir(col, row, d, &ncol, &nrow);
+        if (dist[nrow][ncol] == (u8) (dist[row][col] - 1))
+            return d;
+    }
+
+    return GUIDEMAP_NO_CRITICAL_DIR; // defensive, shouldn't be reached
+}

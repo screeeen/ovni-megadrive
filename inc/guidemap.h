@@ -121,6 +121,24 @@ bool GuideMap_hasDoor(u8 col, u8 row, u8 dir);
 // GuideMap_hasDoor(col,row,dir) is FALSE.
 u8 GuideMap_doorOffset(u8 col, u8 row, u8 dir);
 
+// Sentinel GuideMap_criticalDoorDir returns when (col,row) has no
+// "critical" direction to guarantee (spec §46) -- either every item is
+// already collected, or (col,row) IS the currently-pending item's own
+// room (nothing further to reach from here).
+#define GUIDEMAP_NO_CRITICAL_DIR 0xFF
+
+// Direction (DOOR_N/E/S/W) of the next hop from (col,row) toward the
+// room holding whichever item is currently due, or
+// GUIDEMAP_NO_CRITICAL_DIR (spec §46, user request: "las habitaciones
+// esten generadas de forma que siempre la nave pueda acceder a las
+// salidas y entradas de esta habitación mediante el esquema... tomb").
+// Since the room graph is a tree, there's exactly one such next hop --
+// main.c passes this into Maze_generateRoom so it can carve a
+// guaranteed tomb-safe (degree<=2) path between the room's entrance and
+// this one specific door, on top of whatever the normal (not
+// tomb-guaranteed) maze layout already has for every other door.
+u8 GuideMap_criticalDoorDir(u8 col, u8 row);
+
 // Which branch (0..MAZE_SECTION_COUNT-1, maze.h) growing directly out of
 // the start room this room belongs to (spec §18) -- every room hanging
 // off the same direct child of the start shares one number, the start

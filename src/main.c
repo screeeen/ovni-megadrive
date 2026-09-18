@@ -323,10 +323,14 @@ static u8 doorOffsetFor(u8 col, u8 row, u8 dir)
     return GuideMap_doorOffset(col, row, dir);
 }
 
-static void loadRoom(u8 col, u8 row)
+static void loadRoom(u8 col, u8 row, u8 entryDir)
 {
     const MapCell cell = guideMap[row][col];
     const u16 seed = roomSeedFor(col, row);
+    // spec §46: which door leads toward whatever the ship actually
+    // needs next, so Maze_generateRoom can guarantee a TOMB-safe path
+    // between it and entryDir (wherever this load is entering from).
+    const u8 criticalDir = GuideMap_criticalDoorDir(col, row);
     // Locked branches (spec §16): a door that exists in the room graph but
     // leads only to letters not due yet gets sealed -- short-circuit skips
     // GuideMap_isRoomLocked when there's no door at all in that direction,
@@ -360,7 +364,8 @@ static void loadRoom(u8 col, u8 row)
     u8 i;
 
     Maze_generateRoom(doorN, doorE, doorS, doorW,
-                       lockedN, lockedE, lockedS, lockedW, doorOffsets, sectionHue, seed);
+                       lockedN, lockedE, lockedS, lockedW, doorOffsets, sectionHue, seed,
+                       entryDir, criticalDir);
     Maze_draw();
     Items_drawInRoom(col, row);
 
@@ -394,7 +399,7 @@ static void enterRoomFrom(u8 exitDir)
         default:         currentCol--; enterDoorDir = DOOR_E; break; // EXIT_WEST
     }
 
-    loadRoom(currentCol, currentRow);
+    loadRoom(currentCol, currentRow, enterDoorDir);
     positionPlayerEnteringViaDoorDir(enterDoorDir, doorOffsetFor(currentCol, currentRow, enterDoorDir));
 }
 
@@ -876,7 +881,7 @@ int main(bool hardReset)
                     inInsertRoom = FALSE;
                     currentCol = insertLinkCol;
                     currentRow = insertLinkRow;
-                    loadRoom(currentCol, currentRow);
+                    loadRoom(currentCol, currentRow, insertLinkDir);
                     positionPlayerEnteringViaDoorDir(insertLinkDir, insertLinkOffset);
                     drawInsertRoomStatus(FALSE); // spec §34 -- only relevant while actually in the insertion room
 

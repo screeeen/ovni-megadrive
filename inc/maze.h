@@ -79,9 +79,26 @@ void Maze_generate(void);
 // same dither shapes/density either way, just a different accent color,
 // so rooms in different branches of the map read as different "zones"
 // while playing.
+// entryDir/criticalDir (spec §46, user request: rooms must always let
+// the ship reach the door it actually needs using TOMB-mode sliding,
+// which can only ever stop where the current direction is blocked by a
+// wall -- a plain windy maze routinely traps a needed branch behind a
+// junction a slide sails straight past, fuzz-confirmed at a ~82%
+// failure rate before this fix) -- entryDir is which door the player is
+// entering THIS load through, criticalDir is which door (same numeric
+// convention, or GUIDEMAP_NO_CRITICAL_DIR's value 0xFF for "none needed"
+// -- maze.c doesn't #include guidemap.h, see this function's other
+// comments on that) leads toward whatever the ship actually needs next.
+// When criticalDir is a real direction different from entryDir, an
+// extra guaranteed-safe path is carved between those two doors' anchor
+// points ON TOP of the normal maze, walling off any side branch along
+// it so nothing else can turn it into an unreachable-by-sliding
+// junction -- every OTHER door in the room keeps the normal, not
+// specifically tomb-guaranteed, layout.
 void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
                         bool lockedN, bool lockedE, bool lockedS, bool lockedW,
-                        const u8 doorOffsets[4], u8 sectionHue, u16 roomSeed);
+                        const u8 doorOffsets[4], u8 sectionHue, u16 roomSeed,
+                        u8 entryDir, u8 criticalDir);
 
 // Carves the special "insertion room" (spec §27): the very first room
 // the player ever sees, outside the normal room-tree grid entirely (its

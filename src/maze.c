@@ -190,6 +190,21 @@ void Maze_generate(void)
 #define ANCHOR_DEPTH_E (MAZE_W - 4)
 #define ANCHOR_DEPTH_W 2
 
+// The actual border tile (depth 0) for a door at this offset -- spec
+// §46's guaranteed chain needs to reach all the way out here, not just
+// the interior anchor, since that's where a tomb-mode slide really
+// starts/stops.
+static void borderForDoor(u8 dir, u8 offset, s16 *outX, s16 *outY)
+{
+    switch (dir)
+    {
+        case MAZE_DIR_N: *outX = offset;       *outY = 0;              break;
+        case MAZE_DIR_S: *outX = offset;       *outY = MAZE_H - 1;     break;
+        case MAZE_DIR_E: *outX = MAZE_W - 1;   *outY = offset;         break;
+        default:         *outX = 0;            *outY = offset;         break; // MAZE_DIR_W
+    }
+}
+
 // Combines a direction's fixed depth with its along-border offset (spec
 // §30) into the actual (x,y) anchor point carve() targets for that door.
 static void anchorForDoor(u8 dir, u8 offset, s16 *outX, s16 *outY)
@@ -240,9 +255,128 @@ static void bridgeToSeed(s16 x, s16 y)
     }
 }
 
+// Numeric value matches guidemap.h's GUIDEMAP_NO_CRITICAL_DIR -- defined
+// locally instead of #including guidemap.h, same reason MAZE_DIR_N/E/S/W
+// above are (this file stays decoupled from the guide-map module).
+#define MAZE_NO_CRITICAL_DIR 0xFF
+
+// Appends the straight-line points from the chain's current last point
+// (px[*count-1],py[*count-1]) to (toX,toY) -- spec §46. Lets
+// Maze_generateRoom/Maze_generateInsertionRoom build ONE continuous
+// waypoint chain across several straight segments (a door's own
+// border-to-anchor stretch, the main entry-to-critical run, the far
+// door's own anchor-to-border stretch) before a single carve+seal pass
+// (carveWaypointChain below) treats the WHOLE thing as one path.
+//
+// That matters specifically because treating each segment as its own
+// independent guaranteed path (an earlier attempt at this) left every
+// anchor protected only as the ENDPOINT of its own segment -- endpoints
+// are deliberately left unsealed, so the anchor could still have
+// whatever OTHER connection the plain maze happened to carve through it
+// (e.g. toward the room's hub). A ship sliding in from the actual door
+// would then just sail straight past the anchor via that other
+// connection instead of stopping to turn, never actually reaching the
+// guaranteed corridor at all (fuzz-confirmed: this exact failure mode
+// survived the first, per-segment version of this fix). Making the
+// anchor an INTERIOR point of one single chain -- with only the two
+// real door borders left as true, unprotected ends -- closes that gap:
+// every other connection the anchor might have picked up is sealed
+// same as any other interior point's.
+// yFirst picks which axis moves first when BOTH still differ (when only
+// one differs -- the common case for a door's own short border<->anchor
+// stretch -- it doesn't matter, the other loop just never runs). This
+// matters for the one call per chain that connects two different doors'
+// anchors directly (spec §46 bugfix, found by fuzzing with varied
+// offsets instead of a fixed test set that happened to never trigger
+// it): departing an anchor along the SAME axis as that door's own
+// border sits on can walk straight back into that door's own 2-cell
+// span before this function's caller ever reaches it, corrupting the
+// chain with a revisited point and, with it, the sealing pass's prev/
+// next bookkeeping for that point. Departing on the PERPENDICULAR axis
+// first is unconditionally safe: that axis's coordinate is fixed at the
+// anchor's own value the entire time the OTHER axis still differs at
+// the border, so it can never re-enter the border's own column/row
+// range regardless of which way the target lies.
+static void appendLine(s16 *px, s16 *py, u16 *count, s16 toX, s16 toY, bool yFirst)
+{
+    s16 cx = px[*count - 1], cy = py[*count - 1];
+
+    if (yFirst)
+    {
+        while (cy != toY) { cy += (cy < toY) ? 1 : -1; px[*count] = cx; py[*count] = cy; (*count)++; }
+        while (cx != toX) { cx += (cx < toX) ? 1 : -1; px[*count] = cx; py[*count] = cy; (*count)++; }
+    }
+    else
+    {
+        while (cx != toX) { cx += (cx < toX) ? 1 : -1; px[*count] = cx; py[*count] = cy; (*count)++; }
+        while (cy != toY) { cy += (cy < toY) ? 1 : -1; px[*count] = cx; py[*count] = cy; (*count)++; }
+    }
+}
+
+// Carves every point of the chain as PATH, then walls off every INTERIOR
+// point's (i.e. not px[0]/py[0] or the last point) non-chain neighbors
+// (spec §46) -- so nothing the normal carve()/bridgeToSeed() already put
+// nearby can turn any point along this chain into a 3-or-4-way junction.
+// That matters for tomb-mode sliding specifically: a ship gliding
+// through a junction with a branch collinear with its direction of
+// travel sails straight past that branch without ever stopping there,
+// permanently stranding whatever is only reachable through it (fuzz-
+// confirmed: ~82% of rooms failed this way with the plain maze alone).
+// useRandomVariant/fixedWallValue mirror how each kind of room fills a
+// plain wall cell elsewhere: a normal room calls randomWallVariant()
+// independently per cell (useRandomVariant TRUE, fixedWallValue
+// ignored) to keep its usual per-cell dither variety; the uniform-look
+// insertion room instead always uses the one fixed INSERT_WALL_VARIANT
+// value (useRandomVariant FALSE).
+static void carveWaypointChain(const s16 *px, const s16 *py, u16 count, bool useRandomVariant, u8 fixedWallValue)
+{
+    u16 i;
+
+    for (i = 0; i < count; i++)
+        grid[py[i]][px[i]] = PATH;
+
+    // A chain with 2+ turns can double back near itself -- a LATER
+    // point can end up grid-adjacent to an EARLIER one it isn't array-
+    // adjacent to (a "hook" shape), fuzz-confirmed to really happen
+    // once both ends need to depart/arrive on specific perpendicular
+    // axes (spec §46). Checking only prev/next missed that: it walled
+    // off a cell the chain legitimately used later, breaking the very
+    // guarantee this function exists for. Checking membership in the
+    // WHOLE chain instead -- not just the two array-adjacent points --
+    // is what actually needs to hold: only truly foreign cells (never
+    // part of this path at all) get walled.
+    for (i = 1; (i + 1) < count; i++)
+    {
+        static const s16 nx[4] = {  0, 1, 0, -1 };
+        static const s16 ny[4] = { -1, 0, 1,  0 };
+        u8 d;
+
+        for (d = 0; d < 4; d++)
+        {
+            const s16 tx = px[i] + nx[d];
+            const s16 ty = py[i] + ny[d];
+            bool inChain = FALSE;
+            u16 j;
+
+            for (j = 0; j < count; j++)
+            {
+                if ((px[j] == tx) && (py[j] == ty))
+                {
+                    inChain = TRUE;
+                    break;
+                }
+            }
+
+            if (!inChain && (tx > 0) && (ty > 0) && (tx < MAZE_W - 1) && (ty < MAZE_H - 1))
+                grid[ty][tx] = useRandomVariant ? randomWallVariant() : fixedWallValue;
+        }
+    }
+}
+
 void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
                         bool lockedN, bool lockedE, bool lockedS, bool lockedW,
-                        const u8 doorOffsets[4], u8 sectionHue, u16 roomSeed)
+                        const u8 doorOffsets[4], u8 sectionHue, u16 roomSeed,
+                        u8 entryDir, u8 criticalDir)
 {
     s16 x, y;
     s16 anchorX[4], anchorY[4]; // indexed by MAZE_DIR_N/E/S/W
@@ -281,6 +415,44 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
     {
         grid[y][0] = randomWallVariant();
         grid[y][MAZE_W - 1] = randomWallVariant();
+    }
+
+    // Guaranteed TOMB-mode-safe path between the entrance and whichever
+    // door actually leads toward progress (spec §46), BEFORE the door
+    // spans get punched open below -- only when there's a real,
+    // different door to guarantee (criticalDir is never locked by
+    // construction, see GuideMap_criticalDoorDir's own comment on that).
+    // ONE continuous chain from the entry door's own border, through its
+    // anchor, through the L-shaped run, through the critical door's own
+    // anchor, out to ITS border -- not separate per-segment paths (see
+    // appendLine's own comment on why that failed fuzzing). Runs before
+    // the door-punch block, not after: its sealing pass can legitimately
+    // touch row/col 1 next to an anchor (only the absolute border,
+    // row/col 0, is excluded), which for an N or W door is the SAME
+    // row/column as that door's own second span cell -- running the
+    // door punch afterwards means its unconditional per-span writes
+    // always have the final say, so a span can never end up narrower
+    // than its real 2 cells regardless of what this did nearby.
+    if ((criticalDir != MAZE_NO_CRITICAL_DIR) && (criticalDir != entryDir))
+    {
+        s16 px[4 * (MAZE_W + MAZE_H)];
+        s16 py[4 * (MAZE_W + MAZE_H)];
+        u16 count = 1;
+        // Depart the entry anchor on the axis perpendicular to ITS OWN
+        // border (spec §46 bugfix -- see appendLine's own comment):
+        // E/W borders are horizontal, so leave via Y first.
+        const bool leaveYFirst = (entryDir == MAZE_DIR_E) || (entryDir == MAZE_DIR_W);
+
+        borderForDoor(entryDir, doorOffsets[entryDir], &px[0], &py[0]);
+        appendLine(px, py, &count, anchorX[entryDir], anchorY[entryDir], FALSE); // single-axis stretch, order irrelevant
+        appendLine(px, py, &count, anchorX[criticalDir], anchorY[criticalDir], leaveYFirst);
+        {
+            s16 borderX, borderY;
+            borderForDoor(criticalDir, doorOffsets[criticalDir], &borderX, &borderY);
+            appendLine(px, py, &count, borderX, borderY, FALSE); // single-axis stretch, order irrelevant
+        }
+
+        carveWaypointChain(px, py, count, TRUE, 0);
     }
 
     // A sealed door (spec §16) is punched with independent
@@ -388,6 +560,32 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
     {
         grid[y][0] = INSERT_WALL_VARIANT;
         grid[y][MAZE_W - 1] = INSERT_WALL_VARIANT;
+    }
+
+    // Guaranteed TOMB-mode-safe chain between the two doors' own borders
+    // (spec §46) -- unlike a normal room, BOTH of the insertion room's
+    // doors always need mutual access (there's no "locked" concept
+    // here), so this runs unconditionally. Runs BEFORE the door-punch
+    // calls below, same reasoning as Maze_generateRoom's own guaranteed
+    // chain: its sealing pass can legitimately touch a door's own second
+    // span row/column, and the door punch's unconditional per-span
+    // writes need the final say so a span can never end up narrower
+    // than its real 2 cells.
+    {
+        s16 px[4 * (MAZE_W + MAZE_H)];
+        s16 py[4 * (MAZE_W + MAZE_H)];
+        u16 count = 1;
+        s16 borderX, borderY;
+        // See Maze_generateRoom's identical comment on this.
+        const bool leaveYFirst = (doorDir == MAZE_DIR_E) || (doorDir == MAZE_DIR_W);
+
+        borderForDoor(doorDir, doorOffset, &px[0], &py[0]);
+        appendLine(px, py, &count, anchorX, anchorY, FALSE);
+        appendLine(px, py, &count, menuAnchorX, menuAnchorY, leaveYFirst);
+        borderForDoor(menuDoorDir, menuDoorOffset, &borderX, &borderY);
+        appendLine(px, py, &count, borderX, borderY, FALSE); // single-axis stretch, order irrelevant
+
+        carveWaypointChain(px, py, count, FALSE, INSERT_WALL_VARIANT);
     }
 
     // The mission door, on whichever border/offset doorDir/doorOffset

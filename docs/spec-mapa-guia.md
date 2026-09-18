@@ -3088,3 +3088,98 @@ de amarillo."
   verificarse visualmente en esta sesión — pendiente de que el
   usuario complete algún planeta y confirme que se pinta de amarillo
   en el menú, sin afectar al color de los demás.
+
+## 46. Salas generadas para que el modo TUMBA pueda llegar a la puerta que necesita
+
+Petición del usuario: "te voy a pedir que las habitaciones esten
+generadas de forma que siempre la nave pueda acceder a las salidas y
+entradas de esta habitación mediante el esquema de movimiento tomb."
+
+- **Hallazgo inicial**: con el generador de laberinto actual (serpenteante,
+  backtracking), un fuzz-test simulando deslizamientos tomb encontró que
+  **~82% de las salas generadas tienen al menos una puerta inalcanzable**
+  sólo con deslizamientos (247686 fallos de 300000 combinaciones). Causa
+  estructural: con deslizamiento, un punto donde el camino se ramifica en
+  3+ direcciones nunca es alcanzable desde todas sus ramas (al deslizarte
+  en línea recta por una rama que continúa, te pasas de largo el punto de
+  ramificación). Con hasta 4 puertas por sala, garantizar las 4
+  simultáneamente exigiría un rediseño completo (cámaras de cruce
+  dibujadas a mano) que el usuario, tras la propuesta, decidió NO hacer.
+- **Alcance acordado** (2 preguntas): sólo garantizar la puerta que
+  realmente hace falta para progresar (no las 4), y que la generación sea
+  la MISMA para los 5 modos de control (no una variante especial sólo
+  para tumba).
+- **Implementación**: `GuideMap_criticalDoorDir(col,row)` (guidemap.c)
+  calcula, vía BFS reutilizando la misma técnica de `markPathToFirstItem`
+  (spec §29bis) generalizada a cualquier índice pendiente, la dirección
+  del siguiente salto hacia la sala de la letra actualmente pendiente
+  (`GUIDEMAP_NO_CRITICAL_DIR` si ya se está en esa sala o no queda
+  ninguna letra pendiente) -- garantizado nunca una rama bloqueada, por
+  construcción del propio sistema de candados. `loadRoom()` (main.c)
+  pasa esto, junto con `entryDir` (la puerta por la que se entra a la
+  sala, ya conocida en las 2 llamadas existentes), a `Maze_generateRoom`,
+  que ahora acepta estos 2 parámetros nuevos.
+- **`carveWaypointChain`/`appendLine` (maze.c)**: en vez de una sala
+  aleatoria sin garantías, se construye una CADENA continua de puntos
+  desde el borde físico de la puerta de entrada, a través de su ancla
+  interior, por un tramo en L, hasta el ancla de la puerta crítica, hasta
+  SU borde físico -- y se sella (convierte en pared) cualquier vecino de
+  cada punto intermedio que NO sea parte de la propia cadena, así nada
+  de lo que el laberinto normal haya tallado cerca puede convertir ningún
+  punto de esa cadena en un cruce de 3+ direcciones. Aplicado también,
+  sin condición, a la sala de inserción/extracción (spec §36) entre su
+  puerta de misión y su puerta de menú.
+- **Cuatro rondas de bugs reales encontrados y corregidos por fuzzing
+  antes de dar esto por bueno** (documentados con detalle porque cada
+  uno enseña algo sobre por qué "parece que funciona" no basta sin
+  medir):
+  1. Sellar antes de que se abrieran las puertas dejaba el propio tramo
+     de 2 celdas de una puerta más estrecho de lo real (§46 primera
+     versión) -- arreglado ejecutando el sellado ANTES del bloque que
+     abre las puertas, para que éste tenga siempre la última palabra.
+  2. Tratar cada ancla como el "extremo" de su propio segmento (en vez
+     de un punto INTERIOR de una única cadena continua) dejaba sus
+     otras conexiones (p.ej. hacia el centro de la sala) sin proteger:
+     un deslizamiento se pasaba de largo el ancla sin girar. Arreglado
+     unificando todo en una sola cadena borde-a-borde.
+  3. El primer eje elegido para salir de un ancla podía retroceder
+     directamente sobre el propio tramo borde-ancla de esa puerta
+     (encontrado SÓLO al variar los offsets de las puertas en el test en
+     vez de usar unos fijos, que por casualidad nunca lo disparaban).
+     Arreglado: salir siempre por el eje PERPENDICULAR al eje de esa
+     puerta (incondicionalmente seguro, se demuestra que nunca puede
+     re-entrar en el rango de columnas/filas del propio tramo).
+  4. Una cadena con 2 giros puede acabar "enganchándose" cerca de sí
+     misma: un punto POSTERIOR (no vecino en el array) podía quedar
+     justo al lado de uno anterior, y comprobar sólo prev/next lo sellaba
+     por error, rompiendo la propia cadena que se quería proteger.
+     Arreglado comprobando pertenencia a TODA la cadena, no sólo a los 2
+     vecinos inmediatos.
+- **Bug NO resuelto, aceptado como límite conocido**: el punto de giro de
+  la cadena garantizada puede caer, por pura coincidencia de offsets
+  aleatorios, justo al lado del tramo de OTRA puerta activa de la MISMA
+  sala (no la de entrada ni la crítica) -- y como esa otra puerta es
+  legítima y debe quedar abierta, `Maze_generateRoom` la fuerza a PATH
+  incondicionalmente después del sellado, reabriendo justo la conexión
+  que se quería bloquear. El deslizamiento entonces "escapa" por esa
+  puerta ajena en vez de girar donde debía. Arreglarlo del todo exigiría
+  que la cadena garantizada supiera evitar las posiciones de TODAS las
+  puertas activas de la sala (no sólo la de entrada y la crítica) al
+  trazar su ruta -- un pathfinding bastante más complejo que el parche
+  ligero que se pidió, y que no se ha implementado en esta sesión.
+- **Verificado (medición final, no la primera que pareció prometedora)**:
+  `test_tomb_guarantee.c` con offsets VARIABLES por semilla (no fijos --
+  unos fijos escondieron el bug #3 por completo, lección aprendida a
+  media sesión) sobre 20000 semillas × hasta 12 combinaciones
+  entrada/crítica = 960000 simulaciones: **3336 fallos (0.35%)**, frente
+  al 82% inicial sin ninguna garantía -- una reducción de más de 200x,
+  aunque no un 100%. `test_tomb_insert.c` (sala de inserción, sólo 2
+  puertas posibles, así que el bug del "tercer puerta ajena" no debería
+  aplicar ahí, aunque queda un residuo menor sin diagnosticar del todo):
+  240000 simulaciones, 178 fallos (0.07%).
+- `make clean && make` sin errores ni warnings nuevos en cada iteración.
+- Verificado en BlastEm: build estable tras cada cambio. Sigue sin
+  poder verificarse visualmente. **Pendiente de decisión del usuario**:
+  aceptar este ~99.65%/99.93% de garantía como suficiente, o pedir que
+  se invierta el esfuerzo adicional en el pathfinding más completo que
+  evite las demás puertas de la sala.
