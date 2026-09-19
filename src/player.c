@@ -2,12 +2,12 @@
 #include "maze.h"
 
 // Same probe span as the original's `TILE - 2`: samples both edges of the
-// 16px box without landing exactly on the next cell boundary.
+// box without landing exactly on the next cell boundary.
 #define BOX (MAZE_TILE_PX - 2)
 
 static s16 toTile(s16 px)
 {
-    return px >> 4;
+    return px / MAZE_TILE_PX;
 }
 
 static bool wallAt(s16 px, s16 py)
@@ -42,12 +42,6 @@ void Player_init(Player *p)
     p->dir = DIR_DOWN;
 }
 
-void Player_spawnAtRoomCenter(Player *p)
-{
-    p->x = MAZE_DOOR_COL * MAZE_TILE_PX;
-    p->y = MAZE_DOOR_ROW * MAZE_TILE_PX;
-    p->dir = DIR_DOWN;
-}
 
 void Player_rotateCCW(Player *p)
 {

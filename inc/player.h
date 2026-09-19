@@ -23,17 +23,12 @@
 
 typedef struct
 {
-    s16 x;      // pixel position, top-left of the 16x16 box
+    s16 x;      // pixel position, top-left of the collision box (player.c's BOX)
     s16 y;
     u8  dir;
 } Player;
 
 void Player_init(Player *p);
-
-// Multi-room system's spawn point (spec §5): the room's carve seed, always
-// a PATH cell, used only for the very first room of a run (no incoming
-// door to align with).
-void Player_spawnAtRoomCenter(Player *p);
 
 // Same "rotate 90 degrees" action bound to SPACE in the original js13k game
 // (counter-clockwise: UP -> LEFT -> DOWN -> RIGHT -> UP).

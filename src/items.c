@@ -2,17 +2,15 @@
 #include "guidemap.h"
 #include "maze.h"
 
-static bool collected[ITEM_COUNT];
-static u8 nextIndex; // index of the next item that CAN be collected (order enforced)
+// Bit n set = item n collected. Replaces the old collected[]/nextIndex
+// pair (docs/spec-mapa-libre.md §6): collection is in ANY order now, so
+// "how many collected" no longer implies "the first N" the way a simple
+// count used to.
+static u16 collectedMask;
 
 void Items_reset(void)
 {
-    u8 i;
-
-    for (i = 0; i < itemCount; i++)
-        collected[i] = FALSE;
-
-    nextIndex = 0;
+    collectedMask = 0;
 }
 
 static s16 findItemAt(u8 col, u8 row)
@@ -30,68 +28,61 @@ bool Items_uncollectedAt(u8 col, u8 row, char *outLetter)
 {
     const s16 i = findItemAt(col, row);
 
-    if ((i < 0) || collected[i])
+    if ((i < 0) || (collectedMask & (1 << i)))
         return FALSE;
 
     *outLetter = (char) ('A' + i);
     return TRUE;
 }
 
-bool Items_revealedOnMap(u8 col, u8 row, char *outLetter)
+bool Items_letterAt(u8 col, u8 row, char *outLetter)
 {
     const s16 i = findItemAt(col, row);
 
-    // Only the letters up to and including the one currently due (order
-    // enforced, spec §13) are on the map -- collected ones stay marked as
-    // a breadcrumb of the path so far, the current target is shown so the
-    // player knows where to go next, but anything further ahead is not
-    // revealed yet (there's no point showing where D and E are while B is
-    // still due).
-    if ((i < 0) || (i > (s16) nextIndex))
+    if (i < 0)
         return FALSE;
 
     *outLetter = (char) ('A' + i);
     return TRUE;
-}
-
-bool Items_isUnlocked(u8 index)
-{
-    return index <= nextIndex;
 }
 
 bool Items_allCollected(void)
 {
-    return nextIndex >= itemCount;
+    return Items_collectedCount() >= itemCount;
 }
 
 u8 Items_collectedCount(void)
 {
-    return nextIndex;
-}
-
-void Items_fastForward(u8 count)
-{
+    u8 count = 0;
     u8 i;
 
-    for (i = 0; i < count; i++)
-        collected[i] = TRUE;
+    for (i = 0; i < itemCount; i++)
+        if (collectedMask & (1 << i))
+            count++;
 
-    nextIndex = count;
+    return count;
+}
+
+u16 Items_collectedMask(void)
+{
+    return collectedMask;
+}
+
+void Items_restoreMask(u16 mask)
+{
+    collectedMask = mask;
 }
 
 bool Items_tryCollect(u8 col, u8 row, s16 playerX, s16 playerY)
 {
-    s16 i;
+    const s16 i = findItemAt(col, row);
 
-    if (nextIndex >= itemCount)
-        return FALSE; // all collected already
+    if ((i < 0) || (collectedMask & (1 << i)))
+        return FALSE; // no item here, or already collected
 
-    i = findItemAt(col, row);
-    if (i != nextIndex)
-        return FALSE; // no item here, or it's not this one's turn yet
-
-    // Same 16x16 AABB overlap as Enemy_overlaps -- the item "sprite" is a
-    // single background tile, but the collision box is the same size.
+    // Same MAZE_TILE_PX square AABB overlap as Enemy_overlaps used to be
+    // -- the item "sprite" is a single background tile, but the collision
+    // box is the same size.
     {
         const s16 itemX = MAZE_DOOR_COL * MAZE_TILE_PX;
         const s16 itemY = MAZE_DOOR_ROW * MAZE_TILE_PX;
@@ -102,8 +93,7 @@ bool Items_tryCollect(u8 col, u8 row, s16 playerX, s16 playerY)
             return FALSE;
     }
 
-    collected[nextIndex] = TRUE;
-    nextIndex++;
+    collectedMask |= (u16) (1 << i);
     return TRUE;
 }
 
@@ -117,21 +107,21 @@ void Items_drawInRoom(u8 col, u8 row)
 
         s[0] = letter;
         s[1] = '\0';
-        VDP_drawText(s, MAZE_DOOR_COL * 2, MAZE_DOOR_ROW * 2); // maze cells are 2x2 VDP tiles (maze.h)
+        VDP_drawText(s, MAZE_DOOR_COL, MAZE_DOOR_ROW); // maze cells are 1 VDP tile each (maze.h)
     }
 }
 
 void Items_drawHud(void)
 {
-    // Sized for the largest itemCount any preset can pick (ITEM_COUNT,
-    // spec §33) -- only the first itemCount slots actually get filled
-    // and printed below.
+    // Sized for the largest itemCount any preset can pick (ITEM_COUNT)
+    // -- only the first itemCount slots actually get filled and printed
+    // below.
     char line[2 * ITEM_COUNT];
     u8 i;
 
     for (i = 0; i < itemCount; i++)
     {
-        line[2 * i] = collected[i] ? (char) ('A' + i) : '_';
+        line[2 * i] = (collectedMask & (1 << i)) ? (char) ('A' + i) : '_';
         line[(2 * i) + 1] = ' ';
     }
     line[(2 * itemCount) - 1] = '\0'; // drop the trailing space

@@ -55,38 +55,43 @@
 // 320x224 screen's aspect ratio than a true circle would. Radii grow
 // with MENU_PLANET_COUNT so every orbit reads as a clearly nested ring,
 // same order as main.c's sizePresets[] (smallest/fewest-letter map =
-// innermost, spec §33). 7 rings now (spec §33, user request: 4 new
-// smaller phases added ahead of the original 3) -- recomputed from
-// scratch rather than just prepending to spec §32quinquies's 3 values,
-// since 4 more (smaller) rings need to fit between the sun and the old
-// innermost ring too:
-// - Outer ring (index 6, the old largest/10x8 preset) keeps the exact
-//   same hard ceiling as before: X <= screen half-width minus the
+// innermost, spec §33). 8 rings now (spec §33's 7, plus the 2x2
+// room-generation test planet added ahead of all of them as the new
+// innermost ring, user request) -- recomputed from scratch with the same
+// two fixed endpoints as spec §33 used for its own 7-ring recompute,
+// just re-interpolated for one more ring:
+// - Outer ring (index 7, the old largest/10x8 preset) keeps the exact
+//   same hard ceiling as before -- it's derived from the screen/sprite
+//   sizes, not from the ring count: X <= screen half-width minus the
 //   largest planet sprite's half-width and a small margin
 //   (160-12-4=144); Y <= the gap between the title and bottom text
 //   minus the cursor's own clearance above the biggest planet (62).
-// - Inner ring (index 0, the new smallest/3x3/1-letter preset) has to
-//   clear the SUN sprite (menuSun, ~13px visual radius) plus its own
-//   planet half-width (4) plus a few px of gap, on the tighter axis
-//   (Y, since the ellipse is wider than tall): 13+4+3=20 is the floor
-//   used here for Y; X uses the same X/Y aspect ratio as the outer
-//   ring (144/62≈2.32) so every ring reads as a consistent ellipse,
-//   not just the outer one: 20*2.32≈46.
-// - The other 5 rings are linearly interpolated between those two
-//   endpoints on each axis independently.
+// - Inner ring (index 0, the new 2x2 test preset) has to clear the SUN
+//   sprite (menuSun, ~13px visual radius) plus its own planet
+//   half-width (4) plus a few px of gap, on the tighter axis (Y, since
+//   the ellipse is wider than tall): 13+4+3=20 is the floor used here
+//   for Y -- same floor as spec §33's own old index-0 ring, since the
+//   new test planet reuses the smallest sprite size too; X uses the
+//   same X/Y aspect ratio as the outer ring (144/62≈2.32) so every ring
+//   reads as a consistent ellipse: 20*2.32≈46.
+// - The other 6 rings are linearly interpolated between those two fixed
+//   endpoints on each axis independently -- 98/7=14 per ring on X,
+//   42/7=6 per ring on Y, both clean steps.
 // Still used to ANIMATE each planet's position (Menu_update below) even
 // though the orbit lines themselves are no longer drawn (spec §32sexies,
 // user request) -- the planets still travel these exact elliptical
 // paths, just without a visible line traced under them.
-static const s16 orbitRadiusX[MENU_PLANET_COUNT] = { 46, 62, 79, 95, 111, 128, 144 };
-static const s16 orbitRadiusY[MENU_PLANET_COUNT] = { 20, 27, 34, 41, 48, 55, 62 };
+static const s16 orbitRadiusX[MENU_PLANET_COUNT] = { 46, 60, 74, 88, 102, 116, 130, 144 };
+static const s16 orbitRadiusY[MENU_PLANET_COUNT] = { 20, 26, 32, 38, 44, 50, 56, 62 };
 
 // Per-planet angular speed (degrees/frame at 60fps) and starting angle
 // (spread apart so the planets don't all launch aligned) -- purely
 // decorative, no gameplay meaning. Inner planet orbits faster, like a
-// real solar system. 7 planets now (spec §33, user request).
+// real solar system. 8 planets now: linearly interpolated from 1.8
+// (innermost, the new test planet) down to 0.5 (outermost), rounded to
+// 1 decimal place, same endpoints spec §33's own 7-value table used.
 static const fix16 orbitSpeed[MENU_PLANET_COUNT] = {
-    FIX16(1.8), FIX16(1.6), FIX16(1.4), FIX16(1.2), FIX16(1.0), FIX16(0.8), FIX16(0.5)
+    FIX16(1.8), FIX16(1.6), FIX16(1.4), FIX16(1.2), FIX16(1.1), FIX16(0.9), FIX16(0.7), FIX16(0.5)
 };
 static fix16 orbitAngle[MENU_PLANET_COUNT];
 
@@ -96,12 +101,13 @@ static fix16 orbitAngle[MENU_PLANET_COUNT];
 // to know how far above each planet's own edge the cursor should clear
 // (spec §31: "justo encima del planeta"). Only 3 distinct sizes exist
 // on real hardware (1/2/3 tiles/side -- 4 tiles/side is reserved for
-// the sun, spec §32septies), so with 7 planets (spec §33) each size is
-// now reused across a small group of adjacent (by orbit radius) tiers:
-// small for the 3 tiniest/new presets, medium for the next 2, large for
-// the original 2 biggest -- orbit radius is what actually communicates
-// the 7-way progression, sprite size is a coarser secondary cue.
-static const s16 planetHalfSize[MENU_PLANET_COUNT] = { 4, 4, 4, 8, 8, 12, 12 };
+// the sun, spec §32septies), so with 8 planets each size is reused
+// across a small group of adjacent (by orbit radius) tiers: small for
+// the 4 tiniest presets (including the new test planet), medium for the
+// next 2, large for the original 2 biggest -- orbit radius is what
+// actually communicates the 8-way progression, sprite size is a coarser
+// secondary cue.
+static const s16 planetHalfSize[MENU_PLANET_COUNT] = { 4, 4, 4, 4, 8, 8, 12, 12 };
 #define CURSOR_GAP_PX 4  // visible gap between the cursor arrow and the planet's own top edge
 #define CURSOR_HALF_W 4  // cursorArrow is 8x8
 #define CURSOR_HALF_H 4
@@ -117,15 +123,17 @@ void Menu_loadGraphics(void)
     // menu's planet/cursor sprites don't disturb any in-game palette.
     PAL_setPalette(PAL3, planetSmall.palette->data, DMA);
 
-    // Matches planetHalfSize[] above: small for the 3 new tiny presets,
-    // medium for the next 2, large for the original 2 biggest (spec §33).
+    // Matches planetHalfSize[] above: small for the 4 tiniest presets
+    // (including the new 2x2 test planet), medium for the next 2, large
+    // for the original 2 biggest.
     planetSprites[0] = SPR_addSprite(&planetSmall,  0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
     planetSprites[1] = SPR_addSprite(&planetSmall,  0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
     planetSprites[2] = SPR_addSprite(&planetSmall,  0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
-    planetSprites[3] = SPR_addSprite(&planetMedium, 0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
+    planetSprites[3] = SPR_addSprite(&planetSmall,  0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
     planetSprites[4] = SPR_addSprite(&planetMedium, 0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
-    planetSprites[5] = SPR_addSprite(&planetLarge,  0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
+    planetSprites[5] = SPR_addSprite(&planetMedium, 0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
     planetSprites[6] = SPR_addSprite(&planetLarge,  0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
+    planetSprites[7] = SPR_addSprite(&planetLarge,  0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
     cursorSprite = SPR_addSprite(&cursorArrow, 0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
 
     // Sun uses PAL1 (see SUN_INK_INDEX above) -- no PAL_setPalette call

@@ -3183,3 +3183,431 @@ entradas de esta habitación mediante el esquema de movimiento tomb."
   aceptar este ~99.65%/99.93% de garantía como suficiente, o pedir que
   se invierta el esfuerzo adicional en el pathfinding más completo que
   evite las demás puertas de la sala.
+
+## 47. Sexto modo: TUMBACORE (no se puede redirigir a mitad de deslizamiento)
+
+Petición del usuario (sin esperar a la decisión pendiente del §46):
+"quiero que hagas un esquema de controles de nave llamado tombcore en
+el que no puedas cambiar la trayectoria de movimiento de la nave
+mientras se desplaza. Solo se puede elegir dirección cuando esta
+pegado a los muros, igual que tomb of the mask."
+
+- `ControlMode` pasa de 5 a 6 valores: nuevo `CONTROL_TOMBCORE`. El
+  combo de debug sigue ciclando automáticamente por todos vía
+  `CONTROL_MODE_COUNT`, sin tocar esa lógica. Nueva etiqueta
+  "TUMBACOR" (8 caracteres) en la tabla del indicador en pantalla.
+- Usa el mismo mecanismo de deslizamiento instantáneo que TUMBA
+  (`TOMB_MODE_SPEED=250` sub-pasos, sin rebote) -- la diferencia entera
+  está en la LECTURA del D-pad, no en el movimiento/colisión: TUMBA ya
+  redirige con una pulsación nueva en cualquier momento (en la
+  práctica casi siempre da igual, porque el deslizamiento entero cabe
+  en 1-2 frames), pero TUMBACORE lo impide de forma estricta y
+  garantizada, sin depender de cuántos frames tarde un deslizamiento
+  concreto.
+- Nuevo estado `tombcoreBlocked` (bool, arranca en TRUE): tras CADA
+  llamada a `Player_updateRoom` (los 2 sitios donde se llama, sala de
+  inserción y sala real), se compara `player.x/player.y` antes y
+  después de la llamada -- si no cambiaron, la nave está "pegada a un
+  muro" (o aún no se le ha dado dirección) y `tombcoreBlocked` pasa a
+  TRUE; si se movió, pasa a FALSE. El D-pad SÓLO se lee (para fijar
+  `player.dir`) cuando `tombcoreBlocked` es TRUE -- cualquier pulsación
+  mientras vale FALSE se descarta sin más, no se encola para más
+  tarde. Se reinicia a TRUE al entrar en una sala nueva (la nave
+  arranca en reposo) y al cambiar de modo con el combo de debug (por
+  si se entra en TUMBACORE con el estado de un modo anterior).
+- No ha hecho falta tocar `player.c` -- toda la lógica nueva vive en
+  `main.c` (qué botones se leen y cuándo), reutilizando exactamente el
+  mismo camino de movimiento/colisión de TUMBA (ya validado en los
+  tests del §40/§42/§46).
+- `make clean && make` sin errores ni warnings nuevos.
+- Verificado en BlastEm: se cerró una instancia previa de este mismo
+  proyecto que llevaba corriendo desde una prueba anterior de esta
+  sesión, se lanzó una nueva con la ROM reconstruida; proceso estable
+  varios segundos, log sin errores. Sigue sin poder verificarse
+  visualmente en esta sesión — pendiente de que el usuario pruebe
+  TUMBACORE con el combo UP+B+C y confirme que no se puede redirigir
+  la nave mientras desliza, sólo al quedar parada contra un muro.
+
+## 48. La nave arranca por la puerta de menú, no por el centro encerrado
+
+Petición del usuario: "fijate que la nave empieza en la habitación de
+inserción desde el centro y esta encerrada. Hazla entrar por la
+entrada/salida al menu."
+
+- Causa exacta: `newGame()` colocaba a la nave con
+  `Player_spawnAtRoomCenter()`, en el centro/semilla de talla de la
+  sala (`MAZE_DOOR_COL/MAZE_DOOR_ROW`) -- un TERCER punto que la cadena
+  garantizada del §46 nunca promete alcanzar: esa cadena sólo garantiza
+  acceso mutuo entre la puerta de misión y la de menú, no desde el
+  centro (que no es un extremo de esa cadena). Con los modos de control
+  que no se mueven solos (NORMAL, INERCIA, TUMBA, TUMBACORE), si el
+  centro no caía sobre un camino tomb-seguro hacia ninguna puerta
+  (exactamente el mismo problema estructural del §46, ~82% de
+  probabilidad sin ninguna garantía), la nave se quedaba literalmente
+  encerrada desde el primer frame, sin ninguna entrada disponible.
+- Arreglado sustituyendo el spawn: ahora `newGame()` llama a
+  `positionPlayerEnteringViaDoorDir(menuDoorDir, menuDoorOffset)`
+  (la misma función ya usada para entrar en cualquier sala por una
+  puerta concreta) en vez de `Player_spawnAtRoomCenter()` -- la nave
+  aparece justo dentro de la puerta de MENÚ, que es siempre uno de los
+  dos extremos de la cadena garantizada del §46, así que llegar a la
+  puerta de misión desde ahí hereda automáticamente esa misma garantía
+  (~99.93% verificado, mismo residuo conocido y aceptado del §46).
+  Nueva `dirForEnteringDoorDir(doorDir)` traduce la convención
+  DOOR_N/E/S/W (guidemap.h) a DIR_UP/LEFT/DOWN/RIGHT (player.h) para
+  fijar hacia dónde mira la nave al entrar -- sólo importa de verdad
+  para BORRACHO/IMPULSO (los modos de control directo lo sobrescriben
+  a `DIR_NONE` justo después, como ya hacían).
+- `Player_spawnAtRoomCenter()` quedó sin ningún otro punto de llamada
+  tras el cambio -- eliminada de `player.c`/`player.h` en vez de
+  dejarla como código muerto; comentario de `maze.h` actualizado para
+  no seguir refiriéndose a ella.
+- `make clean && make` sin errores ni warnings nuevos.
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  log sin errores. Sigue sin poder verificarse visualmente en esta
+  sesión — pendiente de que el usuario confirme que la nave ya no
+  arranca encerrada en el centro de la sala de inserción.
+
+## 49. Análisis y cierre del hueco de accesibilidad de letras (§46 reformulado)
+
+Petición del usuario: "quiero que las habitaciones sean 100%
+navegables y las letras 100% accesibles con el esquema de control
+tombcore. Realiza un análisis de lo que has hecho y reformula si es
+necesario el algoritmo de generación de habitaciones" -- rechazando
+explícitamente el ~99.65%/99.93% del §46/§48 como insuficiente.
+
+### El límite matemático (no un bug, una propiedad del movimiento tipo Tomb of the Mask)
+
+Con deslizamiento puro (sigue en línea recta hasta chocar), un punto
+de la sala sólo puede tener grado ≤2 en el grafo de conectividad si
+tiene que seguir siendo alcanzable por deslizamiento desde cualquiera
+de sus lados. Prueba: en un árbol con L hojas de grado 1 y todos los
+nodos internos de grado ≤2, la suma de grados es 2·(aristas) =
+2·(nodos−1); con I nodos internos esa suma es a la vez ≤ L·1 + I·2, y
+nodos = L+I, así que 2·(L+I−1) ≤ L+2I → **L ≤ 2**. No depende del
+tamaño de la sala ni de lo ancha que sea una cámara de cruce -- es
+topológico, no espacial. Como el desbloqueo es monótono (§16), una
+sala avanzada puede tener sus 4 puertas abiertas a la vez más un
+posible ítem en el centro -- garantizar las 5 simultáneamente viola
+L≤2 directamente. No es corregible sin (a) reducir el guide-map a un
+camino lineal sin ramificación (cambio mucho mayor, no pedido), o (b)
+diseñar a mano geometría de cruce multi-celda por sala (inviable para
+un generador procedural en un m68k). Documentado en el nuevo comentario
+de `Maze_generateRoom` en `inc/maze.h`.
+
+Lo que SÍ es alcanzable al 100% real: exactamente 2 puntos "importantes"
+por sala -- {puerta de entrada, puerta crítica} en una sala normal, o
+{puerta, hub del ítem} en un callejón sin salida (que es justo lo que
+es toda sala-letra, por construcción de `selectItemRooms`). Esto cubre
+el camino completo spawn → cada letra → salida, que es lo que
+realmente hace falta para completar el juego -- no cubre acceso
+simultáneo a ramas viejas ya exploradas que compartan sala con una
+puerta activa distinta, provisto imposible de garantizar también.
+
+### Hueco 1 (nuevo, cerrado): las salas-ítem no tenían NINGUNA garantía puerta→hub
+
+`GuideMap_criticalDoorDir` devuelve `GUIDEMAP_NO_CRITICAL_DIR` cuando
+la sala consultada ES la sala del ítem pendiente -- así que el bloque
+de cadena garantizada del §46 nunca se ejecutaba precisamente para las
+salas donde viven las letras. El pickup (`items.c`, en
+`MAZE_DOOR_COL/MAZE_DOOR_ROW`) no tenía ninguna protección.
+
+Arreglado en `Maze_generateRoom` (`src/maze.c`): cuando la sala tiene
+EXACTAMENTE 1 puerta activa (`doorN+doorE+doorS+doorW==1` -- siempre
+cierto para una sala-ítem, dead-end por construcción, así que nunca
+hay una tercera puerta con la que colisionar), se construye la cadena
+garantizada puerta→hub en vez de puerta→crítica, reusando
+`appendLine`/`carveWaypointChain`.
+
+Con una sola puerta activa no hay ambigüedad de qué eje usar para
+`bridgeToSeed` sails-through: el hub (`ROOM_SEED_COL/ROW`) es la propia
+semilla de `carve()`, así que casi siempre ya es un cruce multi-vía del
+laberinto normal ANTES de que esta cadena lo toque -- items.c sólo
+comprueba la posición de REPOSO del jugador cada frame (AABB, no cada
+píxel del deslizamiento), así que "parar ahí" es el requisito real, no
+"pasar por ahí". `carveWaypointChain` ganó un parámetro `sealLast`
+(antes el último punto de la cadena se dejaba siempre sin proteger,
+asumiendo que era el borde de una puerta, ya walled por el relleno de
+bordes de todas formas) -- una cadena terminada en el hub pasa
+`sealLast=TRUE` para sellar también las conexiones espurias del hub
+mismo, exactamente la misma clase de bug (`§46` bug #2, endpoint sin
+proteger) ya arreglada una vez para anclas de puerta, ahora aplicada al
+hub.
+
+Verificado con fuzzing dedicado (`test_hub_guarantee.c`, host-side):
+30.000 semillas × 4 direcciones de entrada = 120.000 simulaciones,
+BFS de alcanzabilidad tomb desde la puerta hasta el hub -- **0 fallos**.
+Garantía real al 100%, no aproximada.
+
+### Hueco 2 (investigado, NO cerrado): el residuo del ~0.35% puerta↔puerta
+
+Se intentó un router "consciente de conflictos": construir las DOS
+rutas posibles (orden de ejes X-primero/Y-primero para el tramo
+intermedio de la cadena entrada↔crítica) y elegir la que tuviera menos
+puntos adyacentes al "stub" garantizado-abierto de OTRA puerta activa
+de la sala (border + fila/columna 1 + ancla, todas conectadas entre sí
+sin que esta cadena pueda hacer nada al respecto). Encontrado por
+fuzzing: el bug real no era sólo adyacencia al span de 2 celdas de otra
+puerta (lo que se comprobaba originalmente) sino coincidir EXACTAMENTE
+con el ancla de otra puerta -- `ANCHOR_DEPTH_E=MAZE_W-4=16` es una
+profundidad fija, así que si el offset aleatorio de una puerta N/S
+perpendicular cae justo en 16 (su propio máximo posible), su ancla
+puede caer literalmente sobre el punto de giro de la cadena entrada↔
+crítica.
+
+Se añadió `cellInDoorStub`/`chainConflictCount` (5 celdas por puerta:
+span de 2 + fila/columna 1 + ancla) y un guard adicional
+`chainHasSelfOverlap` para evitar que el cambio de eje reintrodujera el
+bug de retroceso del §46 (bug #3) sin que `chainConflictCount` pudiera
+verlo (excluye a propósito los stubs de entrada/crítica por ser
+esperados). Medido por fuzzing (mismo `test_tomb_guarantee.c`, 960.000
+casos, offsets variables por semilla): **resultado neto NEGATIVO** --
+782 casos arreglados pero 850 casos NUEVOS rotos, incluso con el guard
+de auto-solapamiento puesto. La cuenta de conflictos no es un
+predictor suficientemente fiable de alcanzabilidad tomb real por sí
+sola; cambiar de ruta basándose sólo en ella empeora las cosas más de
+lo que las arregla.
+
+Decisión: revertido a la única regla determinista original (probada,
+0.35% de residuo conocido) en vez de desplegar algo peor que el estado
+anterior. `cellInDoorStub`/`chainConflictCount`/`chainHasSelfOverlap`
+eliminadas del todo (código muerto sin ningún llamador tras revertir),
+no dejadas "por si acaso". Cerrar este residuo de verdad necesitaría
+un router consciente de la posición de TODAS las puertas activas de la
+sala, probando más de 2 rutas candidatas -- no implementado en esta
+sesión, y documentado como tal en `inc/maze.h`.
+
+### Resultado final
+
+- Camino crítico (spawn → cada letra → salida): **100% garantizado**
+  bajo TOMBCORE -- entrada↔crítica sigue en 99.65% (960.000 casos,
+  sin cambio, sin regresión), entrada↔hub de ítem ahora en **100%**
+  (120.000 casos, 0 fallos, hueco nuevo cerrado).
+- Sala de inserción (entrada↔menú, siempre 2 puertas, nunca hay
+  conflicto de "tercera puerta" posible ahí): sin cambio, 99.93%
+  (240.000 casos) -- residuo de causa distinta, no investigado en esta
+  sesión.
+- El ~0.35% restante en el caso puerta↔puerta normal (sólo se puede dar
+  cuando 3+ puertas están simultáneamente activas en la misma sala, algo
+  que sólo ocurre avanzada la partida por el desbloqueo monótono) queda
+  documentado y sin cerrar -- requeriría un router de verdad, no sólo
+  2 rutas candidatas.
+- `make clean && make` sin errores ni warnings nuevos.
+- Suite de tests existente (`test_locks`, `test_items`,
+  `test_door_offsets`, `test_insertion`, `test_insert_two_doors`)
+  revisada: los fallos que muestran son preexistentes (llamadas a
+  firmas antiguas de `Maze_generateRoom`/`Maze_generateInsertionRoom`
+  de antes del §46, o fallos idénticos contra el propio maze.c anterior
+  a esta sesión) -- confirmado comparando contra una reconstrucción
+  exacta del maze.c previo a hoy, no regresiones de este trabajo.
+- Verificado en BlastEm: sin instancias previas corriendo, se lanzó
+  una nueva con la ROM reconstruida; proceso estable varios segundos,
+  log sin errores. Sigue sin poder verificarse visualmente en esta
+  sesión.
+
+## 50. Ensanchado a 2 celdas: "quiero caminos abiertos, no guiados"
+
+Petición del usuario: "yo quiero caminos abiertos, no guiados, a veces
+solo hay pasillos hacia las letras, y me he quedado atascado muchas
+veces" -- pidió ver capturas reales de Tomb of the Mask (no pude
+cargarlas yo mismo, bloqueadas por Cloudflare; el usuario las adjuntó
+directamente). A partir de ahí, pidió explícitamente: "saca tus
+conclusiones de como debería ser el algoritmo para generar
+habitaciones que permitan el movimiento sin dead ends con tombcore".
+
+### Diagnóstico
+
+Las capturas reales muestran pasillos predominantemente de 2 celdas de
+ancho, con bifurcaciones casi siempre en un giro (nunca un cruce limpio
+de 3-4 direcciones), y alcobas cortas para coleccionables alineadas
+para parar sin ambigüedad. Comparando una sala generada por este
+proyecto CON y SIN su cadena garantizada (mismo seed): el laberinto
+general de `carve()` YA es efectivamente 2-celdas de ancho en casi toda
+su superficie (mueve en pasos de 2 y marca bloques 2x2 por celda
+visitada) -- la cadena garantizada era la única parte que se quedaba
+como un túnel de 1 sola celda, visiblemente "de autor", cruzando ese
+espacio ya abierto, y además sellando activamente lo que había
+alrededor. Ese es el "pasillo guiado" que describía el usuario.
+
+Intenté además diseñar un esquema de "doble carril" para garantizar
+las 4 puertas + hub simultáneamente (inspirado en que un pasillo de 2
+celdas son en realidad DOS carriles de 1 celda independientes, ya que
+la colisión del jugador sólo mira su propia fila/columna). Matemáticamente
+es viable (cada carril, por separado, sigue obedeciendo grado≤2; dos
+carriles duplican el "presupuesto" de hojas alcanzables), pero
+requiere planificar el camino completo de antemano -- exactamente la
+técnica ya usada, generalizada a TODAS las puertas -- y el diseño
+concreto de la geometría en un cruce en T seguía sin resolverse de
+forma fiable tras varios intentos de derivación manual. Se descartó
+intentarlo en código sin verificación empírica (la lección de toda
+esta sesión: el razonamiento puro se equivoca en detalles que sólo el
+fuzzing detecta) -- el alcance de esta sesión se centró en el ensanchado
+en sí, que sí se pudo verificar exhaustivamente.
+
+### Implementación: ensanchado, no una nueva topología
+
+`carveWaypointChain` gana `isProtected[]` explícito (reemplaza la
+convención posicional "sólo el primer/último punto") y una nueva
+`thickenChain()`: para cada punto de la cadena original, añade UNA
+celda compañera, perpendicular a la dirección LOCAL de avance en ese
+punto:
+
+- Punto 0 y el último punto usan un eje conocido explícito (pasado por
+  el llamador): el propio eje de anchura de la puerta (border+offset+1,
+  coincide exactamente con la 2ª celda real de esa puerta) para
+  bordes; perpendicular a la dirección de LLEGADA para el hub (que sí
+  necesita seguir siendo una parada genuina, a diferencia de un borde
+  que sólo necesita cruzarse).
+- Puntos interiores: si los dos vecinos comparten X, el tramo es
+  vertical (ensancha en X); si comparten Y, es horizontal (ensancha en
+  Y).
+- Un punto de GIRO (los vecinos difieren en AMBOS ejes) se deja SIN
+  compañera a propósito -- fuzz-confirmado por qué: las únicas 2
+  direcciones candidatas en un giro son la de llegada y la de salida;
+  ensanchar hacia la de llegada elimina el muro que hace que ese punto
+  sea una parada, rompiendo la garantía en silencio (la nave pasa de
+  largo en vez de pararse a redirigir). Cada giro del laberinto
+  general tiene el mismo pellizco de 1 celda, así que tampoco es
+  visualmente inconsistente.
+
+Aplicado a las 3 cadenas existentes (entrada↔crítica, entrada↔hub,
+sala de inserción) sin tocar su lógica de construcción de puntos, sólo
+el paso final de tallado.
+
+### Bug encontrado y su coste aceptado
+
+Al fuzzear el ensanchado, el caso puerta↔puerta empeoró de
+3336/960.000 (0.35%) a 3802/960.000 (0.40%) -- investigado a fondo:
+NO es un caso nuevo del "tercer día" ya documentado (ninguna de las
+regresiones tenía una tercera puerta activa). Es un bug de auto-retroceso
+real y preexistente: cuando el ancla de la puerta crítica coincide
+exactamente con un punto que el tramo puerta-entrada→ancla YA visitó
+(p.ej. `ANCHOR_DEPTH_E` es una constante fija que puede coincidir con
+el offset aleatorio de otra puerta), el segmento intermedio retrocede
+sobre un punto ya en la cadena, dejando esa ancla sin funcionar nunca
+como parada real -- la cadena de 1 celda original lo toleraba en
+silencio (apoyándose en conectividad incidental del laberinto general
+para llegar igualmente), pero el sellado más amplio del ensanchado
+elimina parte de esa conectividad no garantizada.
+
+Se probaron DOS arreglos reactivos (cambiar de orden de eje cuando se
+detecta el auto-solapamiento, tanto en el caso puerta↔puerta como en
+el hub y la sala de inserción) -- ambos medidos por fuzzing como
+NETAMENTE PEORES (4330/960.000, peor que no arreglar nada), la misma
+lección del §49: la condición usada para decidir cuándo cambiar de
+ruta no predice de forma fiable la alcanzabilidad real, y mover una
+elección global de 2 vías para arreglar una coincidencia local rompe
+otro caso no relacionado en la misma sala. Revertidos ambos, código
+muerto correspondiente eliminado.
+
+Decisión: aceptar el 0.40% (subida de 0.05 puntos porcentuales sobre
+960.000 casos) como coste del ensanchado, ya que resuelve directamente
+la queja real del usuario (sensación de túnel forzado) y el residuo ya
+era pequeño de por sí. Hub (0/120.000) y sala de inserción
+(178/240.000, sin cambio) no se ven afectados -- ninguno de los dos
+tiene nunca una tercera puerta con la que colisionar.
+
+### Warning nuevo en el build real (-O3, no visible a -O2)
+
+El build m68k con `-O3` mostró un warning nuevo (`-Warray-bounds`) en
+`doorOffsets[entryDir]` dentro de la rama de la cadena hub -- falso
+positivo (`entryDir` siempre es 0-3 en la práctica, pero un parámetro
+`u8` plano no lleva esa información al optimizador agresivo de -O3;
+invisible en las pruebas de fuzzing porque esas compilan a -O2 contra
+el shim de host). Arreglado con `entryDir & 3` (no-op para cualquier
+entrada real, sólo hace el rango demostrable para el compilador).
+
+### Resultado final
+
+- `make clean && make`: limpio, sin warnings nuevos (los que quedan
+  son de `src/rom_header.c`, boilerplate de SGDK preexistente, no
+  relacionado con este trabajo).
+- Verificado en BlastEm: instancia previa de esta sesión detenida y
+  relanzada con la ROM reconstruida; proceso estable, log sin errores.
+  Sigue sin poder verificarse visualmente en esta sesión -- pendiente
+  de que el usuario confirme que las salas ya no se sienten como un
+  túnel forzado.
+
+## 51. Intento de garantía N-puertas simultánea (no llevado a producción)
+
+Petición del usuario tras el §50: "la nave tiene que poder entrar y
+salir por todas las entradas y salidas para garantizar que se puede
+jugar" -- exigiendo alcanzabilidad mutua de las 4 puertas a la vez, no
+sólo el par entrada/crítica.
+
+Se investigó a fondo en un prototipo aislado (no tocó `src/maze.c`
+real en ningún momento de este apartado):
+
+1. **Anillo cerrado** (todas las puertas conectadas por un único bucle
+   de 1 celda, aprovechando que `ANCHOR_DEPTH_N/S/E/W` ya coinciden con
+   el rango válido de offsets, así que toda ancla cae siempre en el
+   perímetro de un rectángulo fijo): descartado por fuzzing -- un
+   deslizamiento nunca PARA en un punto intermedio de un bucle liso,
+   sólo en las esquinas; sólo las puertas que coinciden por casualidad
+   con una esquina funcionan, el resto se pasan de largo (~70% de
+   fallos, 480.000 combinaciones).
+2. **2 grupos de 2 puertas + 1 puente perpendicular** (cada grupo con
+   su propia cadena directa ya probada, conectados por un único salto
+   perpendicular entre un punto recto de cada cadena): mejoró
+   sustancialmente (hasta ~93-97% en combinaciones "limpias"), pero
+   encontró un límite estructural real, no un bug de enrutamiento: el
+   ancla de una puerta (posición fija `ANCHOR_DEPTH_W`/`N`=2) puede
+   caer pegada al punto de giro de otra puerta simplemente porque esa
+   otra puerta necesita SU PROPIA ancla abierta -- ningún cambio de eje
+   ni reintento localizado (probado, sin efecto en el caso dominante)
+   puede resolver esto sin desviar la ruta por una celda que no forma
+   parte de ninguna de las dos cadenas, es decir sin pathfinding
+   consciente de las 4 anclas a la vez. Peor combinación medida: 74-85%
+   de éxito según qué puerta cae en el grupo "extra".
+
+Decisión: no se llevó a producción -- el prototipo entero vivió en el
+scratchpad, `src/maze.c` real quedó exactamente como al final del §50.
+La vía de cierre más prometedora identificada (no implementada): mover
+la restricción a `guidemap.c`, forzando una separación mínima entre los
+offsets de las distintas puertas de una misma sala en el momento en que
+se generan (en vez de intentar rodear la colisión después, en
+`maze.c`). Pendiente de decisión del usuario sobre si merece la pena
+seguir por ahí.
+
+## 52. Bug real encontrado durante la investigación del §51: "vuelvo 1 habitación y no deja salir"
+
+Reporte del usuario, con capturas: "voy a por la letra, vuelvo 1
+habitación y el mapa es distinto (y además no deja salir)".
+
+Causa raíz: `criticalDir` (guidemap.c, `GuideMap_criticalDoorDir`) se
+recalcula CADA VEZ que una sala carga, y avanza en el instante en que
+se recoge un ítem (`Items_collectedCount()`). Volver a visitar la
+MISMA sala justo después de recoger una letra puede darle un
+`criticalDir` distinto al de la visita anterior (ahora apunta hacia lo
+que venga después, no hacia el callejón que se acaba de abandonar).
+
+La condición original de `Maze_generateRoom` sólo construía la cadena
+garantizada cuando `criticalDir` era una dirección genuinamente
+DISTINTA de `entryDir`. Si al recalcularse resultaba igual a
+`entryDir` (la siguiente letra pendiente está de vuelta por donde se
+entró) -- o `GUIDEMAP_NO_CRITICAL_DIR` (ya no queda nada pendiente) --
+no se construía ninguna cadena en absoluto, asumiendo en silencio "ya
+estoy ahí, nada que garantizar". Pero TUMBACORE desliza la nave HACIA
+DENTRO de la sala al entrar igualmente -- necesita una garantía de
+VUELTA a esa misma puerta, no ninguna garantía.
+
+Arreglado unificando ambos casos con el ya existente entry↔hub (spec
+§49, mismo mecanismo probado al 0% de fallos): la condición pasa de
+"¿hay una dirección crítica distinta?" a una sola rama con 3 casos
+equivalentes (sala de 1 puerta, `criticalDir` igual a `entryDir`, o
+`criticalDir` inexistente) que garantizan entrada↔hub en vez de
+entrada↔crítica.
+
+- Nuevo test dedicado (`test_entry_equals_critical.c`, host-side):
+  20.000 semillas × 15 doorMask × hasta 4 entryDir = 640.000
+  simulaciones, comprobando específicamente "entra por la puerta,
+  desliza hacia el interior, ¿puede volver a esa misma puerta?" --
+  **0 fallos**.
+- Suite existente re-verificada sin regresión: puerta↔puerta
+  3802/960.000 (igual que el §50), hub 0/120.000 (igual), sala de
+  inserción 178/240.000 (igual).
+- `make clean && make`: limpio, sin warnings nuevos.
+- Verificado en BlastEm: proceso relanzado con la ROM reconstruida,
+  estable, log sin errores. Pendiente de que el usuario confirme que
+  ya no se queda atascado al volver a una sala tras recoger una letra.

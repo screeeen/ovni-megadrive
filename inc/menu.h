@@ -11,13 +11,15 @@
 // selection (main.c owns that index, same as before this feature),
 // BUTTON_A confirms and starts the game.
 // Must equal main.c's SIZE_PRESET_COUNT -- main.c's sizePresetIndex is
-// passed straight into Menu_update() as the selected planet index. 7
-// planets (spec §33, user request: 4 new smaller/fewer-letter phases
-// added ahead of the original 3) -- only 4 discrete sprite sizes exist
-// on real hardware (1-4 tiles/side), so menu.c reuses them across
-// multiple planets; the orbit radius (closer = earlier/easier) is the
-// primary visual progression now, not sprite size alone.
-#define MENU_PLANET_COUNT 7
+// passed straight into Menu_update() as the selected planet index. 8
+// planets: the original 3, 4 smaller/fewer-letter phases added ahead of
+// those (spec §33), and a dedicated 2x2 room-generation test planet
+// (user request) added ahead of ALL of those as the new innermost orbit
+// -- only 4 discrete sprite sizes exist on real hardware (1-4
+// tiles/side), so menu.c reuses them across multiple planets; the orbit
+// radius (closer = earlier/easier) is the primary visual progression
+// now, not sprite size alone.
+#define MENU_PLANET_COUNT 8
 
 // Uploads the menu's sprite graphics/palettes to VRAM/CRAM: planets and
 // cursor on PAL3 (unused by anything else in the game, spec §31's note
