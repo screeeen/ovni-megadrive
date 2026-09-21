@@ -64,7 +64,11 @@
 // (each active door, and the spawn for the insertion room) every active
 // door must be leavable from every stop the ship can reach, and the hub
 // (the letter) must be crossed -- so the ship can never be stuck, whichever
-// door it wants next. Rejected layouts are re-rolled (bounded attempts
+// door it wants next. Rooms are also puzzles (user request: the player has
+// to work out how to reach the doors and the letter): the validator counts
+// the slides a solution takes and demands a minimum for each door and for
+// the letter, easing off in tiers only for the rare door layouts where
+// nothing harder turns up (see maze.c's puzzleTiers). Rejected layouts are re-rolled (bounded attempts
 // from the room's seed, then bounded deterministic ones that were
 // verified exhaustively host-side over every door subset x offset
 // combination). MAZE_ROOMGEN_CARVE's own pipeline is only the last-resort

@@ -595,6 +595,7 @@ int main(bool hardReset)
     Menu_loadGraphics(); // spec §31 -- must come after both above, its tiles stack right after theirs in VRAM
 
     PAL_setPalette(PAL1, playerShip.palette->data, DMA);
+    PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR);
     playerSprite = SPR_addSprite(&playerShip, 0, 0, TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
     // mapShip (spec §24): same PAL1, same 2 colors as playerShip, so no
     // separate palette load -- just a smaller (1 tile, 8x8) silhouette
@@ -826,7 +827,7 @@ int main(bool hardReset)
                     // Restores the ship's normal color (spec §23) -- only
                     // the one word that PLAYER_SHIP_INK_INDEX touched,
                     // the transparent index0 was never changed.
-                    PAL_setColor(PLAYER_SHIP_INK_INDEX, playerShip.palette->data[1]);
+                    PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR);
                     SPR_setVisibility(playerSprite, VISIBLE);
                     SPR_setVisibility(mapShipSprite, HIDDEN);
                 }

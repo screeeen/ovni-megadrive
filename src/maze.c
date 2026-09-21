@@ -341,7 +341,7 @@ static u8 tomboOpposite(u8 dir)
 // door layout (which doors, and where), a domain small enough to have
 // been verified exhaustively host-side (every door subset x every legal
 // offset combination = ~25k inputs, all of them succeed).
-#define TOMBO_MAX_GENERATION_ATTEMPTS 24
+#define TOMBO_STRICT_ATTEMPTS         16 // per puzzle tier
 #define TOMBO_FALLBACK_ATTEMPTS       200
 #define TOMBO_FALLBACK_SEED           0x5A17
 
@@ -369,6 +369,7 @@ static s16 slideNodeX[SLIDE_MAX_NODES];
 static s16 slideNodeY[SLIDE_MAX_NODES];
 static s16 slideTo[SLIDE_MAX_NODES][4]; // node index, or SLIDE_NO_MOVE / SLIDE_EXIT
 static bool slideHub[SLIDE_MAX_NODES]; // a slide from/through this node crosses the hub
+static bool slideHubDir[SLIDE_MAX_NODES][4]; // ...and which specific slide does
 static s16 slideIndex[MAZE_H][MAZE_W];
 static u16 slideCount;
 
@@ -442,6 +443,7 @@ static bool slideExpand(s16 hubX, s16 hubY)
             bool hubHit = FALSE;
             const s16 r = slideRun(slideNodeX[i], slideNodeY[i], dir, hubX, hubY, &hubHit, &ex, &ey);
 
+            slideHubDir[i][dir] = hubHit;
             if (hubHit)
                 slideHub[i] = TRUE;
 
@@ -476,6 +478,105 @@ static void slideEntryCell(u8 dir, u8 offset, s16 *x, s16 *y)
         case MAZE_DIR_S: *x = offset;        *y = MAZE_H - 2;   break;
         default:         *x = 1;             *y = offset;       break; // MAZE_DIR_W
     }
+}
+
+// Puzzle depth (user request: the player should have to WORK OUT how to
+// reach the doors and the letters). Counted in slides -- the moves the
+// player actually makes -- from where the ship lands after entering:
+//   - leaving through a different door takes at least TOMBO_EXIT_MIN_MOVES;
+//   - the first slide that crosses the hub (picks up the letter) is at
+//     least TOMBO_HUB_MIN_MOVES away, so the letter is never on the ship's
+//     way in, and never one obvious slide from where it lands.
+//   - and, in a room with 2+ doors, the hardest door-to-door trip is a real
+//     puzzle of at least TOMBO_HARD_EXIT_MOVES.
+// These are the thresholds of the current difficulty tier -- see
+// generateRoomTombo: the strict tier is tried first, then progressively
+// easier ones for the odd door layout where nothing strict turns up (down to
+// no puzzle requirement at all, which is what guarantees a room always
+// comes out).
+typedef struct { s16 exitMin, hubMin, hardExit; } PuzzleTier;
+static const PuzzleTier puzzleTiers[3] = { { 2, 4, 5 }, { 2, 3, 4 }, { 0, 0, 0 } };
+static const PuzzleTier *puzzle = &puzzleTiers[0];
+#define TOMBO_EXIT_MIN_MOVES  (puzzle->exitMin)
+#define TOMBO_HUB_MIN_MOVES   (puzzle->hubMin)
+#define TOMBO_HARD_EXIT_MOVES (puzzle->hardExit)
+
+// Breadth-first slide distances from `start` (0 = start itself, -1 =
+// unreachable) into dist[].
+static void slideDistances(s16 start, s16 dist[SLIDE_MAX_NODES], u16 queue[SLIDE_MAX_NODES])
+{
+    u16 head = 0, tail = 0, i;
+
+    for (i = 0; i < slideCount; i++)
+        dist[i] = -1;
+
+    dist[start] = 0;
+    queue[tail++] = (u16) start;
+
+    while (head < tail)
+    {
+        const u16 n = queue[head++];
+        u8 dir;
+
+        for (dir = 0; dir < 4; dir++)
+        {
+            const s16 t = slideTo[n][dir];
+
+            if ((t >= 0) && (dist[t] < 0))
+            {
+                dist[t] = dist[n] + 1;
+                queue[tail++] = (u16) t;
+            }
+        }
+    }
+}
+
+// TRUE if, entering through door e, every other active door needs at least
+// TOMBO_EXIT_MIN_MOVES slides and (if the room holds a letter) the hub is
+// at least TOMBO_HUB_MIN_MOVES slides away.
+static bool tomboPuzzleDeepEnough(u8 e, u8 doorMask, s16 entryNode, bool entryCrossesHub, bool hasLetter, s16 *hardest)
+{
+    static s16 dist[SLIDE_MAX_NODES];
+    static u16 queue[SLIDE_MAX_NODES];
+    u16 n;
+    u8 f, dir;
+    s16 hubBest = 0x7FF0;
+
+    slideDistances(entryNode, dist, queue);
+
+    for (f = 0; f < 4; f++)
+    {
+        s16 best = 0x7FF0;
+
+        if ((f == e) || !(doorMask & (1 << f)))
+            continue;
+
+        for (n = 0; n < slideCount; n++)
+            if ((dist[n] >= 0) && (slideTo[n][f] == SLIDE_EXIT) && ((dist[n] + 1) < best))
+                best = dist[n] + 1;
+
+        if (best < TOMBO_EXIT_MIN_MOVES)
+            return FALSE;
+        if (best > *hardest)
+            *hardest = best;
+    }
+
+    if (hasLetter && (TOMBO_HUB_MIN_MOVES > 0))
+    {
+        if (entryCrossesHub)
+            return FALSE;
+
+        for (n = 0; n < slideCount; n++)
+            if (dist[n] >= 0)
+                for (dir = 0; dir < 4; dir++)
+                    if (slideHubDir[n][dir] && ((dist[n] + 1) < hubBest))
+                        hubBest = dist[n] + 1;
+
+        if (hubBest < TOMBO_HUB_MIN_MOVES)
+            return FALSE;
+    }
+
+    return TRUE;
 }
 
 // The acceptance test: simulates the ship on the finished grid (border
@@ -629,6 +730,22 @@ static bool tomboValidate(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, 
                 if ((doorMask & (1 << f)) && !canExit[f][i])
                     return FALSE;
         }
+    }
+
+    {
+        s16 hardest = 0;
+        u8 doors = 0;
+
+        for (e = 0; e < 4; e++)
+        {
+            if (doorMask & (1 << e))
+                doors++;
+            if ((entryNode[e] >= 0) && !tomboPuzzleDeepEnough(e, doorMask, entryNode[e], entryHub[e], !spawnAtHub, &hardest))
+                return FALSE;
+        }
+
+        if ((doors >= 2) && (hardest < TOMBO_HARD_EXIT_MOVES))
+            return FALSE;
     }
 
     return TRUE;
@@ -888,9 +1005,19 @@ static bool generateRoomTombo(s16 hubX, s16 hubY, u8 doorMask, const u8 doorOff[
     u16 attempt;
     bool ok = FALSE;
 
-    for (attempt = 0; !ok && (attempt < TOMBO_MAX_GENERATION_ATTEMPTS); attempt++)
+    // Strict puzzle first, then the middle tier (both seeded from the room,
+    // still deterministic per roomSeed), then the fixed-seed attempts with
+    // no puzzle requirement -- the tier verified exhaustively, so a room
+    // always comes out, just an easier one for those rare door layouts.
+    puzzle = &puzzleTiers[0];
+    for (attempt = 0; !ok && (attempt < TOMBO_STRICT_ATTEMPTS); attempt++)
         ok = tomboTryOnce((u16) (roomSeed + attempt), hubX, hubY, doorMask, doorOff, useFixedWall, fixedWallVariant, spawnAtHub);
 
+    puzzle = &puzzleTiers[1];
+    for (attempt = 0; !ok && (attempt < TOMBO_STRICT_ATTEMPTS); attempt++)
+        ok = tomboTryOnce((u16) (roomSeed + 0x4000 + attempt), hubX, hubY, doorMask, doorOff, useFixedWall, fixedWallVariant, spawnAtHub);
+
+    puzzle = &puzzleTiers[2];
     for (attempt = 0; !ok && (attempt < TOMBO_FALLBACK_ATTEMPTS); attempt++)
         ok = tomboTryOnce((u16) (TOMBO_FALLBACK_SEED + attempt), hubX, hubY, doorMask, doorOff, useFixedWall, fixedWallVariant, spawnAtHub);
 

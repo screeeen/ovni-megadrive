@@ -1,5 +1,6 @@
 #include "menu.h"
 #include "resources.h"
+#include "player.h"
 
 // 320x224 screen. Sun sits left of dead-center vertically so the
 // biggest orbit's top edge (with room for the cursor arrow above
@@ -163,7 +164,7 @@ void Menu_setVisible(bool visible)
     if (visible)
         PAL_setColor(SUN_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF));
     else
-        PAL_setColor(SUN_INK_INDEX, playerShip.palette->data[1]);
+        PAL_setColor(SUN_INK_INDEX, PLAYER_SHIP_COLOR);
 
     // Same idea on PAL2's index1 (spec §45): yellow while the menu
     // shows (for completed-planet sprites, see Menu_update), restored

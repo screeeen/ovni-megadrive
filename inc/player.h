@@ -3,6 +3,12 @@
 
 #include <genesis.h>
 
+// The ship's ink color (user request: yellow, so it stands out against the
+// violet walls). Overrides the violet baked into playerShip.png's palette
+// -- every place that used to restore "playerShip.palette->data[1]" now
+// restores this instead.
+#define PLAYER_SHIP_COLOR RGB24_TO_VDPCOLOR(0xFFFF00)
+
 #define DIR_UP      0
 #define DIR_LEFT    1
 #define DIR_DOWN    2
