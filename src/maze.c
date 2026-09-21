@@ -203,6 +203,34 @@ static void anchorForDoor(u8 dir, u8 offset, s16 *outX, s16 *outY)
     }
 }
 
+// BUG FIX (user report: a screenshot under MAZE_ROOMGEN_TOMBO showing a
+// fully sealed exit -- the arrow pointed at a door, but the border right
+// there was solid wall). Root cause: ANCHOR_DEPTH_S/E sit 2 cells short
+// of their own border's punch zone (S's punch inner row is MAZE_H-2, but
+// ANCHOR_DEPTH_S is MAZE_H-4; E's punch inner col is MAZE_W-2, but
+// ANCHOR_DEPTH_E is MAZE_W-4) while ANCHOR_DEPTH_N/W sit only 1 cell
+// short of theirs (already touching -- N's punch inner row is 1,
+// ANCHOR_DEPTH_N is 2). That extra 1-cell gap on S/E was never actually
+// guaranteed closed by anything: carve()'s original recursive
+// exploration usually paints through it anyway, as an incidental side
+// effect of its own broad wandering near the edges, but "usually" isn't
+// "always" -- it was a latent gap in the ORIGINAL carve()/bridgeToSeed()
+// pipeline too, just masked by that incidental coverage often enough
+// never to have been noticed. tombo's much more targeted, minimal-
+// footprint corridors don't get that same luck, which is why it turned
+// up reliably there. Fixes it for BOTH modes by guaranteeing the throat
+// cell explicitly instead of hoping for it -- a no-op on N/W, which
+// never had a gap to begin with.
+static void connectAnchorToBorder(u8 dir, s16 ax, s16 ay)
+{
+    switch (dir)
+    {
+        case MAZE_DIR_S: grid[MAZE_H - 3][ax] = PATH; break;
+        case MAZE_DIR_E: grid[ay][MAZE_W - 3] = PATH; break;
+        default: break; // MAZE_DIR_N/MAZE_DIR_W: anchor already touches the punch zone
+    }
+}
+
 // carve()'s "walls>=2 OR isForcedTarget" trick only visits a target if the
 // DFS's natural wandering happens to reach a cell adjacent to it first --
 // misses do happen, and more often now that door anchors (spec §30) can
@@ -240,6 +268,647 @@ static void bridgeToSeed(s16 x, s16 y)
     }
 }
 
+static void fillWallsRandom(void)
+{
+    s16 x, y;
+
+    for (y = 0; y < MAZE_H; y++)
+        for (x = 0; x < MAZE_W; x++)
+            grid[y][x] = randomWallVariant();
+}
+
+static void fillWallsFixed(u8 variant)
+{
+    s16 x, y;
+
+    for (y = 0; y < MAZE_H; y++)
+        for (x = 0; x < MAZE_W; x++)
+            grid[y][x] = variant;
+}
+
+// ---------------------------------------------------------------------
+// "Tombo" room generation (Tomb of the Mask movement model, the only
+// control scheme this generator targets -- CONTROL_TOMB in main.c: the
+// ship slides in a straight line until a wall stops it, and can only
+// change direction from a stop).
+//
+// Under that movement a room is really a directed graph whose NODES are
+// the cells the ship can stop in (a wall right ahead of it) and whose
+// EDGES are straight N/S/E/W slides between two nodes. "Every cell is
+// 4-adjacent to a path cell" is NOT enough for the ship to get around:
+// at a junction with 3+ open sides two of them are always opposite, and
+// a ship sliding along that line never stops there, so a side branch off
+// the middle of a corridor can be left but never entered (a one-way
+// edge -- fuzzed on the previous generators, roughly 70-98% of 3-4 door
+// rooms had an unreachable door, a letter the ship could never cross, or
+// a pocket it could enter but never leave).
+//
+// So this generator does not carve corridors at all. The room is an OPEN
+// floor (walls are only ~10% of the interior, TOMBO_WALL_PERCENT) with a
+// scatter of small obstacles: every obstacle gives the sliding ship a stop
+// on each of its sides, so the graph has lots of nodes and lots of routes
+// between any two of them, instead of one path. A few obstacles are not
+// random but placed on purpose, so the stops that matter exist:
+//   - a DOOR FRAME beside each door (one wall cell next to its pocket), so
+//     a ship sliding along the edge stops in the door's lane;
+//   - two HUB FEEDERS, which put stops on the hub's row and column so the
+//     ship crosses the letter's cell;
+//   - a BLOCKER in the lane when two opposite doors line up.
+// Then the room is only ACCEPTED after simulating real slides over the
+// finished grid (tomboValidate below); a layout that fails is re-rolled.
+// ---------------------------------------------------------------------
+
+static MazeRoomGenMode roomGenMode = MAZE_ROOMGEN_CARVE;
+
+void Maze_setRoomGenMode(MazeRoomGenMode mode)
+{
+    roomGenMode = mode;
+}
+
+// Unit cardinal steps indexed by MAZE_DIR_N/E/S/W (0/1/2/3).
+static const s8 tomboDX[4] = {  0, 1, 0, -1 };
+static const s8 tomboDY[4] = { -1, 0, 1,  0 };
+
+static u8 tomboOpposite(u8 dir)
+{
+    return (u8) ((dir + 2) & 3);
+}
+
+// Random attempts per room, seeded from the room's own seed (still fully
+// deterministic per roomSeed), then TOMBO_FALLBACK_ATTEMPTS more drawn
+// from a seed that depends on NOTHING but this file -- so if every
+// roomSeed-derived attempt fails, the outcome is a pure function of the
+// door layout (which doors, and where), a domain small enough to have
+// been verified exhaustively host-side (every door subset x every legal
+// offset combination = ~25k inputs, all of them succeed).
+#define TOMBO_MAX_GENERATION_ATTEMPTS 24
+#define TOMBO_FALLBACK_ATTEMPTS       200
+#define TOMBO_FALLBACK_SEED           0x5A17
+
+static void tomboMark(s16 x, s16 y)
+{
+    grid[y][x] = PATH;
+}
+
+// Debug graph (user request: "pinta puntitos de todo el grafo de cada
+// habitacion para debugear") is the validator's own slide graph of the
+// accepted room -- every stop the ship can reach (see slideNodeX/Y below).
+// tomboResetDebugGraph() empties it, for rooms that never ran the
+// validator (carve fallback) so Maze_drawDebugGraph() draws nothing.
+static void tomboResetDebugGraph(void);
+
+// ---- slide graph (the validator) ------------------------------------
+
+// An open room can have a stop on nearly every cell, so the graph is sized
+// for one node per grid cell (it can never need more).
+#define SLIDE_MAX_NODES (MAZE_W * MAZE_H)
+#define SLIDE_NO_MOVE   (-1) // wall right ahead, the slide doesn't go anywhere
+#define SLIDE_EXIT      (-2) // the slide runs out through a door
+
+static s16 slideNodeX[SLIDE_MAX_NODES];
+static s16 slideNodeY[SLIDE_MAX_NODES];
+static s16 slideTo[SLIDE_MAX_NODES][4]; // node index, or SLIDE_NO_MOVE / SLIDE_EXIT
+static bool slideHub[SLIDE_MAX_NODES]; // a slide from/through this node crosses the hub
+static s16 slideIndex[MAZE_H][MAZE_W];
+static u16 slideCount;
+
+static void tomboResetDebugGraph(void)
+{
+    slideCount = 0;
+}
+
+// Slides from (x,y) in direction dir exactly like the ship would (cell by
+// cell until the next cell is a wall); a border cell can only ever be
+// open where a door was punched, and reaching one is leaving the room
+// (Player_updateRoom's border check). Returns 1 with the stop cell in
+// (*endX,*endY), or SLIDE_NO_MOVE, or SLIDE_EXIT. *hubHit is set if the
+// hub cell was entered along the way.
+static s16 slideRun(s16 x, s16 y, u8 dir, s16 hubX, s16 hubY, bool *hubHit, s16 *endX, s16 *endY)
+{
+    bool moved = FALSE;
+
+    for (;;)
+    {
+        const s16 nx = x + tomboDX[dir], ny = y + tomboDY[dir];
+
+        if (Maze_isWall(nx, ny))
+            break;
+
+        x = nx; y = ny;
+        moved = TRUE;
+
+        if ((x == hubX) && (y == hubY))
+            *hubHit = TRUE;
+        if ((x == 0) || (y == 0) || (x == MAZE_W - 1) || (y == MAZE_H - 1))
+            return SLIDE_EXIT;
+    }
+
+    if (!moved)
+        return SLIDE_NO_MOVE;
+
+    *endX = x; *endY = y;
+    return 1;
+}
+
+static s16 slideNode(s16 x, s16 y, s16 hubX, s16 hubY)
+{
+    if (slideIndex[y][x] >= 0)
+        return slideIndex[y][x];
+    if (slideCount >= SLIDE_MAX_NODES)
+        return -1;
+
+    slideNodeX[slideCount] = x;
+    slideNodeY[slideCount] = y;
+    slideHub[slideCount] = (x == hubX) && (y == hubY);
+    slideIndex[y][x] = (s16) slideCount;
+
+    return slideCount++;
+}
+
+// Expands every node discovered so far (and every one those discover in
+// turn) into its 4 outgoing slides. FALSE if the graph outgrows
+// SLIDE_MAX_NODES -- a room that busy is rejected rather than half-checked.
+static bool slideExpand(s16 hubX, s16 hubY)
+{
+    u16 i;
+
+    for (i = 0; i < slideCount; i++)
+    {
+        u8 dir;
+
+        for (dir = 0; dir < 4; dir++)
+        {
+            s16 ex = 0, ey = 0;
+            bool hubHit = FALSE;
+            const s16 r = slideRun(slideNodeX[i], slideNodeY[i], dir, hubX, hubY, &hubHit, &ex, &ey);
+
+            if (hubHit)
+                slideHub[i] = TRUE;
+
+            if (r == 1)
+            {
+                const s16 t = slideNode(ex, ey, hubX, hubY);
+
+                if (t < 0)
+                    return FALSE;
+                slideTo[i][dir] = t;
+            }
+            else
+            {
+                slideTo[i][dir] = r;
+            }
+        }
+    }
+
+    return TRUE;
+}
+
+// Where the ship is standing right after crossing into this room through
+// door `dir` (main.c's positionPlayerEnteringViaDoorDir: the cell just
+// inside the border, aligned with the door's offset, still heading
+// inward -- which, at CONTROL_TOMB's speed, slides it on to the first stop).
+static void slideEntryCell(u8 dir, u8 offset, s16 *x, s16 *y)
+{
+    switch (dir)
+    {
+        case MAZE_DIR_N: *x = offset;        *y = 1;            break;
+        case MAZE_DIR_E: *x = MAZE_W - 2;    *y = offset;       break;
+        case MAZE_DIR_S: *x = offset;        *y = MAZE_H - 2;   break;
+        default:         *x = 1;             *y = offset;       break; // MAZE_DIR_W
+    }
+}
+
+// The acceptance test: simulates the ship on the finished grid (border
+// door openings included, doors treated as unlocked -- a sealed door only
+// closes the border, never the interior). Accepts only if, from wherever
+// the ship can be after entering through ANY active door (and, for the
+// insertion room, from its spawn at the hub):
+//   1. every active door can be left through, from EVERY stop reachable
+//      that way -- so the ship can never end up somewhere it can't get
+//      out of, whichever door it wants next;
+//   2. the hub is crossed at some point (the letter sits there);
+//   3. entering never just shoots the ship straight out another door.
+static bool tomboValidate(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, bool spawnAtHub)
+{
+    static bool canExit[4][SLIDE_MAX_NODES];
+    static bool reach[SLIDE_MAX_NODES];
+    static u16 stack[SLIDE_MAX_NODES];
+    s16 entryNode[5];
+    bool entryHub[5];
+    u8 e, f;
+    u16 i;
+    s16 x, y;
+
+    for (y = 0; y < MAZE_H; y++)
+        for (x = 0; x < MAZE_W; x++)
+            slideIndex[y][x] = -1;
+    slideCount = 0;
+
+    for (e = 0; e < 5; e++)
+        entryNode[e] = -1;
+
+    for (e = 0; e < 4; e++)
+    {
+        s16 ix, iy, ex, ey;
+        bool hubHit;
+        s16 r;
+
+        if (!(doorMask & (1 << e)))
+            continue;
+
+        slideEntryCell(e, doorOff[e], &ix, &iy);
+        if (Maze_isWall(ix, iy))
+            return FALSE;
+
+        hubHit = (ix == hubX) && (iy == hubY);
+        r = slideRun(ix, iy, tomboOpposite(e), hubX, hubY, &hubHit, &ex, &ey);
+        if (r == SLIDE_EXIT)
+            return FALSE;
+        if (r == SLIDE_NO_MOVE)
+        {
+            ex = ix; ey = iy;
+        }
+
+        entryNode[e] = slideNode(ex, ey, hubX, hubY);
+        entryHub[e] = hubHit;
+        if (entryNode[e] < 0)
+            return FALSE;
+    }
+
+    if (spawnAtHub)
+    {
+        if (Maze_isWall(hubX, hubY))
+            return FALSE;
+        entryNode[4] = slideNode(hubX, hubY, hubX, hubY);
+        entryHub[4] = TRUE;
+        if (entryNode[4] < 0)
+            return FALSE;
+    }
+
+    if (!slideExpand(hubX, hubY))
+        return FALSE;
+
+    // canExit[f][n]: from stop n, some sequence of slides leaves through door f.
+    for (f = 0; f < 4; f++)
+    {
+        bool changed = TRUE;
+
+        if (!(doorMask & (1 << f)))
+            continue;
+
+        for (i = 0; i < slideCount; i++)
+            canExit[f][i] = (slideTo[i][f] == SLIDE_EXIT);
+
+        while (changed)
+        {
+            changed = FALSE;
+            for (i = 0; i < slideCount; i++)
+            {
+                u8 dir;
+
+                if (canExit[f][i])
+                    continue;
+                for (dir = 0; dir < 4; dir++)
+                {
+                    const s16 t = slideTo[i][dir];
+
+                    if ((t >= 0) && canExit[f][t])
+                    {
+                        canExit[f][i] = TRUE;
+                        changed = TRUE;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    for (e = 0; e < 5; e++)
+    {
+        u16 sp = 0;
+        bool hubSeen;
+
+        if (entryNode[e] < 0)
+            continue;
+
+        for (i = 0; i < slideCount; i++)
+            reach[i] = FALSE;
+
+        reach[entryNode[e]] = TRUE;
+        stack[sp++] = (u16) entryNode[e];
+        hubSeen = entryHub[e];
+
+        while (sp > 0)
+        {
+            const u16 n = stack[--sp];
+            u8 dir;
+
+            if (slideHub[n])
+                hubSeen = TRUE;
+
+            for (dir = 0; dir < 4; dir++)
+            {
+                const s16 t = slideTo[n][dir];
+
+                if ((t >= 0) && !reach[t])
+                {
+                    reach[t] = TRUE;
+                    stack[sp++] = (u16) t;
+                }
+            }
+        }
+
+        if (!hubSeen)
+            return FALSE;
+
+        for (i = 0; i < slideCount; i++)
+        {
+            if (!reach[i])
+                continue;
+            for (f = 0; f < 4; f++)
+                if ((doorMask & (1 << f)) && !canExit[f][i])
+                    return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+// ---- structure (the generator) --------------------------------------
+
+// Share of the room's INTERIOR cells (the 18x12 inside the border ring,
+// which is always wall) that ends up as wall. The rest is open floor with
+// a scatter of small obstacles: every obstacle gives the sliding ship new
+// stops on all four sides, so instead of one corridor from A to B there
+// are many routes between any two stops.
+#define TOMBO_WALL_PERCENT 10
+#define TOMBO_WALL_TARGET  (((MAZE_W - 2) * (MAZE_H - 2) * TOMBO_WALL_PERCENT) / 100)
+
+// Obstacles stay off the border ring's inner row/column (no one-cell
+// gutters along the edges) -- the bounds of where a wall cell may go.
+#define OBST_X_MIN 2
+#define OBST_X_MAX (MAZE_W - 3)
+#define OBST_Y_MIN 2
+#define OBST_Y_MAX (MAZE_H - 3)
+
+// True if (x,y) is one of the cells right in front of an active door (the
+// first 2 cells of its 2-wide lane, measured from the border): kept open so
+// a door can never be walled off from inside.
+static bool tomboInDoorLane(u8 doorMask, const u8 doorOff[4], s16 x, s16 y)
+{
+    if ((doorMask & (1 << MAZE_DIR_N)) && (y <= 2) && ((x == doorOff[MAZE_DIR_N]) || (x == doorOff[MAZE_DIR_N] + 1)))
+        return TRUE;
+    if ((doorMask & (1 << MAZE_DIR_S)) && (y >= MAZE_H - 3) && ((x == doorOff[MAZE_DIR_S]) || (x == doorOff[MAZE_DIR_S] + 1)))
+        return TRUE;
+    if ((doorMask & (1 << MAZE_DIR_E)) && (x >= MAZE_W - 3) && ((y == doorOff[MAZE_DIR_E]) || (y == doorOff[MAZE_DIR_E] + 1)))
+        return TRUE;
+    if ((doorMask & (1 << MAZE_DIR_W)) && (x <= 2) && ((y == doorOff[MAZE_DIR_W]) || (y == doorOff[MAZE_DIR_W] + 1)))
+        return TRUE;
+
+    return FALSE;
+}
+
+// Tries to drop a straight obstacle of `len` cells starting at (x,y),
+// running east (horiz) or south. Refused if any cell is outside the
+// obstacle bounds, on the hub (the letter), in a door lane, or if the
+// shape would touch (even diagonally) any other wall -- obstacles stay
+// separate islands, which is what keeps the room open.
+static bool tomboPlaceObstacle(s16 x, s16 y, u8 len, bool horiz, u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
+{
+    const s16 dx = horiz ? 1 : 0;
+    const s16 dy = horiz ? 0 : 1;
+    u8 i;
+    s16 nx, ny;
+
+    for (i = 0; i < len; i++)
+    {
+        const s16 cx = x + (i * dx);
+        const s16 cy = y + (i * dy);
+
+        if ((cx < OBST_X_MIN) || (cx > OBST_X_MAX) || (cy < OBST_Y_MIN) || (cy > OBST_Y_MAX))
+            return FALSE;
+        if (((cx == hubX) && (cy == hubY)) || tomboInDoorLane(doorMask, doorOff, cx, cy))
+            return FALSE;
+    }
+
+    // Everything in the shape's 1-cell halo must still be floor, except
+    // the shape's own cells (which are floor too, right now) -- i.e. the
+    // whole halo must be PATH.
+    for (ny = y - 1; ny <= y + (len * dy) + (1 - dy) ; ny++)
+        for (nx = x - 1; nx <= x + (len * dx) + (1 - dx); nx++)
+            if (grid[ny][nx] != PATH)
+                return FALSE;
+
+    for (i = 0; i < len; i++)
+        grid[y + (i * dy)][x + (i * dx)] = 1;
+
+    return TRUE;
+}
+
+// A door frame: one wall cell on the border ring's inner row/column, right
+// beside the door's 2-wide pocket, on a randomly chosen side. A ship
+// sliding along that row/column toward the door then stops IN the pocket's
+// lane instead of running past it, so the door can be turned into from the
+// room's outer loop -- without it, in an open room nothing would ever make
+// the ship stop in front of a door.
+static void tomboPlaceDoorFrames(u8 doorMask, const u8 doorOff[4])
+{
+    u8 dir;
+
+    for (dir = 0; dir < 4; dir++)
+    {
+        const s16 lat = doorOff[dir] + ((random() & 1) ? 2 : -1);
+
+        if (!(doorMask & (1 << dir)))
+            continue;
+
+        switch (dir)
+        {
+            case MAZE_DIR_N: grid[1][lat] = 1; break;
+            case MAZE_DIR_S: grid[MAZE_H - 2][lat] = 1; break;
+            case MAZE_DIR_E: grid[lat][MAZE_W - 2] = 1; break;
+            default:         grid[lat][1] = 1; break; // MAZE_DIR_W
+        }
+    }
+}
+
+// Tries up to `tries` random spots for a single-cell obstacle at
+// (x,y) = (fx(...),...) -- helper for the placement below: returns TRUE if
+// one landed.
+static bool tomboPlacePillarNear(s16 minX, s16 maxX, s16 minY, s16 maxY, u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
+{
+    u8 t;
+
+    for (t = 0; t < 20; t++)
+    {
+        const s16 x = minX + (random() % (maxX - minX + 1));
+        const s16 y = minY + (random() % (maxY - minY + 1));
+
+        if (tomboPlaceObstacle(x, y, 1, TRUE, doorMask, doorOff, hubX, hubY))
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+// Two obstacles that make the hub (the letter's cell) a place the ship
+// actually passes: one diagonal-adjacent to the hub's row, one to its
+// column, each some cells out. A ship sliding along the obstacle's own
+// column/row stops beside it, i.e. ON the hub's row/column, and its next
+// slide crosses the hub. Without them nothing in an open room ever stops
+// the ship on those lines.
+static u16 tomboPlaceHubFeeders(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
+{
+    const s16 sx = (random() & 1) ? 1 : -1;
+    const s16 sy = (random() & 1) ? 1 : -1;
+    const s16 rowOff = 2 + (random() % 5); // 2..6 cells left/right of the hub, one row above/below
+    const s16 colOff = 2 + (random() % 3); // 2..4 cells above/below the hub, one column left/right
+    u16 placed = 0;
+
+    if (tomboPlaceObstacle(hubX + (sx * rowOff), hubY + sy, 1, TRUE, doorMask, doorOff, hubX, hubY))
+        placed++;
+    if (tomboPlaceObstacle(hubX - sx, hubY + (sy * colOff), 1, TRUE, doorMask, doorOff, hubX, hubY))
+        placed++;
+
+    return placed;
+}
+
+// Two doors on opposite sides whose lanes overlap would shoot the ship
+// straight from one into the other; an obstacle in the shared column/row,
+// somewhere between them, stops that.
+static u16 tomboBlockAlignedDoors(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
+{
+    u16 placed = 0;
+    s16 d;
+
+    if (((doorMask & (1 << MAZE_DIR_N)) && (doorMask & (1 << MAZE_DIR_S))))
+    {
+        const s16 n = doorOff[MAZE_DIR_N], so = doorOff[MAZE_DIR_S];
+
+        for (d = 0; d < 2; d++)
+        {
+            const s16 c = d ? so : n;
+            const s16 other = d ? n : so;
+
+            if ((c == other) || (c == other + 1))
+                if (tomboPlacePillarNear(c, c, 3, MAZE_H - 4, doorMask, doorOff, hubX, hubY))
+                    placed++;
+        }
+    }
+    if (((doorMask & (1 << MAZE_DIR_E)) && (doorMask & (1 << MAZE_DIR_W))))
+    {
+        const s16 e = doorOff[MAZE_DIR_E], w = doorOff[MAZE_DIR_W];
+
+        for (d = 0; d < 2; d++)
+        {
+            const s16 r = d ? w : e;
+            const s16 other = d ? e : w;
+
+            if ((r == other) || (r == other + 1))
+                if (tomboPlacePillarNear(3, MAZE_W - 4, r, r, doorMask, doorOff, hubX, hubY))
+                    placed++;
+        }
+    }
+
+    return placed;
+}
+
+// One generation attempt: an open floor, the door pockets, a scatter of
+// obstacles up to the wall budget, then the validator's verdict.
+static bool tomboTryOnce(u16 seed, s16 hubX, s16 hubY, u8 doorMask, const u8 doorOff[4],
+                          bool useFixedWall, u8 fixedWallVariant, bool spawnAtHub)
+{
+    s16 x, y;
+    u8 dir;
+    u16 placed = 0;
+    u16 tries;
+
+    setRandomSeed(seed);
+    fillWallsFixed(useFixedWall ? fixedWallVariant : 1); // cheap: variants are only rolled for the accepted room
+    tomboResetDebugGraph();
+
+    for (y = 1; y < MAZE_H - 1; y++)
+        for (x = 1; x < MAZE_W - 1; x++)
+            tomboMark(x, y);
+
+    // Door pockets across the border ring (same 2x2 cells the caller's
+    // border punch opens -- done here too so the validator sees the real
+    // opening).
+    for (dir = 0; dir < 4; dir++)
+    {
+        if (!(doorMask & (1 << dir)))
+            continue;
+
+        switch (dir)
+        {
+            case MAZE_DIR_N: x = doorOff[dir]; tomboMark(x, 0); tomboMark(x + 1, 0); break;
+            case MAZE_DIR_S: x = doorOff[dir]; tomboMark(x, MAZE_H - 1); tomboMark(x + 1, MAZE_H - 1); break;
+            case MAZE_DIR_E: y = doorOff[dir]; tomboMark(MAZE_W - 1, y); tomboMark(MAZE_W - 1, y + 1); break;
+            default:         y = doorOff[dir]; tomboMark(0, y); tomboMark(0, y + 1); break; // MAZE_DIR_W
+        }
+    }
+
+    tomboPlaceDoorFrames(doorMask, doorOff);
+    for (dir = 0; dir < 4; dir++)
+        if (doorMask & (1 << dir))
+            placed++;
+    placed += tomboBlockAlignedDoors(doorMask, doorOff, hubX, hubY);
+    placed += tomboPlaceHubFeeders(doorMask, doorOff, hubX, hubY);
+
+    for (tries = 0; (placed < TOMBO_WALL_TARGET) && (tries < 400); tries++)
+    {
+        const u8 roll = random() % 10;
+        u8 len = (roll < 8) ? 1 : 2; // mostly single pillars: each one is up to 4 new stops
+        const bool horiz = (random() & 1);
+        const s16 px = OBST_X_MIN + (random() % (OBST_X_MAX - OBST_X_MIN + 1));
+        const s16 py = OBST_Y_MIN + (random() % (OBST_Y_MAX - OBST_Y_MIN + 1));
+
+        if (len > (TOMBO_WALL_TARGET - placed))
+            len = (u8) (TOMBO_WALL_TARGET - placed);
+
+        if (tomboPlaceObstacle(px, py, len, horiz, doorMask, doorOff, hubX, hubY))
+            placed += len;
+    }
+
+    return tomboValidate(doorMask, doorOff, hubX, hubY, spawnAtHub);
+}
+
+// Full tombo pipeline for one room: bounded random attempts derived from
+// roomSeed, then the deterministic fallback attempts (see
+// TOMBO_FALLBACK_ATTEMPTS). FALSE only if every one of them is rejected --
+// the caller then falls back to carve() (never observed: see the
+// exhaustive host fuzz in TOMBO_FALLBACK_ATTEMPTS's comment).
+// useFixedWall/fixedWallVariant let the insertion room keep its own
+// uniform look (spec §27) under tombo too. spawnAtHub additionally
+// requires the insertion room's spawn point (the hub) to be a working
+// starting position of its own.
+static bool generateRoomTombo(s16 hubX, s16 hubY, u8 doorMask, const u8 doorOff[4],
+                               u16 roomSeed, bool useFixedWall, u8 fixedWallVariant, bool spawnAtHub)
+{
+    u16 attempt;
+    bool ok = FALSE;
+
+    for (attempt = 0; !ok && (attempt < TOMBO_MAX_GENERATION_ATTEMPTS); attempt++)
+        ok = tomboTryOnce((u16) (roomSeed + attempt), hubX, hubY, doorMask, doorOff, useFixedWall, fixedWallVariant, spawnAtHub);
+
+    for (attempt = 0; !ok && (attempt < TOMBO_FALLBACK_ATTEMPTS); attempt++)
+        ok = tomboTryOnce((u16) (TOMBO_FALLBACK_SEED + attempt), hubX, hubY, doorMask, doorOff, useFixedWall, fixedWallVariant, spawnAtHub);
+
+    if (ok && !useFixedWall)
+    {
+        // Attempts ran on a constant wall value; now that the layout is
+        // final, give every wall cell its usual random dither variant.
+        s16 x, y;
+
+        for (y = 0; y < MAZE_H; y++)
+            for (x = 0; x < MAZE_W; x++)
+                if (grid[y][x] != PATH)
+                    grid[y][x] = randomWallVariant();
+    }
+
+    return ok;
+}
+
 void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
                         bool lockedN, bool lockedE, bool lockedS, bool lockedW,
                         const u8 doorOffsets[4], u8 sectionHue, u16 roomSeed)
@@ -248,29 +917,58 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
     s16 anchorX[4], anchorY[4]; // indexed by MAZE_DIR_N/E/S/W
 
     wallHueBase = sectionHue * WALL_VARIANTS; // spec §18: every wall cell in this room comes from that hue's block
-    setRandomSeed(roomSeed);
-
-    for (y = 0; y < MAZE_H; y++)
-        for (x = 0; x < MAZE_W; x++)
-            grid[y][x] = randomWallVariant();
 
     anchorForDoor(MAZE_DIR_N, doorOffsets[MAZE_DIR_N], &anchorX[MAZE_DIR_N], &anchorY[MAZE_DIR_N]);
     anchorForDoor(MAZE_DIR_E, doorOffsets[MAZE_DIR_E], &anchorX[MAZE_DIR_E], &anchorY[MAZE_DIR_E]);
     anchorForDoor(MAZE_DIR_S, doorOffsets[MAZE_DIR_S], &anchorX[MAZE_DIR_S], &anchorY[MAZE_DIR_S]);
     anchorForDoor(MAZE_DIR_W, doorOffsets[MAZE_DIR_W], &anchorX[MAZE_DIR_W], &anchorY[MAZE_DIR_W]);
 
-    forcedTargetCount = 0;
-    if (doorN) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_N]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_N]; forcedTargetCount++; }
-    if (doorE) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_E]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_E]; forcedTargetCount++; }
-    if (doorS) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_S]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_S]; forcedTargetCount++; }
-    if (doorW) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_W]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_W]; forcedTargetCount++; }
+    // Required sockets (every ACTIVE door's anchor, regardless of locked
+    // state -- a currently-locked door can still unlock on a later visit
+    // without this room's interior ever being regenerated, so its anchor
+    // must already be reachable either way, same as the carve/bridge
+    // path below always guaranteed).
 
-    carve(ROOM_SEED_COL, ROOM_SEED_ROW);
+    if ((roomGenMode == MAZE_ROOMGEN_TOMBO) &&
+        generateRoomTombo(ROOM_SEED_COL, ROOM_SEED_ROW,
+                          (u8) ((doorN ? 1 : 0) | (doorE ? 2 : 0) | (doorS ? 4 : 0) | (doorW ? 8 : 0)),
+                          doorOffsets, roomSeed, FALSE, 0, FALSE))
+    {
+        // tombo succeeded -- grid is already fully carved, nothing more
+        // to do here before the shared border/door-punch code below.
+    }
+    else
+    {
+        // MAZE_ROOMGEN_CARVE, or tombo exhausted every attempt (spec
+        // §33/§34's fallback -- this pipeline has always shipped as
+        // reliable on its own).
+        setRandomSeed(roomSeed);
+        fillWallsRandom();
+        tomboResetDebugGraph(); // no explicit graph here -- Maze_drawDebugGraph() should draw nothing
 
-    if (doorN && (grid[anchorY[MAZE_DIR_N]][anchorX[MAZE_DIR_N]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_N], anchorY[MAZE_DIR_N]);
-    if (doorE && (grid[anchorY[MAZE_DIR_E]][anchorX[MAZE_DIR_E]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_E], anchorY[MAZE_DIR_E]);
-    if (doorS && (grid[anchorY[MAZE_DIR_S]][anchorX[MAZE_DIR_S]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_S], anchorY[MAZE_DIR_S]);
-    if (doorW && (grid[anchorY[MAZE_DIR_W]][anchorX[MAZE_DIR_W]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_W], anchorY[MAZE_DIR_W]);
+        forcedTargetCount = 0;
+        if (doorN) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_N]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_N]; forcedTargetCount++; }
+        if (doorE) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_E]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_E]; forcedTargetCount++; }
+        if (doorS) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_S]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_S]; forcedTargetCount++; }
+        if (doorW) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_W]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_W]; forcedTargetCount++; }
+
+        carve(ROOM_SEED_COL, ROOM_SEED_ROW);
+
+        if (doorN && (grid[anchorY[MAZE_DIR_N]][anchorX[MAZE_DIR_N]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_N], anchorY[MAZE_DIR_N]);
+        if (doorE && (grid[anchorY[MAZE_DIR_E]][anchorX[MAZE_DIR_E]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_E], anchorY[MAZE_DIR_E]);
+        if (doorS && (grid[anchorY[MAZE_DIR_S]][anchorX[MAZE_DIR_S]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_S], anchorY[MAZE_DIR_S]);
+        if (doorW && (grid[anchorY[MAZE_DIR_W]][anchorX[MAZE_DIR_W]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_W], anchorY[MAZE_DIR_W]);
+    }
+
+    // Guarantee every active door's anchor actually touches its own
+    // border punch zone (see connectAnchorToBorder's own doc comment) --
+    // regardless of algorithm or locked state, since a locked door can
+    // still unlock later without this room's interior ever being
+    // regenerated.
+    if (doorN) connectAnchorToBorder(MAZE_DIR_N, anchorX[MAZE_DIR_N], anchorY[MAZE_DIR_N]);
+    if (doorE) connectAnchorToBorder(MAZE_DIR_E, anchorX[MAZE_DIR_E], anchorY[MAZE_DIR_E]);
+    if (doorS) connectAnchorToBorder(MAZE_DIR_S, anchorX[MAZE_DIR_S], anchorY[MAZE_DIR_S]);
+    if (doorW) connectAnchorToBorder(MAZE_DIR_W, anchorX[MAZE_DIR_W], anchorY[MAZE_DIR_W]);
 
     for (x = 0; x < MAZE_W; x++)
     {
@@ -356,28 +1054,39 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
     s16 x, y;
     s16 anchorX, anchorY;
     s16 menuAnchorX, menuAnchorY;
+    u8 insertOffsets[4] = { 0, 0, 0, 0 };
 
-    setRandomSeed(roomSeed);
-
-    for (y = 0; y < MAZE_H; y++)
-        for (x = 0; x < MAZE_W; x++)
-            grid[y][x] = INSERT_WALL_VARIANT;
+    insertOffsets[doorDir] = doorOffset;
+    insertOffsets[menuDoorDir] = menuDoorOffset;
 
     anchorForDoor(doorDir, doorOffset, &anchorX, &anchorY);
     anchorForDoor(menuDoorDir, menuDoorOffset, &menuAnchorX, &menuAnchorY);
 
-    forcedTargetCount = 2;
-    forcedTargetX[0] = anchorX;
-    forcedTargetY[0] = anchorY;
-    forcedTargetX[1] = menuAnchorX;
-    forcedTargetY[1] = menuAnchorY;
+    if ((roomGenMode == MAZE_ROOMGEN_TOMBO) &&
+        generateRoomTombo(ROOM_SEED_COL, ROOM_SEED_ROW, (u8) ((1 << doorDir) | (1 << menuDoorDir)), insertOffsets,
+                          roomSeed, TRUE, INSERT_WALL_VARIANT, TRUE))
+    {
+        // tombo succeeded -- grid is already fully carved.
+    }
+    else
+    {
+        setRandomSeed(roomSeed);
+        fillWallsFixed(INSERT_WALL_VARIANT);
+        tomboResetDebugGraph(); // no explicit graph here -- Maze_drawDebugGraph() should draw nothing
 
-    carve(ROOM_SEED_COL, ROOM_SEED_ROW);
+        forcedTargetCount = 2;
+        forcedTargetX[0] = anchorX;
+        forcedTargetY[0] = anchorY;
+        forcedTargetX[1] = menuAnchorX;
+        forcedTargetY[1] = menuAnchorY;
 
-    if (grid[anchorY][anchorX] != PATH)
-        bridgeToSeed(anchorX, anchorY);
-    if (grid[menuAnchorY][menuAnchorX] != PATH)
-        bridgeToSeed(menuAnchorX, menuAnchorY);
+        carve(ROOM_SEED_COL, ROOM_SEED_ROW);
+
+        if (grid[anchorY][anchorX] != PATH)
+            bridgeToSeed(anchorX, anchorY);
+        if (grid[menuAnchorY][menuAnchorX] != PATH)
+            bridgeToSeed(menuAnchorX, menuAnchorY);
+    }
 
     for (x = 0; x < MAZE_W; x++)
     {
@@ -389,6 +1098,13 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
         grid[y][0] = INSERT_WALL_VARIANT;
         grid[y][MAZE_W - 1] = INSERT_WALL_VARIANT;
     }
+
+    // Guarantee both anchors actually touch their own border punch zone
+    // (see connectAnchorToBorder's own doc comment) -- same fix as
+    // Maze_generateRoom's, needed here too since this room's doorDir/
+    // menuDoorDir can land on S or E exactly like any tree room's doors.
+    connectAnchorToBorder(doorDir, anchorX, anchorY);
+    connectAnchorToBorder(menuDoorDir, menuAnchorX, menuAnchorY);
 
     // The mission door, on whichever border/offset doorDir/doorOffset
     // picked (spec §29ter/§30: randomized once per game, no longer
@@ -447,6 +1163,20 @@ void Maze_draw(void)
             VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, br), tx + 1, ty + 1);
         }
     }
+}
+
+// Debug overlay (user request: "pinta puntitos de todo el grafo de cada
+// habitacion para debugear") -- one small dot per node of the accepted
+// room's slide graph (every cell the ship can stop in). Reuses
+// VDP_drawText like every other in-room label. Draws nothing when the room
+// came from MAZE_ROOMGEN_CARVE or from tombo's carve fallback
+// (slideCount is reset to 0 there). Call right after Maze_draw().
+void Maze_drawDebugGraph(void)
+{
+    u16 i;
+
+    for (i = 0; i < slideCount; i++)
+        VDP_drawText(".", (u16) (slideNodeX[i] * 2), (u16) (slideNodeY[i] * 2));
 }
 
 bool Maze_isWall(s16 tx, s16 ty)

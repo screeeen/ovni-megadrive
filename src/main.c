@@ -3,7 +3,6 @@
 #include "maze.h"
 #include "player.h"
 #include "guidemap.h"
-#include "enemy.h"
 #include "items.h"
 #include "menu.h"
 
@@ -47,7 +46,22 @@ typedef enum { STATE_MENU, STATE_PLAYING, STATE_WIN } GameState;
 // newGame()) since it's a player preference, not part of any one
 // run's state.
 typedef enum { CONTROL_NORMAL, CONTROL_DRUNK, CONTROL_THRUST, CONTROL_INERTIA, CONTROL_TOMB, CONTROL_MODE_COUNT } ControlMode;
-static ControlMode controlMode = CONTROL_NORMAL;
+// Starts in CONTROL_TOMB now (user request, alongside defaulting
+// roomGenMode to MAZE_ROOMGEN_TOMBO below: "por defecto esta activado
+// el sistema tombo y el esquema de movimiento tomba") -- was NORMAL.
+static ControlMode controlMode = CONTROL_TOMB;
+
+// Room-generation mode (user request, "tombo": graph-first backbone +
+// real movement-simulation validation, see maze.h's MazeRoomGenMode
+// doc comment) -- switcher lives in the planet-select menu, bound to
+// BUTTON_START (free there -- see the STATE_MENU input handling below),
+// unlike controlMode's combo (which needs to work mid-game too). Starts
+// in MAZE_ROOMGEN_TOMBO now (user request); persists across games/menu
+// visits, same reasoning as controlMode. main() below still has to hand
+// this to maze.c explicitly via Maze_setRoomGenMode() once at boot --
+// maze.c's own internal default is still CARVE, this variable existing
+// here is just main.c's mirror of it for the menu label/toggle.
+static MazeRoomGenMode roomGenMode = MAZE_ROOMGEN_TOMBO;
 
 // Every mode but DRUNK moves faster than its original 1px/frame (spec
 // §42/§44, user request: "que vaya más rápido en el modo normal") --
@@ -92,7 +106,25 @@ typedef struct { u8 cols, rows, letters; } SizePreset;
 // per-preset item count (guidemap.h's itemCount, no longer a fixed
 // ITEM_COUNT=5 for every game). Fuzz-tested (host-side, 20000 seeds per
 // preset) via a full simulated playthrough of each -- see spec §33.
+//
+// Index 0, { 1, 1, 1 }, is a dedicated tombo test planet (user request:
+// "olvidate por ahora de las entradas y salidas, haz 1 planeta con 1
+// habitación con el sistema tombo") -- a 1x1 grid, i.e. a single real
+// room in the tree. GuideMap_generate() already degrades to this cleanly
+// with no special-casing needed: with only one cell, carveTree() marks
+// it CELL_ROOM and stops (no neighbors to grow into, so it ends up with
+// zero real tree doors), selectInsertionLink() still finds it as a
+// perimeter room with all 4 sides free and picks one as insertLinkDir,
+// and selectItemRooms() already has a documented fallback for exactly
+// this shape ("Not enough dead-end rooms... use the start room for at
+// most one item") -- so by the time main.c's loadRoom() actually calls
+// Maze_generateRoom for this room, it ends up with exactly ONE active
+// door (the insertion link), the same single-target case
+// generateRoomTombo already handles like any other. Set as the new
+// default planet (SIZE_PRESET_DEFAULT below) so starting a game goes
+// straight into it.
 static const SizePreset sizePresets[] = {
+    { 1, 1, 1 },
     { 3, 3, 1 },
     { 4, 3, 2 },
     { 5, 3, 3 },
@@ -104,10 +136,8 @@ static const SizePreset sizePresets[] = {
 // Must equal menu.h's MENU_PLANET_COUNT (spec §31) -- sizePresetIndex
 // (0..SIZE_PRESET_COUNT-1) is passed straight into Menu_update() as the
 // selected planet index, indexing menu.c's own per-planet arrays.
-#define SIZE_PRESET_COUNT 7
-#define SIZE_PRESET_DEFAULT 4 // 6x4/5 letters, the original smallest full preset (§0)
-
-#define ENEMY_COUNT 2
+#define SIZE_PRESET_COUNT 8
+#define SIZE_PRESET_DEFAULT 0 // the new 1x1 tombo test planet (user request)
 
 // playerShip's palette (spec §13bis) is 2 colors: index0 (never rendered
 // -- Genesis sprite hardware always treats palette index0 as transparent)
@@ -127,8 +157,6 @@ static const SizePreset sizePresets[] = {
 static Player player;
 static Sprite *playerSprite;
 static Sprite *mapShipSprite;
-static Enemy enemies[ENEMY_COUNT];
-static Sprite *enemySprites[ENEMY_COUNT];
 static u16 mapSeed;
 static u8 currentCol, currentRow;
 // TRUE while the player is still in the special insertion room (spec
@@ -357,7 +385,6 @@ static void loadRoom(u8 col, u8 row)
         doorOffsetFor(col, row, DOOR_S),
         doorOffsetFor(col, row, DOOR_W),
     };
-    u8 i;
 
     Maze_generateRoom(doorN, doorE, doorS, doorW,
                        lockedN, lockedE, lockedS, lockedW, doorOffsets, sectionHue, seed);
@@ -365,17 +392,6 @@ static void loadRoom(u8 col, u8 row)
     Items_drawInRoom(col, row);
 
     guideMap[row][col].visited = TRUE;
-
-    // Same seed the room's maze uses, so the patrol routes are
-    // deterministic per room too (spec-equivalent persistence, see
-    // enemy.h). Each enemy draws further from the same reseeded stream,
-    // so the two land on different tiles in practice without needing to
-    // coordinate explicitly.
-    for (i = 0; i < ENEMY_COUNT; i++)
-    {
-        Enemy_spawnForRoom(&enemies[i], seed);
-        SPR_setPosition(enemySprites[i], enemies[i].x, enemies[i].y);
-    }
 }
 
 // Room transition (spec §7): move to the neighboring cell, regenerate its
@@ -432,8 +448,8 @@ static void newGame(void)
     inInsertRoom = TRUE;
     // Which border its own door sits on: the OPPOSITE side of
     // insertLinkDir (spec §29quat, N<->S / E<->W -- same "+2 mod 4" flip
-    // guidemap.c's own static opposite() and enemy.c's Enemy_opposite()
-    // use for the same 4-direction pairing), so the insertion room's
+    // guidemap.c's own static opposite() uses for
+    // the same 4-direction pairing), so the insertion room's
     // exit and the periphery room's entrance read as one continuous
     // line instead of two independently-facing doors. GuideMap_generate()
     // (just above) already set insertLinkDir for this game. Stays fixed
@@ -465,13 +481,6 @@ static void newGame(void)
         player.dir = DIR_NONE;
     SPR_setPosition(playerSprite, player.x, player.y);
     SPR_setVisibility(playerSprite, VISIBLE);
-    {
-        u8 i;
-        // No enemies in the insertion room (spec §27) -- they stay
-        // hidden until the player reaches their first real room.
-        for (i = 0; i < ENEMY_COUNT; i++)
-            SPR_setVisibility(enemySprites[i], HIDDEN);
-    }
 }
 
 // Solar-system start menu (spec §31): each planet is one of
@@ -496,6 +505,12 @@ static void drawMenu(void)
     // Title moved up and the bottom text pushed down (spec §32quat) to
     // free the extra vertical room the widened orbits need (menu.c).
     VDP_drawText("OVNI", 18, 3);
+
+    // Room-generation mode switcher (user request) -- row 5, clear of
+    // both the title above and the widened planet orbits below (menu.c's
+    // SUN_CENTER_Y=122px/~row15 is well past this).
+    len = sprintf(buf, "SALAS: %s (START)", (roomGenMode == MAZE_ROOMGEN_TOMBO) ? "TOMBO " : "NORMAL");
+    VDP_drawText(buf, (40 - len) / 2, 5);
 
     // Letter count shown alongside the grid size (spec §33) -- the
     // preset's real difficulty is the combination of both, not the grid
@@ -530,7 +545,6 @@ static void drawMenu(void)
 
 static void resetToMenu(void)
 {
-    u8 i;
     const GameState previousState = gameState; // capture before overwriting below
 
     // Snapshot progress for the planet just left (spec §35, fixed in
@@ -556,8 +570,6 @@ static void resetToMenu(void)
 
     SPR_setVisibility(playerSprite, HIDDEN);
     SPR_setVisibility(mapShipSprite, HIDDEN);
-    for (i = 0; i < ENEMY_COUNT; i++)
-        SPR_setVisibility(enemySprites[i], HIDDEN);
 
     // Items_drawHud's letter tracker and drawInsertRoomStatus's message
     // (both BG_B, high priority) are only ever refreshed during gameplay
@@ -589,23 +601,17 @@ int main(bool hardReset)
     // shown instead of playerShip while the guide map is open.
     mapShipSprite = SPR_addSprite(&mapShip, 0, 0, TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
 
+    // PAL2 (enemyShip's palette) is only used by the menu now, for the
+    // yellow "completed planet" ink -- there are no enemy sprites anymore.
     PAL_setPalette(PAL2, enemyShip.palette->data, DMA);
-    {
-        u8 i;
-        for (i = 0; i < ENEMY_COUNT; i++)
-            enemySprites[i] = SPR_addSprite(&enemyShip, 0, 0, TILE_ATTR(PAL2, TRUE, FALSE, FALSE));
-    }
 
     JOY_init();
+
+    Maze_setRoomGenMode(roomGenMode); // sync maze.c's own default (CARVE) to roomGenMode's actual starting value (TOMBO)
 
     gameState = STATE_MENU;
     SPR_setVisibility(playerSprite, HIDDEN);
     SPR_setVisibility(mapShipSprite, HIDDEN);
-    {
-        u8 i;
-        for (i = 0; i < ENEMY_COUNT; i++)
-            SPR_setVisibility(enemySprites[i], HIDDEN);
-    }
     Menu_setVisible(TRUE);
     drawMenu();
 
@@ -627,8 +633,7 @@ int main(bool hardReset)
         {
             // Cursor arrow tracks the selected planet's live orbit
             // position (spec §31) -- advanced every frame regardless of
-            // input, same as the enemies keep patrolling during
-            // gameplay. completed[] (spec §45, user request: "Los
+            // input. completed[] (spec §45, user request: "Los
             // planetas que se han completados pintalos de amarillo")
             // is derived fresh each frame from presetSave[] -- cheap
             // (SIZE_PRESET_COUNT checks) and avoids needing to hook into
@@ -656,6 +661,12 @@ int main(bool hardReset)
                 Menu_setVisible(FALSE);
                 gameState = STATE_PLAYING;
                 newGame();
+            }
+            if ((state & BUTTON_START) && !(prevState & BUTTON_START))
+            {
+                roomGenMode = (roomGenMode == MAZE_ROOMGEN_CARVE) ? MAZE_ROOMGEN_TOMBO : MAZE_ROOMGEN_CARVE;
+                Maze_setRoomGenMode(roomGenMode);
+                drawMenu();
             }
         }
         else if (gameState == STATE_WIN) // spec §34
@@ -789,14 +800,13 @@ int main(bool hardReset)
 
                 if (mapViewOpen)
                 {
-                    u8 i;
                     u16 mx, my;
 
                     GuideMap_drawOverlay();
 
                     // mapShip (spec §24, 8x8, same size as a map letter)
                     // marks the current room instead of playerSprite
-                    // (which hides, same as the enemies) -- centered in
+                    // (which hides) -- centered in
                     // the 24x16px room box: (24-8)/2=8 horizontally,
                     // (16-8)/2=4 vertically. White and blinking (spec
                     // §23): flip the shared ink color, start visible,
@@ -809,13 +819,9 @@ int main(bool hardReset)
                     SPR_setVisibility(mapShipSprite, VISIBLE);
                     mapBlinkTimer = 0;
 
-                    for (i = 0; i < ENEMY_COUNT; i++)
-                        SPR_setVisibility(enemySprites[i], HIDDEN);
                 }
                 else
                 {
-                    u8 i;
-
                     Maze_draw();
                     // Restores the ship's normal color (spec §23) -- only
                     // the one word that PLAYER_SHIP_INK_INDEX touched,
@@ -823,8 +829,6 @@ int main(bool hardReset)
                     PAL_setColor(PLAYER_SHIP_INK_INDEX, playerShip.palette->data[1]);
                     SPR_setVisibility(playerSprite, VISIBLE);
                     SPR_setVisibility(mapShipSprite, HIDDEN);
-                    for (i = 0; i < ENEMY_COUNT; i++)
-                        SPR_setVisibility(enemySprites[i], VISIBLE);
                 }
             }
 
@@ -846,7 +850,7 @@ int main(bool hardReset)
                 // The insertion room has two doors (spec §27/§36):
                 // insertRoomDoorDir (the mission door, spec §29ter) and
                 // menuDoorDir (perpendicular to it by construction, so
-                // never the same side) -- no items/enemies/locks apply
+                // never the same side) -- no items/locks apply
                 // here, it lives outside the normal grid entirely.
                 const bool doorN = (insertRoomDoorDir == DOOR_N) || (menuDoorDir == DOOR_N);
                 const bool doorE = (insertRoomDoorDir == DOOR_E) || (menuDoorDir == DOOR_E);
@@ -865,8 +869,6 @@ int main(bool hardReset)
 
                 if (exitDir == exitDirForDoorDir(insertRoomDoorDir))
                 {
-                    u8 i;
-
                     // Jump straight to the chosen perimeter room and land
                     // right at its real border opening (spec §29,
                     // insertLinkDir -- loadRoom() already punched it
@@ -880,8 +882,6 @@ int main(bool hardReset)
                     positionPlayerEnteringViaDoorDir(insertLinkDir, insertLinkOffset);
                     drawInsertRoomStatus(FALSE); // spec §34 -- only relevant while actually in the insertion room
 
-                    for (i = 0; i < ENEMY_COUNT; i++)
-                        SPR_setVisibility(enemySprites[i], VISIBLE);
                 }
                 else if (exitDir == exitDirForDoorDir(menuDoorDir))
                 {
@@ -898,13 +898,9 @@ int main(bool hardReset)
                         // Phase complete: victory screen, wait for
                         // BUTTON_A (STATE_WIN, handled in the main
                         // dispatch below) to head back to the menu.
-                        u8 i;
-
                         gameState = STATE_WIN;
 
                         SPR_setVisibility(playerSprite, HIDDEN);
-                        for (i = 0; i < ENEMY_COUNT; i++)
-                            SPR_setVisibility(enemySprites[i], HIDDEN); // already hidden here, harmless
                         drawInsertRoomStatus(FALSE);
 
                         VDP_clearPlane(BG_A, TRUE);
@@ -935,12 +931,43 @@ int main(bool hardReset)
                 const bool doorE = cell.doorE || (isInsertLinkRoom && (insertLinkDir == DOOR_E));
                 const bool doorS = cell.doorS || (isInsertLinkRoom && (insertLinkDir == DOOR_S));
                 const bool doorW = cell.doorW || (isInsertLinkRoom && (insertLinkDir == DOOR_W));
-                const u8 exitDir = Player_updateRoom(&player, bounceMode, moveSpeed,
-                                                      doorN, doorE, doorS, doorW,
-                                                      doorOffsetFor(currentCol, currentRow, DOOR_N),
-                                                      doorOffsetFor(currentCol, currentRow, DOOR_E),
-                                                      doorOffsetFor(currentCol, currentRow, DOOR_S),
-                                                      doorOffsetFor(currentCol, currentRow, DOOR_W));
+                const u8 offN = doorOffsetFor(currentCol, currentRow, DOOR_N);
+                const u8 offE = doorOffsetFor(currentCol, currentRow, DOOR_E);
+                const u8 offS = doorOffsetFor(currentCol, currentRow, DOOR_S);
+                const u8 offW = doorOffsetFor(currentCol, currentRow, DOOR_W);
+                u8 exitDir = EXIT_NONE;
+                u8 step;
+
+                // One 1px sub-step at a time, checking for the letter after
+                // EACH one instead of once per frame. CONTROL_TOMB moves
+                // TOMB_MODE_SPEED (250) px per frame -- a whole slide across
+                // the room fits in a single frame, so a per-frame overlap
+                // check only ever saw the ship's final resting cell and
+                // missed the letter whenever the ship slid THROUGH the hub
+                // (which is exactly where tombo puts it) and stopped
+                // somewhere else. Intermediate pixels are what count.
+                for (step = 0; (step < moveSpeed) && (exitDir == EXIT_NONE); step++)
+                {
+                    exitDir = Player_updateRoom(&player, bounceMode, 1, doorN, doorE, doorS, doorW,
+                                                offN, offE, offS, offW);
+
+                    // Cheap box pre-check first: this runs up to 250 times a
+                    // frame, and the letter only lives in the hub's cell.
+                    if ((exitDir == EXIT_NONE) &&
+                        (player.x > (MAZE_DOOR_COL - 1) * MAZE_TILE_PX) && (player.x < (MAZE_DOOR_COL + 1) * MAZE_TILE_PX) &&
+                        (player.y > (MAZE_DOOR_ROW - 1) * MAZE_TILE_PX) && (player.y < (MAZE_DOOR_ROW + 1) * MAZE_TILE_PX) &&
+                        Items_tryCollect(currentCol, currentRow, player.x, player.y))
+                    {
+                        Maze_draw();           // wipes the now-collected letter's tile
+                        Items_drawHud();
+                        // Unlocks the next branch (spec §16); the current
+                        // room's own doors never change from this (items
+                        // only live in dead ends), it only affects rooms
+                        // not yet loaded -- they pick up the new lock
+                        // state next time loadRoom() regenerates them.
+                        GuideMap_recomputeLocks();
+                    }
+                }
 
                 if (exitDir != EXIT_NONE)
                 {
@@ -963,17 +990,12 @@ int main(bool hardReset)
                         // now stale, still pointing at the periphery room),
                         // same reason the sibling inInsertRoom branch already
                         // skips that below -- so inInsertRoom flips TRUE.
-                        u8 i;
-
                         inInsertRoom = TRUE;
                         Maze_generateInsertionRoom(insertRoomDoorDir, insertLinkOffset, menuDoorDir, menuDoorOffset, mapSeed);
                         Maze_draw();
                         drawInsertRoomArrow(); // spec §37
                         positionPlayerEnteringViaDoorDir(insertRoomDoorDir, insertLinkOffset);
                         drawInsertRoomStatus(TRUE); // spec §34
-
-                        for (i = 0; i < ENEMY_COUNT; i++)
-                            SPR_setVisibility(enemySprites[i], HIDDEN);
                     }
                     else
                     {
@@ -982,53 +1004,6 @@ int main(bool hardReset)
                 }
 
                 SPR_setPosition(playerSprite, player.x, player.y);
-
-                // Skipped on the one frame that just sent the player back
-                // into the insertion room (inInsertRoom flips TRUE above)
-                // -- currentCol/currentRow are now stale (still pointing
-                // at the periphery room), and there's nothing to collect
-                // or patrol in the insertion room anyway.
-                if (!inInsertRoom)
-                {
-                    // Physical contact pickup, order enforced (spec §13):
-                    // does nothing unless (currentCol,currentRow) holds
-                    // the next letter due AND the ship's box overlaps it.
-                    if (Items_tryCollect(currentCol, currentRow, player.x, player.y))
-                    {
-                        Maze_draw();           // wipes the now-collected letter's tile
-                        Items_drawInRoom(currentCol, currentRow); // no-op here, kept for symmetry with loadRoom
-                        Items_drawHud();
-                        // Unlocks the next branch (spec §16); the current
-                        // room's own doors never change from this (items
-                        // only live in dead ends), it only affects rooms
-                        // not yet loaded -- they pick up the new lock
-                        // state next time loadRoom() regenerates them.
-                        GuideMap_recomputeLocks();
-                    }
-
-                    // Routine patrol, no player interaction yet.
-                    {
-                        u8 i, j;
-
-                        for (i = 0; i < ENEMY_COUNT; i++)
-                            Enemy_update(&enemies[i]);
-
-                        // Bounce off each other: reverse both on overlap.
-                        // A brief 1-frame overlap before they separate is
-                        // imperceptible at 60fps and there's no damage/
-                        // health model yet to make it matter.
-                        for (i = 0; i < ENEMY_COUNT; i++)
-                            for (j = i + 1; j < ENEMY_COUNT; j++)
-                                if (Enemy_overlaps(&enemies[i], &enemies[j]))
-                                {
-                                    enemies[i].dir = Enemy_opposite(enemies[i].dir);
-                                    enemies[j].dir = Enemy_opposite(enemies[j].dir);
-                                }
-
-                        for (i = 0; i < ENEMY_COUNT; i++)
-                            SPR_setPosition(enemySprites[i], enemies[i].x, enemies[i].y);
-                    }
-                }
             }
         }
 

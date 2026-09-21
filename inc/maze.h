@@ -46,6 +46,38 @@
 // feature (spec §18).
 #define MAZE_WALL_DITHER_TILE(hue) (TILE_USER_INDEX + (2 * (((hue) * 9) + 5)))
 
+// Which interior room-generation algorithm Maze_generateRoom/
+// Maze_generateInsertionRoom use (user request, menu-switchable via
+// main.c's START button): MAZE_ROOMGEN_CARVE is the original recursive-
+// backtracker + forced-target/bridge approach this file always used.
+// MAZE_ROOMGEN_TOMBO ("tombo", a Tomb of the Mask homage) is a graph-
+// first generator built for that game's movement (main.c's CONTROL_TOMB:
+// the ship slides in a straight line until a wall stops it and can only
+// turn from a stop) -- the only control scheme it guarantees anything
+// for. It builds an OPEN room -- walls are only ~10% of the interior, a
+// scatter of small obstacles (each one gives the ship stops on every side,
+// so there are many nodes and many routes between them, not a single
+// corridor), plus a few deliberately placed ones next to each door and
+// near the hub so those are always reachable -- then
+// ACCEPTS the room only after simulating actual slides over the finished
+// grid (see maze.c's tomboValidate): from every way of entering the room
+// (each active door, and the spawn for the insertion room) every active
+// door must be leavable from every stop the ship can reach, and the hub
+// (the letter) must be crossed -- so the ship can never be stuck, whichever
+// door it wants next. Rejected layouts are re-rolled (bounded attempts
+// from the room's seed, then bounded deterministic ones that were
+// verified exhaustively host-side over every door subset x offset
+// combination). MAZE_ROOMGEN_CARVE's own pipeline is only the last-resort
+// fallback if all of those somehow fail, and carries no such guarantee.
+typedef enum { MAZE_ROOMGEN_CARVE, MAZE_ROOMGEN_TOMBO } MazeRoomGenMode;
+
+// Sets which algorithm the NEXT Maze_generateRoom/Maze_generateInsertionRoom
+// call (and every one after it, until called again) uses. Defaults to
+// MAZE_ROOMGEN_CARVE. A global toggle, not per-room -- main.c's own
+// roomGenMode mirrors this so it can show/persist the current choice in
+// the planet menu.
+void Maze_setRoomGenMode(MazeRoomGenMode mode);
+
 // Uploads the maze tileset to VRAM and sets its palette. Call once at boot.
 void Maze_loadGraphics(void);
 
@@ -118,6 +150,13 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
 
 // Draws the current maze to plane BG_A.
 void Maze_draw(void);
+
+// Debug overlay (user request): one small dot per node of the room's
+// slide graph -- every cell the ship can stop in -- from the most recent
+// MAZE_ROOMGEN_TOMBO generation. Draws nothing for a MAZE_ROOMGEN_CARVE
+// room, or one that fell back to it. Call right after Maze_draw(), every
+// time Maze_draw() is called.
+void Maze_drawDebugGraph(void);
 
 // tx/ty in maze-cell units. Out-of-range coordinates count as wall.
 bool Maze_isWall(s16 tx, s16 ty);
