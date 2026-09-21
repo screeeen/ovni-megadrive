@@ -68,17 +68,23 @@ static MazeRoomGenMode roomGenMode = MAZE_ROOMGEN_TOMBO;
 // implemented as Player_updateRoom repeating its untouched 1px-step
 // logic this many times per visual frame (see its own doc comment for
 // why a bigger single jump isn't safe), not as a bigger jump.
-// TOMB_MODE_SPEED (spec §44) is deliberately huge -- comfortably more
-// sub-steps than the longest straight stretch possible in a MAZE_W x
-// MAZE_H room (20x14 cells * 16px -- 250 sub-steps covers that with
-// room to spare even along the longer axis) -- so a press reaches the
-// next wall (or door) within one or two visual frames, reading as an
-// instant slide.
+// Tomb slide speed (spec §44, revised: user request "que haya interpolación
+// en la animación, que no sea de un frame a otro sino que haya un
+// movimiento") used to be 250 -- a whole slide done inside ONE frame, the
+// ship just appeared at the far wall. Now it is a plain px-per-frame speed:
+// a slide across the 320px room takes ~0.4s at top speed, visibly travelling the
+// whole way. Collision/exit/letter checks are unaffected -- every 1px
+// sub-step is still checked individually, whatever the speed.
 #define NORMAL_MODE_SPEED 3
 #define DRUNK_MODE_SPEED 1
 #define THRUST_MODE_SPEED 3
 #define INERTIA_MAX_SPEED 4
-#define TOMB_MODE_SPEED 250
+// Ease-in (user request): a slide does not start at full speed, it
+// accelerates -- px per frame for the 1st, 2nd, 3rd... frame of a slide,
+// then holds the last value (the top speed) until the ship stops. Reaches
+// 12 px/frame after 9 frames (~0.15s, ~47px). Tune the values to taste.
+static const u8 tombRamp[] = { 1, 1, 2, 3, 4, 6, 8, 10, 12 };
+#define TOMB_RAMP_LAST ((u8) (sizeof(tombRamp) - 1))
 
 // CONTROL_INERTIA's ramp state (spec §43/§44): speed climbs by 1 each
 // frame the ship keeps moving in the SAME direction, up to
@@ -88,6 +94,16 @@ static MazeRoomGenMode roomGenMode = MAZE_ROOMGEN_TOMBO;
 // scheme to try out, not a finished physics model).
 static u8 inertiaSpeed;
 static u8 inertiaLastDir = DIR_NONE;
+
+// CONTROL_TOMB's slide state. A slide now lasts many frames, so (as in the
+// game it is modelled on) the ship cannot be steered while it is moving --
+// only from a stop, which is also what the room generator's slide graph
+// assumes. tombMoving = the ship changed position last frame; a press
+// during a slide is not lost but remembered (tombQueuedDir, only the
+// latest) and applied the moment the ship stops.
+static bool tombMoving;
+static u8 tombQueuedDir = DIR_NONE;
+static u8 tombSpeedIdx; // where the current slide is on tombRamp
 
 // CONTROL_THRUST's repeat-rotate state (spec §44): holding LEFT/RIGHT
 // keeps rotating every THRUST_ROTATE_REPEAT_FRAMES frames instead of
@@ -441,6 +457,8 @@ static void newGame(void)
     // Every room's layout is about to change (new or resumed map, possibly a
     // different room-gen mode): drop the cached accepted attempts.
     Maze_clearRoomCache();
+    tombMoving = FALSE;
+    tombQueuedDir = DIR_NONE;
     Items_reset();
     if (save.hasSave)
         Items_fastForward(save.collectedCount); // spec §35 -- restore prior progress on this planet
@@ -691,6 +709,8 @@ int main(bool hardReset)
             // branches ever runs a given frame, but both need these).
             bool bounceMode;
             u8 moveSpeed;
+            const s16 frameStartX = player.x;
+            const s16 frameStartY = player.y;
 
             if (controlMode == CONTROL_DRUNK)
             {
@@ -747,10 +767,33 @@ int main(bool hardReset)
                  // pressed the same frame (no diagonals): UP, DOWN, LEFT,
                  // RIGHT.
             {
-                if ((state & BUTTON_UP) && !(prevState & BUTTON_UP)) player.dir = DIR_UP;
-                else if ((state & BUTTON_DOWN) && !(prevState & BUTTON_DOWN)) player.dir = DIR_DOWN;
-                else if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT)) player.dir = DIR_LEFT;
-                else if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT)) player.dir = DIR_RIGHT;
+                u8 pressed = DIR_NONE;
+
+                if ((state & BUTTON_UP) && !(prevState & BUTTON_UP)) pressed = DIR_UP;
+                else if ((state & BUTTON_DOWN) && !(prevState & BUTTON_DOWN)) pressed = DIR_DOWN;
+                else if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT)) pressed = DIR_LEFT;
+                else if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT)) pressed = DIR_RIGHT;
+
+                if (controlMode != CONTROL_TOMB)
+                {
+                    if (pressed != DIR_NONE)
+                        player.dir = pressed;
+                }
+                else if (tombMoving)
+                {
+                    // Mid-slide: can't steer, but remember the latest press.
+                    if (pressed != DIR_NONE)
+                        tombQueuedDir = pressed;
+                }
+                else
+                {
+                    // At a stop: a fresh press wins over a queued one.
+                    if (pressed != DIR_NONE)
+                        player.dir = pressed;
+                    else if (tombQueuedDir != DIR_NONE)
+                        player.dir = tombQueuedDir;
+                    tombQueuedDir = DIR_NONE;
+                }
             }
 
             switch (controlMode)
@@ -784,13 +827,21 @@ int main(bool hardReset)
                     moveSpeed = inertiaSpeed;
                     break;
                 case CONTROL_TOMB:
-                    // "Tomb of the Mask" (spec §44): TOMB_MODE_SPEED sub-
-                    // steps per frame slides the ship almost instantly
-                    // all the way to the next wall or door, same as that
-                    // game's signature move -- stops there (bounceMode
+                    // "Tomb of the Mask" (spec §44): one press slides the
+                    // ship all the way to the next wall or door, same as
+                    // that game's signature move -- stops there (bounceMode
                     // FALSE) rather than bouncing back.
                     bounceMode = FALSE;
-                    moveSpeed = (player.dir == DIR_NONE) ? 0 : TOMB_MODE_SPEED;
+                    // Ease-in: the first frame of a slide (the ship was at a
+                    // stop, tombMoving FALSE) is tombRamp[0]; every frame it
+                    // keeps travelling steps one further up the ramp. A stop
+                    // sends it back to the start, and a room change mid-slide
+                    // just carries on (the ship still counts as moving).
+                    if ((player.dir == DIR_NONE) || !tombMoving)
+                        tombSpeedIdx = 0;
+                    else if (tombSpeedIdx < TOMB_RAMP_LAST)
+                        tombSpeedIdx++;
+                    moveSpeed = (player.dir == DIR_NONE) ? 0 : tombRamp[tombSpeedIdx];
                     break;
                 default: // CONTROL_NORMAL
                     bounceMode = FALSE;
@@ -952,20 +1003,18 @@ int main(bool hardReset)
                 u8 step;
 
                 // One 1px sub-step at a time, checking for the letter after
-                // EACH one instead of once per frame. CONTROL_TOMB moves
-                // TOMB_MODE_SPEED (250) px per frame -- a whole slide across
-                // the room fits in a single frame, so a per-frame overlap
-                // check only ever saw the ship's final resting cell and
-                // missed the letter whenever the ship slid THROUGH the hub
-                // (which is exactly where tombo puts it) and stopped
-                // somewhere else. Intermediate pixels are what count.
+                // EACH one instead of once per frame. A frame can move the
+                // ship several px, and a per-frame overlap check only ever
+                // saw its resting cell for that frame -- it could step
+                // clean over the letter (the hub, which is exactly where
+                // tombo puts it). Intermediate pixels are what count.
                 for (step = 0; (step < moveSpeed) && (exitDir == EXIT_NONE); step++)
                 {
                     exitDir = Player_updateRoom(&player, bounceMode, 1, doorN, doorE, doorS, doorW,
                                                 offN, offE, offS, offW);
 
-                    // Cheap box pre-check first: this runs up to 250 times a
-                    // frame, and the letter only lives in the hub's cell.
+                    // Cheap box pre-check first: this runs once per px moved,
+                    // and the letter only lives in the hub's cell.
                     if ((exitDir == EXIT_NONE) &&
                         (player.x > (MAZE_DOOR_COL - 1) * MAZE_TILE_PX) && (player.x < (MAZE_DOOR_COL + 1) * MAZE_TILE_PX) &&
                         (player.y > (MAZE_DOOR_ROW - 1) * MAZE_TILE_PX) && (player.y < (MAZE_DOOR_ROW + 1) * MAZE_TILE_PX) &&
@@ -1018,6 +1067,11 @@ int main(bool hardReset)
 
                 SPR_setPosition(playerSprite, player.x, player.y);
             }
+
+            // Did the ship travel this frame? (CONTROL_TOMB's steering lock,
+            // see tombMoving.) Frozen while the map is open: nothing moves.
+            if (!mapViewOpen)
+                tombMoving = (player.x != frameStartX) || (player.y != frameStartY);
         }
 
         // FPS debug readout (user request), top-right corner on BG_B --
