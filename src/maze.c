@@ -933,7 +933,7 @@ static u16 tomboBlockAlignedDoors(u8 doorMask, const u8 doorOff[4], s16 hubX, s1
 // One generation attempt: an open floor, the door pockets, a scatter of
 // obstacles up to the wall budget, then the validator's verdict.
 static bool tomboTryOnce(u16 seed, s16 hubX, s16 hubY, u8 doorMask, const u8 doorOff[4],
-                          bool useFixedWall, u8 fixedWallVariant, bool spawnAtHub)
+                          bool useFixedWall, u8 fixedWallVariant, bool spawnAtHub, bool validate)
 {
     s16 x, y;
     u8 dir;
@@ -987,39 +987,99 @@ static bool tomboTryOnce(u16 seed, s16 hubX, s16 hubY, u8 doorMask, const u8 doo
             placed += len;
     }
 
+    // A replayed, previously accepted attempt (see generateRoomTombo) skips
+    // the validator: it is the bulk of an attempt's cost, and the layout is
+    // already known to pass. The debug graph stays empty then.
+    if (!validate)
+        return TRUE;
+
     return tomboValidate(doorMask, doorOff, hubX, hubY, spawnAtHub);
 }
 
-// Full tombo pipeline for one room: bounded random attempts derived from
-// roomSeed, then the deterministic fallback attempts (see
-// TOMBO_FALLBACK_ATTEMPTS). FALSE only if every one of them is rejected --
-// the caller then falls back to carve() (never observed: see the
-// exhaustive host fuzz in TOMBO_FALLBACK_ATTEMPTS's comment).
+// Attempt codes (user request: entering a room must not repeat the search
+// every time). Every attempt is fully determined by roomSeed and its code --
+// it reseeds the RNG, refills the grid, and the validator draws no random
+// numbers -- so the code of the attempt that got accepted is all that is
+// needed to rebuild the exact same room later, without the failed attempts
+// before it. Codes run over the three phases in order:
+//   0 .. STRICT-1                    strict puzzle, seed roomSeed + n
+//   STRICT .. 2*STRICT-1             middle tier,   seed roomSeed + 0x4000 + n
+//   2*STRICT .. +FALLBACK-1          no puzzle,     fixed seed (verified exhaustively)
+#define TOMBO_CODE_COUNT (2 * TOMBO_STRICT_ATTEMPTS + TOMBO_FALLBACK_ATTEMPTS)
+
+// Per-room cache of accepted attempt codes, indexed by the caller's slot
+// (main.c: one per grid room, plus MAZE_INSERT_CACHE_SLOT). 0 = not known
+// yet, CACHE_NO_TOMBO = every attempt was rejected (carve fallback), else
+// code + 1. Cleared by Maze_clearRoomCache().
+#define CACHE_NO_TOMBO 255
+static u8 attemptCache[MAZE_ROOM_CACHE_SLOTS];
+
+void Maze_clearRoomCache(void)
+{
+    u16 i;
+
+    for (i = 0; i < MAZE_ROOM_CACHE_SLOTS; i++)
+        attemptCache[i] = 0;
+}
+
+// Runs the attempt with this code. validate=FALSE replays a known-good one.
+static bool tomboTryCode(u16 code, s16 hubX, s16 hubY, u8 doorMask, const u8 doorOff[4],
+                          u16 roomSeed, bool useFixedWall, u8 fixedWallVariant, bool spawnAtHub, bool validate)
+{
+    u16 seed;
+
+    if (code < TOMBO_STRICT_ATTEMPTS)
+    {
+        puzzle = &puzzleTiers[0];
+        seed = roomSeed + code;
+    }
+    else if (code < 2 * TOMBO_STRICT_ATTEMPTS)
+    {
+        puzzle = &puzzleTiers[1];
+        seed = roomSeed + 0x4000 + (code - TOMBO_STRICT_ATTEMPTS);
+    }
+    else
+    {
+        puzzle = &puzzleTiers[2];
+        seed = TOMBO_FALLBACK_SEED + (code - (2 * TOMBO_STRICT_ATTEMPTS));
+    }
+
+    return tomboTryOnce(seed, hubX, hubY, doorMask, doorOff, useFixedWall, fixedWallVariant, spawnAtHub, validate);
+}
+
+// Full tombo pipeline for one room: attempts in code order (strict puzzle,
+// then the middle tier, then the fixed-seed no-puzzle ones -- see the tier
+// comments above), stopping at the first the validator accepts. FALSE only
+// if every one is rejected -- the caller then falls back to carve() (never
+// observed: see the exhaustive host fuzz in TOMBO_FALLBACK_ATTEMPTS's
+// comment). If cacheSlot already holds an accepted code, only that attempt
+// is replayed (same room, no search, no validation).
 // useFixedWall/fixedWallVariant let the insertion room keep its own
 // uniform look (spec §27) under tombo too. spawnAtHub additionally
 // requires the insertion room's spawn point (the hub) to be a working
 // starting position of its own.
 static bool generateRoomTombo(s16 hubX, s16 hubY, u8 doorMask, const u8 doorOff[4],
-                               u16 roomSeed, bool useFixedWall, u8 fixedWallVariant, bool spawnAtHub)
+                               u16 roomSeed, bool useFixedWall, u8 fixedWallVariant, bool spawnAtHub, u8 cacheSlot)
 {
-    u16 attempt;
+    u8 *const cache = &attemptCache[cacheSlot];
     bool ok = FALSE;
+    u16 code;
 
-    // Strict puzzle first, then the middle tier (both seeded from the room,
-    // still deterministic per roomSeed), then the fixed-seed attempts with
-    // no puzzle requirement -- the tier verified exhaustively, so a room
-    // always comes out, just an easier one for those rare door layouts.
-    puzzle = &puzzleTiers[0];
-    for (attempt = 0; !ok && (attempt < TOMBO_STRICT_ATTEMPTS); attempt++)
-        ok = tomboTryOnce((u16) (roomSeed + attempt), hubX, hubY, doorMask, doorOff, useFixedWall, fixedWallVariant, spawnAtHub);
+    if (*cache == CACHE_NO_TOMBO)
+        return FALSE;
 
-    puzzle = &puzzleTiers[1];
-    for (attempt = 0; !ok && (attempt < TOMBO_STRICT_ATTEMPTS); attempt++)
-        ok = tomboTryOnce((u16) (roomSeed + 0x4000 + attempt), hubX, hubY, doorMask, doorOff, useFixedWall, fixedWallVariant, spawnAtHub);
+    if (*cache != 0)
+        ok = tomboTryCode((u16) (*cache - 1), hubX, hubY, doorMask, doorOff, roomSeed, useFixedWall, fixedWallVariant, spawnAtHub, FALSE);
 
-    puzzle = &puzzleTiers[2];
-    for (attempt = 0; !ok && (attempt < TOMBO_FALLBACK_ATTEMPTS); attempt++)
-        ok = tomboTryOnce((u16) (TOMBO_FALLBACK_SEED + attempt), hubX, hubY, doorMask, doorOff, useFixedWall, fixedWallVariant, spawnAtHub);
+    for (code = 0; !ok && (code < TOMBO_CODE_COUNT); code++)
+    {
+        ok = tomboTryCode(code, hubX, hubY, doorMask, doorOff, roomSeed, useFixedWall, fixedWallVariant, spawnAtHub, TRUE);
+        if (ok)
+            *cache = (u8) (code + 1);
+    }
+
+    if (!ok)
+        *cache = CACHE_NO_TOMBO;
 
     if (ok && !useFixedWall)
     {
@@ -1038,7 +1098,7 @@ static bool generateRoomTombo(s16 hubX, s16 hubY, u8 doorMask, const u8 doorOff[
 
 void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
                         bool lockedN, bool lockedE, bool lockedS, bool lockedW,
-                        const u8 doorOffsets[4], u8 sectionHue, u16 roomSeed)
+                        const u8 doorOffsets[4], u8 sectionHue, u16 roomSeed, u8 cacheSlot)
 {
     s16 x, y;
     s16 anchorX[4], anchorY[4]; // indexed by MAZE_DIR_N/E/S/W
@@ -1059,7 +1119,7 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
     if ((roomGenMode == MAZE_ROOMGEN_TOMBO) &&
         generateRoomTombo(ROOM_SEED_COL, ROOM_SEED_ROW,
                           (u8) ((doorN ? 1 : 0) | (doorE ? 2 : 0) | (doorS ? 4 : 0) | (doorW ? 8 : 0)),
-                          doorOffsets, roomSeed, FALSE, 0, FALSE))
+                          doorOffsets, roomSeed, FALSE, 0, FALSE, cacheSlot))
     {
         // tombo succeeded -- grid is already fully carved, nothing more
         // to do here before the shared border/door-punch code below.
@@ -1191,7 +1251,7 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
 
     if ((roomGenMode == MAZE_ROOMGEN_TOMBO) &&
         generateRoomTombo(ROOM_SEED_COL, ROOM_SEED_ROW, (u8) ((1 << doorDir) | (1 << menuDoorDir)), insertOffsets,
-                          roomSeed, TRUE, INSERT_WALL_VARIANT, TRUE))
+                          roomSeed, TRUE, INSERT_WALL_VARIANT, TRUE, MAZE_INSERT_CACHE_SLOT))
     {
         // tombo succeeded -- grid is already fully carved.
     }
@@ -1270,25 +1330,28 @@ void Maze_loadGraphics(void)
 
 void Maze_draw(void)
 {
+    // One 40x2-tile band per maze row, built in a buffer and written with a
+    // single VDP_setTileMapDataRect call -- instead of 4 VDP_setTileMapXY
+    // calls per cell (1120 per room), each of which recomputes the VRAM
+    // address and issues its own control-port write.
+    static u16 band[2 * MAZE_W * 2];
     s16 x, y;
 
     for (y = 0; y < MAZE_H; y++)
     {
         for (x = 0; x < MAZE_W; x++)
         {
-            const u8 c = grid[y][x];
-            const u16 tl = BASE_TILE + (2 * c);
-            const u16 tr = tl + 1;
-            const u16 bl = BASE_TILE + CELL_ROW_TILES + (2 * c);
-            const u16 br = bl + 1;
-            const u16 tx = x * 2;
-            const u16 ty = y * 2;
+            const u16 tl = BASE_TILE + (2 * grid[y][x]);
+            const u16 bl = tl + CELL_ROW_TILES;
+            const u16 i = (u16) (x * 2);
 
-            VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, tl), tx, ty);
-            VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, tr), tx + 1, ty);
-            VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, bl), tx, ty + 1);
-            VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, br), tx + 1, ty + 1);
+            band[i] = TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, tl);
+            band[i + 1] = TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, tl + 1);
+            band[(MAZE_W * 2) + i] = TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, bl);
+            band[(MAZE_W * 2) + i + 1] = TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, bl + 1);
         }
+
+        VDP_setTileMapDataRect(BG_A, band, 0, y * 2, MAZE_W * 2, 2, MAZE_W * 2, CPU);
     }
 }
 

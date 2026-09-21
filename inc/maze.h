@@ -75,6 +75,20 @@
 // fallback if all of those somehow fail, and carries no such guarantee.
 typedef enum { MAZE_ROOMGEN_CARVE, MAZE_ROOMGEN_TOMBO } MazeRoomGenMode;
 
+// Accepted-attempt cache for MAZE_ROOMGEN_TOMBO (see maze.c's attempt
+// codes): one byte per room remembers which generation attempt was
+// accepted, so re-entering a room replays only that attempt -- the very
+// same layout, without repeating the search. Slots 0..79 are for grid
+// rooms (main.c passes row * MAX_MAP_COLS + col; MAX_MAP_COLS *
+// MAX_MAP_ROWS must not exceed MAZE_ROOM_CACHE_SLOTS - 1), the last one is
+// the insertion room's.
+#define MAZE_ROOM_CACHE_SLOTS  81
+#define MAZE_INSERT_CACHE_SLOT 80
+
+// Forgets every cached attempt. Call whenever the layout inputs change:
+// a new game or a resumed one (mapSeed, doors), or a different room-gen mode.
+void Maze_clearRoomCache(void);
+
 // Sets which algorithm the NEXT Maze_generateRoom/Maze_generateInsertionRoom
 // call (and every one after it, until called again) uses. Defaults to
 // MAZE_ROOMGEN_CARVE. A global toggle, not per-room -- main.c's own
@@ -117,7 +131,7 @@ void Maze_generate(void);
 // while playing.
 void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
                         bool lockedN, bool lockedE, bool lockedS, bool lockedW,
-                        const u8 doorOffsets[4], u8 sectionHue, u16 roomSeed);
+                        const u8 doorOffsets[4], u8 sectionHue, u16 roomSeed, u8 cacheSlot);
 
 // Carves the special "insertion room" (spec §27): the very first room
 // the player ever sees, outside the normal room-tree grid entirely (its

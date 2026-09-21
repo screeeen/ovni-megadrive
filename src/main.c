@@ -351,6 +351,9 @@ static u8 doorOffsetFor(u8 col, u8 row, u8 dir)
     return GuideMap_doorOffset(col, row, dir);
 }
 
+// One cache slot per grid room (maze.h) -- the room grid must fit in them.
+_Static_assert(MAX_MAP_COLS * MAX_MAP_ROWS <= MAZE_INSERT_CACHE_SLOT, "MAZE_ROOM_CACHE_SLOTS too small for the map grid");
+
 static void loadRoom(u8 col, u8 row)
 {
     const MapCell cell = guideMap[row][col];
@@ -387,7 +390,8 @@ static void loadRoom(u8 col, u8 row)
     };
 
     Maze_generateRoom(doorN, doorE, doorS, doorW,
-                       lockedN, lockedE, lockedS, lockedW, doorOffsets, sectionHue, seed);
+                       lockedN, lockedE, lockedS, lockedW, doorOffsets, sectionHue, seed,
+                       (u8) ((row * MAX_MAP_COLS) + col));
     Maze_draw();
     Items_drawInRoom(col, row);
 
@@ -434,6 +438,9 @@ static void newGame(void)
     itemCount = sizePresets[sizePresetIndex].letters; // spec §33
 
     GuideMap_generate();
+    // Every room's layout is about to change (new or resumed map, possibly a
+    // different room-gen mode): drop the cached accepted attempts.
+    Maze_clearRoomCache();
     Items_reset();
     if (save.hasSave)
         Items_fastForward(save.collectedCount); // spec §35 -- restore prior progress on this planet
