@@ -751,6 +751,106 @@ static bool tomboValidate(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, 
     return TRUE;
 }
 
+// Early reject (user request: cheaper first visit to a room). The two
+// per-door puzzle minimums -- "every other door needs at least exitMin
+// slides" and "the hub is at least hubMin slides away" -- are decided by
+// slide counts that are exact as soon as the search is that deep, so most
+// layouts that fail them can be dropped after a few slides instead of after
+// the whole graph has been built. This is only ever a REJECT: it applies
+// the very same conditions tomboPuzzleDeepEnough does (same distances, same
+// thresholds), so a layout it rejects would have failed the full validator
+// too, and one it lets through still goes through all of it. It cannot
+// change which attempt is accepted.
+#ifndef TOMBO_EARLY_REJECT
+#define TOMBO_EARLY_REJECT 1
+#endif
+
+#define QUICK_MAX_NODES 48
+static u16 quickStamp[MAZE_H][MAZE_W];
+static u16 quickGen;
+
+static bool tomboTooEasy(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, bool spawnAtHub)
+{
+    const s16 exitMin = puzzle->exitMin;
+    const s16 hubMin = spawnAtHub ? 0 : puzzle->hubMin; // no letter in the insertion room
+    const s16 maxDepth = ((exitMin > hubMin) ? exitMin : hubMin) - 2; // deepest node whose slides can still be too short
+    s16 qx[QUICK_MAX_NODES], qy[QUICK_MAX_NODES], qd[QUICK_MAX_NODES];
+    u8 e;
+
+    for (e = 0; e < 4; e++)
+    {
+        s16 ix, iy, ex = 0, ey = 0, r;
+        bool hubHit;
+        u16 head = 0, tail = 1;
+
+        if (!(doorMask & (1 << e)))
+            continue;
+
+        slideEntryCell(e, doorOff[e], &ix, &iy);
+        if (Maze_isWall(ix, iy))
+            continue; // tomboValidate's own business
+
+        hubHit = (ix == hubX) && (iy == hubY);
+        r = slideRun(ix, iy, tomboOpposite(e), hubX, hubY, &hubHit, &ex, &ey);
+        if (r == SLIDE_EXIT)
+            return TRUE;
+        if (r == SLIDE_NO_MOVE)
+        {
+            ex = ix; ey = iy;
+        }
+        if ((hubMin > 0) && hubHit)
+            return TRUE; // the letter is on the way in
+
+        if (maxDepth < 0)
+            continue;
+
+        if (++quickGen == 0)
+        {
+            s16 x, y;
+
+            for (y = 0; y < MAZE_H; y++)
+                for (x = 0; x < MAZE_W; x++)
+                    quickStamp[y][x] = 0;
+            quickGen = 1;
+        }
+
+        qx[0] = ex; qy[0] = ey; qd[0] = 0;
+        quickStamp[ey][ex] = quickGen;
+
+        while (head < tail)
+        {
+            const s16 nx = qx[head], ny = qy[head], nd = qd[head];
+            u8 dir;
+
+            head++;
+
+            for (dir = 0; dir < 4; dir++)
+            {
+                s16 sx = 0, sy = 0;
+                bool hh = FALSE;
+                const s16 t = slideRun(nx, ny, dir, hubX, hubY, &hh, &sx, &sy);
+
+                if ((hubMin > 0) && hh && ((nd + 1) < hubMin))
+                    return TRUE;
+
+                if (t == SLIDE_EXIT)
+                {
+                    if ((dir != e) && (doorMask & (1 << dir)) && ((nd + 1) < exitMin))
+                        return TRUE;
+                }
+                else if ((t == 1) && (nd < maxDepth) && (tail < QUICK_MAX_NODES) && (quickStamp[sy][sx] != quickGen))
+                {
+                    quickStamp[sy][sx] = quickGen;
+                    qx[tail] = sx; qy[tail] = sy; qd[tail] = nd + 1;
+                    tail++;
+                }
+            }
+        }
+    }
+
+    return FALSE;
+}
+
 // ---- structure (the generator) --------------------------------------
 
 // Share of the room's INTERIOR cells (the 18x12 inside the border ring,
@@ -992,6 +1092,11 @@ static bool tomboTryOnce(u16 seed, s16 hubX, s16 hubY, u8 doorMask, const u8 doo
     // already known to pass. The debug graph stays empty then.
     if (!validate)
         return TRUE;
+
+#if TOMBO_EARLY_REJECT
+    if (tomboTooEasy(doorMask, doorOff, hubX, hubY, spawnAtHub))
+        return FALSE;
+#endif
 
     return tomboValidate(doorMask, doorOff, hubX, hubY, spawnAtHub);
 }

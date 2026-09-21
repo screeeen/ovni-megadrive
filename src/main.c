@@ -831,6 +831,11 @@ int main(bool hardReset)
                 else
                 {
                     Maze_draw();
+                    // Maze_draw() repaints every tile of BG_A, wiping the
+                    // room's letter along with the map overlay -- put it
+                    // back (the map is never open in the insertion room,
+                    // so currentCol/currentRow are always valid here).
+                    Items_drawInRoom(currentCol, currentRow);
                     // Restores the ship's normal color (spec §23) -- only
                     // the one word that PLAYER_SHIP_INK_INDEX touched,
                     // the transparent index0 was never changed.
