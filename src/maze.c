@@ -373,6 +373,29 @@ static bool slideHubDir[SLIDE_MAX_NODES][4]; // ...and which specific slide does
 static s16 slideIndex[MAZE_H][MAZE_W];
 static u16 slideCount;
 
+// BUG FIX (found while chasing the locked-door softlock report): slideHub[]
+// was only ever set to TRUE by slideExpand, never back to FALSE. Reusing
+// these static arrays across MULTIPLE validation passes in the same
+// generation attempt (tomboValidate's own fully-open check, then one
+// tomboValidateSubset call per locked-door subset -- tomboAllSubsetsSafe)
+// let a stale TRUE for node index i, left over from a PREVIOUS pass' totally
+// different node that happened to land on the same index, silently satisfy
+// a LATER pass' "did the hub get crossed" check for a node that, this time,
+// never actually touches it. Every place that starts a fresh graph (resets
+// slideCount to 0) must call this, not just clear slideIndex/slideCount by
+// hand -- since slideCount only ever tells you how many indices THIS pass
+// used, not how many a PREVIOUS, possibly larger pass left dirty.
+static void slideGraphReset(void)
+{
+    s16 x, y;
+
+    for (y = 0; y < MAZE_H; y++)
+        for (x = 0; x < MAZE_W; x++)
+            slideIndex[y][x] = -1;
+    slideCount = 0;
+    memset(slideHub, FALSE, sizeof(slideHub));
+}
+
 static void tomboResetDebugGraph(void)
 {
     slideCount = 0;
@@ -589,6 +612,214 @@ static bool tomboPuzzleDeepEnough(u8 e, u8 doorMask, s16 entryNode, bool entryCr
 //      out of, whichever door it wants next;
 //   2. the hub is crossed at some point (the letter sits there);
 //   3. entering never just shoots the ship straight out another door.
+// BUG FIX (user report + host fuzz, see tomboValidateSubset's own doc
+// comment): mirrors, on the ALREADY-BUILT fully-open grid, exactly the
+// 2-cell-deep seal Maze_generateRoom's own locked-door punch applies (both
+// the border row and the interior row/col right behind it) -- so a subset
+// check sees precisely the walls the player will actually face. Door lanes
+// are excluded from obstacle placement (tomboInDoorLane, 3 rows/cols deep),
+// so both cells being toggled are always PATH in the base interior:
+// sealing never has anything else to save/restore, opening always means
+// PATH.
+static void tomboSealDoor(u8 dir, u8 off, bool sealed)
+{
+    const u8 v = sealed ? (u8) 1 : PATH; // any nonzero value reads as wall pre-dither
+
+    switch (dir)
+    {
+        case MAZE_DIR_N: grid[0][off] = v; grid[0][off + 1] = v; grid[1][off] = v; grid[1][off + 1] = v; break;
+        case MAZE_DIR_S: grid[MAZE_H - 1][off] = v; grid[MAZE_H - 1][off + 1] = v; grid[MAZE_H - 2][off] = v; grid[MAZE_H - 2][off + 1] = v; break;
+        case MAZE_DIR_E: grid[off][MAZE_W - 1] = v; grid[off + 1][MAZE_W - 1] = v; grid[off][MAZE_W - 2] = v; grid[off + 1][MAZE_W - 2] = v; break;
+        default:         grid[off][0] = v; grid[off + 1][0] = v; grid[off][1] = v; grid[off + 1][1] = v; break; // MAZE_DIR_W
+    }
+}
+
+// BUG FIX (user report: "estan fallando las habitaciones no se puede
+// volver" -- confirmed by host fuzz: 8.6% of rooms with a mix of open/
+// locked doors left the ship stuck, unable to reach an open door or the
+// hub). Root cause: tomboValidate below only ever checked the room with
+// EVERY active door open. But a door that exists in the tree can stay
+// LOCKED for a long time (spec §16, branches not due yet) -- sealed 2
+// cells deep by Maze_generateRoom's own punch, on top of the very same
+// grid this validated with every door open. That can turn a plain
+// pass-through cell into a brand new stop nobody ever simulated, and
+// nothing guaranteed IT could still reach anything.
+//
+// This checks one additional configuration: `openSubset` (a subset of
+// doorMask, at least one bit) is the set of doors NOT currently sealed. It
+// requires the SAME two things tomboValidate's fully-open check requires --
+// every stop reachable from any open entry can reach every OTHER open door,
+// AND the hub gets crossed -- just skips the puzzle-depth minimums (those
+// are a difficulty/flavor property of the FINAL, fully-open room; a
+// temporarily locked sibling branch making an EARLIER visit easier isn't a
+// correctness problem). The hub requirement stays because of one edge
+// case: selectItemRooms() falls back to using the START room itself for
+// one item when the map has too few dead ends, and the start room can have
+// several independently-lockable doors of its own (spec §16) -- unlike
+// every other item room, which is always a genuine 1-door dead end (no
+// subset to check at all).
+static bool tomboValidateSubset(u8 doorMask, u8 openSubset, const u8 doorOff[4], s16 hubX, s16 hubY)
+{
+    static bool canExit[4][SLIDE_MAX_NODES];
+    static bool reach[SLIDE_MAX_NODES];
+    static u16 stack[SLIDE_MAX_NODES];
+    s16 entryNode[4];
+    bool entryHub[4];
+    u8 e, f;
+    u16 i;
+    bool ok = TRUE;
+
+    for (e = 0; e < 4; e++)
+        if (doorMask & (1 << e))
+            tomboSealDoor(e, doorOff[e], !(openSubset & (1 << e)));
+
+    slideGraphReset();
+
+    for (e = 0; e < 4; e++)
+        entryNode[e] = -1;
+
+    for (e = 0; ok && (e < 4); e++)
+    {
+        s16 ix, iy, ex, ey;
+        bool hubHit;
+        s16 r;
+
+        if (!(openSubset & (1 << e)))
+            continue;
+
+        slideEntryCell(e, doorOff[e], &ix, &iy);
+        if (Maze_isWall(ix, iy)) { ok = FALSE; break; }
+
+        hubHit = (ix == hubX) && (iy == hubY);
+        r = slideRun(ix, iy, tomboOpposite(e), hubX, hubY, &hubHit, &ex, &ey);
+        if (r == SLIDE_EXIT) { ok = FALSE; break; }
+        if (r == SLIDE_NO_MOVE) { ex = ix; ey = iy; }
+
+        entryNode[e] = slideNode(ex, ey, hubX, hubY);
+        entryHub[e] = hubHit;
+        if (entryNode[e] < 0) { ok = FALSE; break; }
+    }
+
+    if (ok && !slideExpand(hubX, hubY))
+        ok = FALSE;
+
+    if (ok)
+    {
+        for (f = 0; f < 4; f++)
+        {
+            bool changed = TRUE;
+
+            if (!(openSubset & (1 << f)))
+                continue;
+
+            for (i = 0; i < slideCount; i++)
+                canExit[f][i] = (slideTo[i][f] == SLIDE_EXIT);
+
+            while (changed)
+            {
+                changed = FALSE;
+                for (i = 0; i < slideCount; i++)
+                {
+                    u8 dir;
+
+                    if (canExit[f][i])
+                        continue;
+                    for (dir = 0; dir < 4; dir++)
+                    {
+                        const s16 t = slideTo[i][dir];
+
+                        if ((t >= 0) && canExit[f][t])
+                        {
+                            canExit[f][i] = TRUE;
+                            changed = TRUE;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        for (e = 0; ok && (e < 4); e++)
+        {
+            u16 sp = 0;
+            bool hubSeen; // per-entry: THIS entry must reach the hub, not just some other one
+
+            if (entryNode[e] < 0)
+                continue;
+
+            for (i = 0; i < slideCount; i++)
+                reach[i] = FALSE;
+            reach[entryNode[e]] = TRUE;
+            stack[sp++] = (u16) entryNode[e];
+            hubSeen = entryHub[e];
+
+            while (sp > 0)
+            {
+                const u16 n = stack[--sp];
+                u8 dir;
+
+                if (slideHub[n])
+                    hubSeen = TRUE;
+
+                for (dir = 0; dir < 4; dir++)
+                {
+                    const s16 t = slideTo[n][dir];
+
+                    if ((t >= 0) && !reach[t])
+                    {
+                        reach[t] = TRUE;
+                        stack[sp++] = (u16) t;
+                    }
+                }
+            }
+
+            if (!hubSeen)
+                ok = FALSE;
+
+            for (i = 0; ok && (i < slideCount); i++)
+            {
+                if (!reach[i])
+                    continue;
+                for (f = 0; f < 4; f++)
+                    if ((openSubset & (1 << f)) && !canExit[f][i])
+                        ok = FALSE;
+            }
+        }
+    }
+
+    for (e = 0; e < 4; e++)
+        if (doorMask & (1 << e))
+            tomboSealDoor(e, doorOff[e], FALSE);
+
+    return ok;
+}
+
+// Every subset of doorMask that can EVER be the "currently open" set while
+// this room is playable, besides the fully-open one tomboValidate already
+// checks. A door only ever goes locked -> unlocked (never back), and per
+// GuideMap_recomputeLocks each door locks/unlocks independently -- so over
+// a room's life the open set only grows, but maze.c has no way to know the
+// FUTURE order (that depends on where in the tree each branch's item sits,
+// decided in guidemap.c). Rather than thread that through, this checks
+// every nonempty subset there is: at most 15 for a 4-door room (worst
+// case: the start room, whose doors can all lock/unlock independently --
+// every other room always has its parent-facing door permanently open,
+// which prunes this a lot in practice but isn't assumed here).
+static bool tomboAllSubsetsSafe(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
+{
+    u8 subset;
+
+    for (subset = 1; subset < doorMask; subset++)
+    {
+        if ((subset & doorMask) != subset)
+            continue; // not a subset of the active doors
+        if (!tomboValidateSubset(doorMask, subset, doorOff, hubX, hubY))
+            return FALSE;
+    }
+
+    return TRUE; // subset == doorMask (every door open) is tomboValidate's own job
+}
+
 static bool tomboValidate(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, bool spawnAtHub)
 {
     static bool canExit[4][SLIDE_MAX_NODES];
@@ -598,12 +829,8 @@ static bool tomboValidate(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, 
     bool entryHub[5];
     u8 e, f;
     u16 i;
-    s16 x, y;
 
-    for (y = 0; y < MAZE_H; y++)
-        for (x = 0; x < MAZE_W; x++)
-            slideIndex[y][x] = -1;
-    slideCount = 0;
+    slideGraphReset();
 
     for (e = 0; e < 5; e++)
         entryNode[e] = -1;
@@ -747,6 +974,13 @@ static bool tomboValidate(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, 
         if ((doors >= 2) && (hardest < TOMBO_HARD_EXIT_MOVES))
             return FALSE;
     }
+
+    // Doors also need to survive every OTHER door in this room being
+    // locked, one at a time or in combination -- see tomboAllSubsetsSafe's
+    // own doc comment for why this can't just be inferred from the
+    // fully-open case above.
+    if (!tomboAllSubsetsSafe(doorMask, doorOff, hubX, hubY))
+        return FALSE;
 
     return TRUE;
 }

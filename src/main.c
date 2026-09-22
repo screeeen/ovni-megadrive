@@ -72,7 +72,7 @@ static MazeRoomGenMode roomGenMode = MAZE_ROOMGEN_TOMBO;
 // en la animación, que no sea de un frame a otro sino que haya un
 // movimiento") used to be 250 -- a whole slide done inside ONE frame, the
 // ship just appeared at the far wall. Now it is a plain px-per-frame speed:
-// a slide across the 320px room takes ~0.4s at top speed, visibly travelling the
+// a slide across the 320px room takes ~0.35s at top speed, visibly travelling the
 // whole way. Collision/exit/letter checks are unaffected -- every 1px
 // sub-step is still checked individually, whatever the speed.
 #define NORMAL_MODE_SPEED 3
@@ -82,8 +82,9 @@ static MazeRoomGenMode roomGenMode = MAZE_ROOMGEN_TOMBO;
 // Ease-in (user request): a slide does not start at full speed, it
 // accelerates -- px per frame for the 1st, 2nd, 3rd... frame of a slide,
 // then holds the last value (the top speed) until the ship stops. Reaches
-// 12 px/frame after 9 frames (~0.15s, ~47px). Tune the values to taste.
-static const u8 tombRamp[] = { 1, 1, 2, 3, 4, 6, 8, 10, 12 };
+// 13 px/frame after 5 frames (~0.08s, ~23px): a short but readable ease-in.
+// Tune the values to taste.
+static const u8 tombRamp[] = { 2, 4, 7, 10, 13 };
 #define TOMB_RAMP_LAST ((u8) (sizeof(tombRamp) - 1))
 
 // CONTROL_INERTIA's ramp state (spec §43/§44): speed climbs by 1 each
