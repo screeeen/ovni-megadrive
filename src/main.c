@@ -1242,7 +1242,18 @@ int main(bool hardReset)
                         if (enemy.state == ENEMY_DANGEROUS)
                             playerDied = TRUE;
                         else
+                        {
                             Enemy_kill(&enemy);
+                            // Bounce (user request: "cuando haga melee...
+                            // y lo mate, la nave rebota") -- reverses
+                            // p->dir on the spot (UP<->DOWN, LEFT<->RIGHT),
+                            // same "+2 mod 4" opposite every other pairing
+                            // in this codebase uses. Takes effect on the
+                            // very next sub-step, still this same frame:
+                            // the ship recoils away from where the enemy
+                            // was instead of sliding on through it.
+                            player.dir = (u8) ((player.dir + 2) & 3);
+                        }
                     }
                 }
 
