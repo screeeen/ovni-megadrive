@@ -268,6 +268,28 @@ static void bridgeToSeed(s16 x, s16 y)
     }
 }
 
+// Same one-axis-at-a-time L-shaped walk as bridgeToSeed above (see its own
+// doc comment for why it can't move both axes at once), but between two
+// arbitrary points instead of always ending at ROOM_SEED_COL/ROW -- used by
+// the insertion room (Maze_generateInsertionRoom) to carve nothing but the
+// single corridor connecting its two doors.
+static void carveLPath(s16 x0, s16 y0, s16 x1, s16 y1)
+{
+    s16 cx = x0, cy = y0;
+
+    grid[cy][cx] = PATH;
+    while (cx != x1)
+    {
+        cx += (cx < x1) ? 1 : -1;
+        grid[cy][cx] = PATH;
+    }
+    while (cy != y1)
+    {
+        cy += (cy < y1) ? 1 : -1;
+        grid[cy][cx] = PATH;
+    }
+}
+
 static void fillWallsRandom(void)
 {
     s16 x, y;
@@ -1580,39 +1602,40 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
     s16 x, y;
     s16 anchorX, anchorY;
     s16 menuAnchorX, menuAnchorY;
-    u8 insertOffsets[4] = { 0, 0, 0, 0 };
-
-    insertOffsets[doorDir] = doorOffset;
-    insertOffsets[menuDoorDir] = menuDoorOffset;
 
     anchorForDoor(doorDir, doorOffset, &anchorX, &anchorY);
     anchorForDoor(menuDoorDir, menuDoorOffset, &menuAnchorX, &menuAnchorY);
 
-    if ((roomGenMode == MAZE_ROOMGEN_TOMBO) &&
-        generateRoomTombo(ROOM_SEED_COL, ROOM_SEED_ROW, (u8) ((1 << doorDir) | (1 << menuDoorDir)), insertOffsets,
-                          roomSeed, TRUE, INSERT_WALL_VARIANT, TRUE, MAZE_INSERT_CACHE_SLOT))
-    {
-        // tombo succeeded -- grid is already fully carved.
-    }
-    else
-    {
-        setRandomSeed(roomSeed);
-        fillWallsFixed(INSERT_WALL_VARIANT);
-        tomboResetDebugGraph(); // no explicit graph here -- Maze_drawDebugGraph() should draw nothing
-
-        forcedTargetCount = 2;
-        forcedTargetX[0] = anchorX;
-        forcedTargetY[0] = anchorY;
-        forcedTargetX[1] = menuAnchorX;
-        forcedTargetY[1] = menuAnchorY;
-
-        carve(ROOM_SEED_COL, ROOM_SEED_ROW);
-
-        if (grid[anchorY][anchorX] != PATH)
-            bridgeToSeed(anchorX, anchorY);
-        if (grid[menuAnchorY][menuAnchorX] != PATH)
-            bridgeToSeed(menuAnchorX, menuAnchorY);
-    }
+    // BUG FIX (user request: "la habitacion de insercion no tiene bloques
+    // en el medio, solo lo minimo para poder salir y entrar" -- clarified
+    // further: "el minimo path para poder entrar y salir... rellena todo lo
+    // que no es path con bloques"). This room never held a real puzzle of
+    // its own on purpose (spec §27's uniform look) -- no letter, always
+    // exactly these 2 doors -- so it doesn't need either roomGenMode's
+    // usual generator, just the corridor a ship actually needs: wall
+    // everywhere, a 1-cell-wide path (same one-axis-at-a-time L shape as
+    // bridgeToSeed, see carveLPath's own doc comment) from one door's
+    // anchor to the other's, routed through the room's own center (see the
+    // BUG FIX comment right below for why). Unconditional regardless of
+    // MAZE_ROOMGEN_CARVE/TOMBO -- this room's shape doesn't depend on that
+    // switch.
+    // BUG FIX (user report + screenshot: the ship could spawn embedded in
+    // a wall in this very room). Player_spawnAtRoomCenter -- used for the
+    // very first spawn of a run, before currentCol/currentRow even exist --
+    // always places the ship at (MAZE_DOOR_COL,MAZE_DOOR_ROW), the room's
+    // center, regardless of where either door's anchor is. A single direct
+    // anchor-to-anchor path (what this used to carve) generally never
+    // passes through that exact cell, so the very first thing a new game
+    // could do was spawn the ship inside solid wall. Routed through the
+    // center instead -- two L-legs meeting there -- so that spawn point is
+    // always ON the path, same as every dead-end/tombo room already
+    // guarantees for ITS own hub (spec §5/§13).
+    (void) roomGenMode;
+    setRandomSeed(roomSeed); // no random draws happen below, but keeps this room's own stream slot occupied like every other Maze_generate*() call
+    fillWallsFixed(INSERT_WALL_VARIANT);
+    carveLPath(anchorX, anchorY, MAZE_DOOR_COL, MAZE_DOOR_ROW);
+    carveLPath(MAZE_DOOR_COL, MAZE_DOOR_ROW, menuAnchorX, menuAnchorY);
+    tomboResetDebugGraph(); // no explicit graph here -- Maze_drawDebugGraph() should draw nothing
 
     for (x = 0; x < MAZE_W; x++)
     {

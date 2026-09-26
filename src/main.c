@@ -5,12 +5,19 @@
 #include "guidemap.h"
 #include "items.h"
 #include "menu.h"
+#include "enemy.h"
 
 // STATE_WIN (spec §34): reached by walking back out through the
 // insertion link once every letter is collected -- a static screen
 // waiting for BUTTON_A, same "hold the state until confirmed" idea as
-// STATE_MENU already uses.
-typedef enum { STATE_MENU, STATE_PLAYING, STATE_WIN } GameState;
+// STATE_MENU already uses. STATE_GAMEOVER (user request: "un enemigo por
+// habitacion... si te mata sale una pantalla game over") is the same
+// pattern for the opposite outcome -- reached by touching a DANGEROUS
+// enemy, BUTTON_A sends the player back to the menu exactly like
+// STATE_WIN does. Deliberately left OUT of resetToMenu()'s own
+// progress-save check below: dying does not preserve this attempt's
+// collected letters, unlike leaving mid-run or winning.
+typedef enum { STATE_MENU, STATE_PLAYING, STATE_WIN, STATE_GAMEOVER } GameState;
 
 // Control scheme (spec §40-44, user request: wants to try several,
 // cycled with a debug combo -- spec §43). Five so far:
@@ -171,9 +178,41 @@ static const SizePreset sizePresets[] = {
 // 2x this at 60fps.
 #define MAP_BLINK_FRAMES 30
 
+// One enemy per room (user request), PAL2 (enemyShip's own palette, also
+// reused by the menu's "completed planet" yellow -- COMPLETED_INK_INDEX in
+// menu.c -- the two never show at once, same sharing the map-ship ink
+// index already relies on). Its ink swaps between these two colors as a
+// placeholder for the "dangerous"/"vulnerable" states (enemy.h) -- no
+// separate sprite art needed, same override trick as PLAYER_SHIP_INK_INDEX.
+#define ENEMY_INK_INDEX ((PAL2 * 16) + 1)
+#define ENEMY_DANGEROUS_COLOR RGB24_TO_VDPCOLOR(0xFF3030)
+#define ENEMY_VULNERABLE_COLOR RGB24_TO_VDPCOLOR(0x30FF90)
+
+// Screenshake (user request: "un ligero screenshake cuando la nave golpea
+// muros o enemigos", refined further: "tiene que ser sutil, dura medio
+// segundo y medio pixel si puede ser") -- BG_A only (the maze itself),
+// never BG_B (the HUD text stays put so it's always readable).
+// SHAKE_DURATION_FRAMES = 10 is a sixth of a second at 60fps. Deterministic,
+// not true randomness: it comes from shakeFramesLeft's own low bits as it
+// counts down, so it needs no draw from the shared random() stream
+// (reserved for the map/room/item/enemy generators' own determinism).
+#define SHAKE_DURATION_FRAMES 10
+
+// Amplitude scales with how far the ship had been sliding before the
+// impact (user request: "la amplitud del screenshake sea proporcional a la
+// distancia recorrida de la nave") -- SHAKE_DIST_PER_LEVEL px of travel
+// per +1px of peak displacement, capped at SHAKE_MAX_AMPLITUDE so even a
+// full-room TOMB slide doesn't throw the camera further than this. A short
+// bump right after starting (or right after the last one) stays at the
+// original 1px flicker.
+#define SHAKE_DIST_PER_LEVEL 24
+#define SHAKE_MAX_AMPLITUDE 3
+
 static Player player;
 static Sprite *playerSprite;
 static Sprite *mapShipSprite;
+static Enemy enemy;
+static Sprite *enemySprite;
 static u16 mapSeed;
 static u8 currentCol, currentRow;
 // TRUE while the player is still in the special insertion room (spec
@@ -203,6 +242,25 @@ static u8 menuDoorDir;
 static u8 menuDoorOffset;
 static bool mapViewOpen;
 static u16 mapBlinkTimer;
+static u8 shakeFramesLeft;
+// BUG FIX (user report: "al golpear el muro se queda permanente"). A ship
+// held into a wall stays blocked (position unchanged) for as long as the
+// player keeps it that way -- NORMAL/INERTIA/TOMB never reset p->dir on a
+// stop, so every single sub-step re-detects the same collision and kept
+// re-arming a fresh shake right as the previous one was about to finish,
+// reading as permanent. This tracks whether the ship was ALREADY blocked
+// on the previous check, shared by both places that trigger a wall shake
+// (the normal-room sub-step loop and the insertion room's single call --
+// never both in the same frame, one static flag covers either): only the
+// FALSE -> TRUE transition triggers a new shake, matching "solo el primer
+// contacto" -- staying jammed afterward doesn't keep restarting it.
+static bool wasWallBlocked;
+static u8 shakeAmplitude = 1; // set by triggerShake(), read by updateShake()
+// How far (px) the ship has slid since its last stop -- persists across
+// frames (a TOMB slide can span several), reset to 0 the moment a shake
+// actually fires (see triggerShake), so it always measures THIS slide's
+// run-up, never a previous one's.
+static u16 slideDistance;
 static GameState gameState;
 static u8 sizePresetIndex = SIZE_PRESET_DEFAULT;
 
@@ -413,6 +471,17 @@ static void loadRoom(u8 col, u8 row)
     Items_drawInRoom(col, row);
 
     guideMap[row][col].visited = TRUE;
+
+    // One enemy per room (user request), same seed the room's own maze
+    // uses -- deterministic per room, same persistence philosophy as the
+    // layout itself (re-entering always spawns the identical enemy, same
+    // lane/position/direction, alive again regardless of whether it was
+    // killed on a previous visit -- no per-room "already cleared" state,
+    // simplest behavior for a placeholder enemy).
+    Enemy_spawnForRoom(&enemy, seed);
+    PAL_setColor(ENEMY_INK_INDEX, ENEMY_DANGEROUS_COLOR);
+    SPR_setPosition(enemySprite, enemy.x, enemy.y);
+    SPR_setVisibility(enemySprite, VISIBLE);
 }
 
 // Room transition (spec §7): move to the neighboring cell, regenerate its
@@ -507,6 +576,7 @@ static void newGame(void)
         player.dir = DIR_NONE;
     SPR_setPosition(playerSprite, player.x, player.y);
     SPR_setVisibility(playerSprite, VISIBLE);
+    SPR_setVisibility(enemySprite, HIDDEN); // no enemy in the insertion room (spec §27)
 }
 
 // Solar-system start menu (spec §31): each planet is one of
@@ -596,6 +666,7 @@ static void resetToMenu(void)
 
     SPR_setVisibility(playerSprite, HIDDEN);
     SPR_setVisibility(mapShipSprite, HIDDEN);
+    SPR_setVisibility(enemySprite, HIDDEN);
 
     // Items_drawHud's letter tracker and drawInsertRoomStatus's message
     // (both BG_B, high priority) are only ever refreshed during gameplay
@@ -607,6 +678,50 @@ static void resetToMenu(void)
 
     Menu_setVisible(TRUE);
     drawMenu();
+}
+
+// Starts a shake burst sized by `distance` (px the ship had slid before
+// this impact -- see slideDistance's own doc comment), unless one is
+// already playing (never restarts/extends an in-progress shake). Call
+// whenever the ship hits a wall or an enemy this frame.
+static void triggerShake(u16 distance)
+{
+    if (shakeFramesLeft == 0)
+    {
+        u16 amp = 1 + (distance / SHAKE_DIST_PER_LEVEL);
+
+        if (amp > SHAKE_MAX_AMPLITUDE)
+            amp = SHAKE_MAX_AMPLITUDE;
+        shakeAmplitude = (u8) amp;
+        shakeFramesLeft = SHAKE_DURATION_FRAMES;
+    }
+}
+
+// Applies (or clears) the current shake offset to BG_A. Call exactly once
+// per frame, unconditionally regardless of gameState -- so a shake that's
+// still counting down when e.g. a game over or win screen interrupts it
+// still winds all the way back down to (0,0) instead of leaving BG_A
+// stuck offset on a screen that never triggers it again.
+static void updateShake(void)
+{
+    if (shakeFramesLeft > 0)
+    {
+        // Alternating on/off each frame -- never both axes at once (bit 1
+        // offsets which parity Y uses), so it's never a diagonal jump,
+        // just shakeAmplitude px nudging one way then the other on one
+        // axis at a time.
+        const s16 sx = (shakeFramesLeft & 1) ? shakeAmplitude : 0;
+        const s16 sy = ((shakeFramesLeft & 3) == 2) ? shakeAmplitude : 0;
+
+        shakeFramesLeft--;
+        VDP_setHorizontalScroll(BG_A, sx);
+        VDP_setVerticalScroll(BG_A, sy);
+    }
+    else
+    {
+        VDP_setHorizontalScroll(BG_A, 0);
+        VDP_setVerticalScroll(BG_A, 0);
+    }
 }
 
 int main(bool hardReset)
@@ -628,9 +743,10 @@ int main(bool hardReset)
     // shown instead of playerShip while the guide map is open.
     mapShipSprite = SPR_addSprite(&mapShip, 0, 0, TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
 
-    // PAL2 (enemyShip's palette) is only used by the menu now, for the
-    // yellow "completed planet" ink -- there are no enemy sprites anymore.
+    // PAL2 is enemyShip's own palette (also reused by the menu's
+    // "completed planet" yellow -- ENEMY_INK_INDEX's own doc comment).
     PAL_setPalette(PAL2, enemyShip.palette->data, DMA);
+    enemySprite = SPR_addSprite(&enemyShip, 0, 0, TILE_ATTR(PAL2, TRUE, FALSE, FALSE));
 
     JOY_init();
 
@@ -639,6 +755,7 @@ int main(bool hardReset)
     gameState = STATE_MENU;
     SPR_setVisibility(playerSprite, HIDDEN);
     SPR_setVisibility(mapShipSprite, HIDDEN);
+    SPR_setVisibility(enemySprite, HIDDEN);
     Menu_setVisible(TRUE);
     drawMenu();
 
@@ -697,6 +814,11 @@ int main(bool hardReset)
             }
         }
         else if (gameState == STATE_WIN) // spec §34
+        {
+            if ((state & BUTTON_A) && !(prevState & BUTTON_A))
+                resetToMenu();
+        }
+        else if (gameState == STATE_GAMEOVER) // user request, see its own enum doc comment
         {
             if ((state & BUTTON_A) && !(prevState & BUTTON_A))
                 resetToMenu();
@@ -854,7 +976,10 @@ int main(bool hardReset)
             // §27) -- currentCol/currentRow aren't set yet, and there's
             // nothing to preview before the player has even entered the
             // grid.
-            if (!inInsertRoom && (state & BUTTON_C) && !(prevState & BUTTON_C))
+            // Map toggle (user request: moved from C to A -- A is free
+            // during gameplay, unlike C's original slot which nothing else
+            // uses either, just felt less reachable mid-play).
+            if (!inInsertRoom && (state & BUTTON_A) && !(prevState & BUTTON_A))
             {
                 mapViewOpen = !mapViewOpen;
 
@@ -877,6 +1002,7 @@ int main(bool hardReset)
                     PAL_setColor(PLAYER_SHIP_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF));
                     SPR_setVisibility(playerSprite, HIDDEN);
                     SPR_setVisibility(mapShipSprite, VISIBLE);
+                    SPR_setVisibility(enemySprite, HIDDEN); // frozen with everything else while the map is open
                     mapBlinkTimer = 0;
 
                 }
@@ -894,6 +1020,7 @@ int main(bool hardReset)
                     PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR);
                     SPR_setVisibility(playerSprite, VISIBLE);
                     SPR_setVisibility(mapShipSprite, HIDDEN);
+                    SPR_setVisibility(enemySprite, Enemy_blinkVisible(&enemy) ? VISIBLE : HIDDEN);
                 }
             }
 
@@ -929,8 +1056,39 @@ int main(bool hardReset)
                 const u8 offE = (insertRoomDoorDir == DOOR_E) ? insertLinkOffset : menuDoorOffset;
                 const u8 offS = (insertRoomDoorDir == DOOR_S) ? insertLinkOffset : menuDoorOffset;
                 const u8 offW = (insertRoomDoorDir == DOOR_W) ? insertLinkOffset : menuDoorOffset;
+                const s16 preShakeX = player.x, preShakeY = player.y;
                 const u8 exitDir = Player_updateRoom(&player, bounceMode, moveSpeed,
                                                       doorN, doorE, doorS, doorW, offN, offE, offS, offW);
+
+                // Screenshake on a wall hit (user request), edge-triggered
+                // (see wasWallBlocked's own doc comment) -- same check as
+                // the normal-room branch's own sub-step loop, just against
+                // this single (possibly multi-px) call's start/end position
+                // instead, since this room has no per-substep letter/enemy
+                // work needing that finer granularity.
+                {
+                    const bool blockedNow = (exitDir == EXIT_NONE) && (player.dir != DIR_NONE) &&
+                                             (player.x == preShakeX) && (player.y == preShakeY);
+
+                    // No per-substep granularity here (this room calls
+                    // Player_updateRoom once with the full moveSpeed, see
+                    // above) -- the whole frame's worth of travel is added
+                    // at once instead of 1px at a time.
+                    if (blockedNow)
+                    {
+                        if (!wasWallBlocked)
+                            triggerShake(slideDistance);
+                        slideDistance = 0;
+                    }
+                    else
+                    {
+                        const s16 moved = (s16) (abs(player.x - preShakeX) + abs(player.y - preShakeY));
+
+                        if (moved > 0)
+                            slideDistance = (u16) (slideDistance + moved);
+                    }
+                    wasWallBlocked = blockedNow;
+                }
 
                 if (exitDir == exitDirForDoorDir(insertRoomDoorDir))
                 {
@@ -1001,18 +1159,58 @@ int main(bool hardReset)
                 const u8 offS = doorOffsetFor(currentCol, currentRow, DOOR_S);
                 const u8 offW = doorOffsetFor(currentCol, currentRow, DOOR_W);
                 u8 exitDir = EXIT_NONE;
+                bool playerDied = FALSE;
                 u8 step;
 
-                // One 1px sub-step at a time, checking for the letter after
-                // EACH one instead of once per frame. A frame can move the
-                // ship several px, and a per-frame overlap check only ever
-                // saw its resting cell for that frame -- it could step
-                // clean over the letter (the hub, which is exactly where
-                // tombo puts it). Intermediate pixels are what count.
-                for (step = 0; (step < moveSpeed) && (exitDir == EXIT_NONE); step++)
+                // Enemy moves once per visual frame (its own placeholder
+                // pace, see enemy.c), BEFORE the ship's own sub-step loop
+                // below -- so every one of this frame's collision checks
+                // sees the same, already-advanced enemy position. Its ink
+                // color is set every frame too (cheap, one PAL_setColor)
+                // rather than only on a state change, simplest way to keep
+                // it in sync with enemy.state.
+                Enemy_update(&enemy);
+                PAL_setColor(ENEMY_INK_INDEX, (enemy.state == ENEMY_DANGEROUS) ? ENEMY_DANGEROUS_COLOR : ENEMY_VULNERABLE_COLOR);
+                SPR_setPosition(enemySprite, enemy.x, enemy.y);
+                SPR_setVisibility(enemySprite, Enemy_blinkVisible(&enemy) ? VISIBLE : HIDDEN);
+
+                // One 1px sub-step at a time, checking for the letter (and
+                // the enemy) after EACH one instead of once per frame. A
+                // frame can move the ship several px, and a per-frame
+                // overlap check only ever saw its resting cell for that
+                // frame -- it could step clean over the letter (the hub,
+                // which is exactly where tombo puts it) or the enemy.
+                // Intermediate pixels are what count.
+                for (step = 0; (step < moveSpeed) && (exitDir == EXIT_NONE) && !playerDied; step++)
                 {
+                    const s16 preShakeX = player.x, preShakeY = player.y;
+
                     exitDir = Player_updateRoom(&player, bounceMode, 1, doorN, doorE, doorS, doorW,
                                                 offN, offE, offS, offW);
+
+                    // Screenshake on a wall hit (user request), edge-
+                    // triggered (see wasWallBlocked's own doc comment) --
+                    // the ship tried to move (a real direction is set) but
+                    // didn't, true whether it just stopped (NORMAL/INERTIA/
+                    // TOMB) or bounced (DRUNK, which flips p->dir the same
+                    // step without moving either way -- see movePlayer's
+                    // own doc comment).
+                    {
+                        const bool blockedNow = (exitDir == EXIT_NONE) && (player.dir != DIR_NONE) &&
+                                                 (player.x == preShakeX) && (player.y == preShakeY);
+
+                        if (blockedNow)
+                        {
+                            if (!wasWallBlocked)
+                                triggerShake(slideDistance);
+                            slideDistance = 0; // this slide just ended, next one starts fresh
+                        }
+                        else if ((player.x != preShakeX) || (player.y != preShakeY))
+                        {
+                            slideDistance++; // still sliding -- one more px of run-up
+                        }
+                        wasWallBlocked = blockedNow;
+                    }
 
                     // Cheap box pre-check first: this runs once per px moved,
                     // and the letter only lives in the hub's cell.
@@ -1030,9 +1228,42 @@ int main(bool hardReset)
                         // state next time loadRoom() regenerates them.
                         GuideMap_recomputeLocks();
                     }
+
+                    // Enemy contact (user request): ENEMY_DANGEROUS kills
+                    // the player outright (STATE_GAMEOVER, handled right
+                    // after this loop); ENEMY_VULNERABLE is the other way
+                    // around -- running it over ("atropellarlo... como si
+                    // fuese una melee") kills IT instead, via Enemy_kill's
+                    // own placeholder death blink.
+                    if ((exitDir == EXIT_NONE) && enemy.alive && Enemy_overlapsBox(&enemy, player.x, player.y))
+                    {
+                        triggerShake(slideDistance); // user request: shake on hitting an enemy too, either outcome
+
+                        if (enemy.state == ENEMY_DANGEROUS)
+                            playerDied = TRUE;
+                        else
+                            Enemy_kill(&enemy);
+                    }
                 }
 
-                if (exitDir != EXIT_NONE)
+                if (playerDied)
+                {
+                    // STATE_GAMEOVER (user request): same "hold the state
+                    // until BUTTON_A" pattern as STATE_WIN, just the
+                    // opposite outcome -- see its own enum doc comment for
+                    // why resetToMenu() below won't save this attempt's
+                    // progress.
+                    gameState = STATE_GAMEOVER;
+
+                    SPR_setVisibility(playerSprite, HIDDEN);
+                    SPR_setVisibility(enemySprite, HIDDEN);
+                    drawInsertRoomStatus(FALSE);
+
+                    VDP_clearPlane(BG_A, TRUE);
+                    VDP_drawText("GAME OVER", 15, 12);
+                    VDP_drawText("PULSA A PARA VOLVER AL MENU", 6, 15);
+                }
+                else if (exitDir != EXIT_NONE)
                 {
                     if (isInsertLinkRoom && (exitDir == exitDirForDoorDir(insertLinkDir)))
                     {
@@ -1059,6 +1290,7 @@ int main(bool hardReset)
                         drawInsertRoomArrow(); // spec §37
                         positionPlayerEnteringViaDoorDir(insertRoomDoorDir, insertLinkOffset);
                         drawInsertRoomStatus(TRUE); // spec §34
+                        SPR_setVisibility(enemySprite, HIDDEN); // no enemy in the insertion room (spec §27)
                     }
                     else
                     {
@@ -1110,6 +1342,7 @@ int main(bool hardReset)
 
         prevState = state;
 
+        updateShake();
         SPR_update();
 
         SYS_doVBlankProcess();
