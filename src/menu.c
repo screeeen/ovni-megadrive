@@ -52,6 +52,24 @@
 // exit, mirroring SUN_INK_INDEX's override/restore pattern exactly.
 #define COMPLETED_INK_INDEX ((PAL2 * 16) + 1)
 
+// Absolute CRAM indices of PAL3's index0/1 (user request: "marca las
+// puertas cerradas de color amarillo") -- PAL3 is THIS file's own planet/
+// cursor palette, so the roles are reversed from SUN_INK_INDEX/
+// COMPLETED_INK_INDEX above: PAL3 is busy (planetSmall's own baked colors)
+// for exactly as long as the menu is visible, and completely free the rest
+// of the time, gameplay included (see Menu_loadGraphics's own doc comment)
+// -- the opposite lifetime maze.c's locked-door tiles need. Maze_draw()
+// points a sealed door's tile at PAL3 instead of the room's own hue
+// (same dither shape, just a different palette), reading index0 as the
+// maze's usual dark background and index1 as yellow. Menu_setVisible
+// borrows both slots for that while the menu is HIDDEN, and puts
+// planetSmall's own baked values back the instant the menu becomes
+// visible again -- same override/restore shape as SUN_INK_INDEX/
+// COMPLETED_INK_INDEX, just swapped which state does the overriding.
+#define LOCKED_DOOR_BG_INDEX  ((PAL3 * 16) + 0)
+#define LOCKED_DOOR_INK_INDEX ((PAL3 * 16) + 1)
+
+
 // Elliptical, not circular (spec §31) -- makes better use of the
 // 320x224 screen's aspect ratio than a true circle would. Radii grow
 // with MENU_PLANET_COUNT so every orbit reads as a clearly nested ring,
@@ -174,6 +192,23 @@ void Menu_setVisible(bool visible)
         PAL_setColor(COMPLETED_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFF00));
     else
         PAL_setColor(COMPLETED_INK_INDEX, enemyShip.palette->data[1]);
+
+    // See LOCKED_DOOR_BG_INDEX/LOCKED_DOOR_INK_INDEX's own doc comment --
+    // opposite direction from the two overrides above: restore
+    // planetSmall's own baked colors here (menu becoming visible, so PAL3
+    // needs to look like planets again), and hand the slots over to
+    // maze.c's yellow locked-door look the instant the menu hides
+    // (gameplay starting, planet sprites all hidden by the loop above).
+    if (visible)
+    {
+        PAL_setColor(LOCKED_DOOR_BG_INDEX, planetSmall.palette->data[0]);
+        PAL_setColor(LOCKED_DOOR_INK_INDEX, planetSmall.palette->data[1]);
+    }
+    else
+    {
+        PAL_setColor(LOCKED_DOOR_BG_INDEX, RGB24_TO_VDPCOLOR(0x252525)); // maze.c's own dark background
+        PAL_setColor(LOCKED_DOOR_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFF00));
+    }
 
     // Fresh entry into the menu always restarts the orbit animation from
     // the same spread-out starting angles -- simpler and just as good

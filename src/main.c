@@ -261,6 +261,30 @@ static u8 shakeAmplitude = 1; // set by triggerShake(), read by updateShake()
 // actually fires (see triggerShake), so it always measures THIS slide's
 // run-up, never a previous one's.
 static u16 slideDistance;
+
+// Debug display (user request: "quiero que hagas un display debug",
+// simplified further: "dame una combinacion facil que no interfiera con
+// el juego"). A CHORD (all 3 held together), same shape as RESET_COMBO/
+// DRUNK_TOGGLE_COMBO above -- B and C are never used on their own
+// anywhere in gameplay (only inside these chords), and DOWN keeps it
+// distinct from both of those (UP-based). Checked every frame regardless
+// of gameState, so it works from the menu too.
+#define DEBUG_VIEW_COMBO (BUTTON_B | BUTTON_C | BUTTON_DOWN)
+static bool debugViewOn;
+
+// Rows on BG_B the debug panel prints to (user request: "toda la
+// informacion que consideres necesaria... en tiempo real") -- left-
+// aligned at column 1, same convention as every other BG_B text draw in
+// this file, starting one row below INSERT_STATUS_ROW's own line so
+// neither ever overlaps the other.
+#define DEBUG_VIEW_FIRST_ROW 4
+#define DEBUG_VIEW_ROWS      10
+
+// bounceMode/moveSpeed (see the STATE_PLAYING block) are locals recomputed
+// every frame from controlMode -- these just mirror their current value
+// for drawDebugView(), which runs outside that scope.
+static bool bounceModeDebug;
+static u8 moveSpeedDebug;
 static GameState gameState;
 static u8 sizePresetIndex = SIZE_PRESET_DEFAULT;
 
@@ -475,13 +499,26 @@ static void loadRoom(u8 col, u8 row)
     // One enemy per room (user request), same seed the room's own maze
     // uses -- deterministic per room, same persistence philosophy as the
     // layout itself (re-entering always spawns the identical enemy, same
-    // lane/position/direction, alive again regardless of whether it was
-    // killed on a previous visit -- no per-room "already cleared" state,
-    // simplest behavior for a placeholder enemy).
-    Enemy_spawnForRoom(&enemy, seed);
-    PAL_setColor(ENEMY_INK_INDEX, ENEMY_DANGEROUS_COLOR);
-    SPR_setPosition(enemySprite, enemy.x, enemy.y);
-    SPR_setVisibility(enemySprite, VISIBLE);
+    // lane/position/direction). BUG FIX (user report: "los enemigos no
+    // reaparecen, si los matas en una room no vuelven a aparecer en esa
+    // room") -- a room whose enemy was already killed (GuideMap_markEnemyDead,
+    // called on a successful melee) never spawns a fresh one again: just
+    // mark it dead-on-arrival (alive/deathTimer both FALSE/0, so
+    // Enemy_isGone is immediately TRUE) and keep the sprite hidden, rather
+    // than calling Enemy_spawnForRoom at all.
+    if (GuideMap_isEnemyDead(col, row))
+    {
+        enemy.alive = FALSE;
+        enemy.deathTimer = 0;
+        SPR_setVisibility(enemySprite, HIDDEN);
+    }
+    else
+    {
+        Enemy_spawnForRoom(&enemy, seed);
+        PAL_setColor(ENEMY_INK_INDEX, ENEMY_DANGEROUS_COLOR);
+        SPR_setPosition(enemySprite, enemy.x, enemy.y);
+        SPR_setVisibility(enemySprite, VISIBLE);
+    }
 }
 
 // Room transition (spec §7): move to the neighboring cell, regenerate its
@@ -565,15 +602,35 @@ static void newGame(void)
     drawInsertRoomArrow(); // spec §37
     Items_drawHud();
     drawInsertRoomStatus(TRUE); // spec §34 -- always true here, itemCount is always >= 1
-    Player_spawnAtRoomCenter(&player);
-    // Direct-control modes never auto-move (spec §40/§41/§43/§44) --
-    // overrides Player_spawnAtRoomCenter's own DIR_DOWN default (meant
-    // for DRUNK's/THRUST's always-a-real-facing behavior) so the ship
-    // actually sits still until the player presses a direction for the
-    // first time. THRUST doesn't need this: its speed is already 0
-    // unless UP is held, regardless of what p->dir starts as.
-    if ((controlMode == CONTROL_NORMAL) || (controlMode == CONTROL_INERTIA) || (controlMode == CONTROL_TOMB))
-        player.dir = DIR_NONE;
+    // BUG FIX (user report + screenshot: still looked wrong after routing
+    // the corridor through the center -- "coloca el principio de la nave
+    // en la entrada moviendose en una direccion"). Spawning at the room's
+    // CENTER made the very first frame of a run depend on that exact cell
+    // being on the path -- fragile, and the actual root cause of the
+    // "ship embedded in a wall" bug fixed earlier. Spawning at a door
+    // instead needs no such guarantee at all: it's the same "just inside
+    // this door" cell doorPunch/punchBorderDoor always keeps open, the
+    // exact spot every LATER re-entry into this room already uses
+    // (positionPlayerEnteringViaDoorDir below). Facing inward and already
+    // moving (not DIR_NONE) -- true for every control mode, not just
+    // DRUNK/THRUST -- so the very first thing the player sees is the ship
+    // sliding in from the door, not sitting still in the middle.
+    //
+    // BUG FIX (user report: "la nave ahora entra por la entrada al juego.
+    // Es al reves. Tiene que entrar por la salida del juego") -- spawning
+    // at insertRoomDoorDir (the mission door, which leads OUT to the grid)
+    // had it backwards: a fresh run should appear at the door that leads
+    // BACK to the menu (menuDoorDir, "la salida del juego") and cross the
+    // room toward the mission door, not the other way around -- the ship
+    // "launches" in from the menu side and heads out into the field.
+    positionPlayerEnteringViaDoorDir(menuDoorDir, menuDoorOffset);
+    switch (menuDoorDir)
+    {
+        case DOOR_N: player.dir = DIR_DOWN;  break;
+        case DOOR_S: player.dir = DIR_UP;    break;
+        case DOOR_E: player.dir = DIR_LEFT;  break;
+        default:     player.dir = DIR_RIGHT; break; // DOOR_W
+    }
     SPR_setPosition(playerSprite, player.x, player.y);
     SPR_setVisibility(playerSprite, VISIBLE);
     SPR_setVisibility(enemySprite, HIDDEN); // no enemy in the insertion room (spec §27)
@@ -724,6 +781,107 @@ static void updateShake(void)
     }
 }
 
+// Toggled by the debug combo (Konami-style sequence, see debugCombo's own
+// doc comment) -- wipes every row the panel below prints to, so turning
+// the display off doesn't leave stale text sitting on BG_B.
+static void clearDebugView(void)
+{
+    u8 row;
+
+    for (row = DEBUG_VIEW_FIRST_ROW; row < (DEBUG_VIEW_FIRST_ROW + DEBUG_VIEW_ROWS); row++)
+        VDP_clearTextLineBG(BG_B, row);
+}
+
+// Call once per frame with this frame's joypad state, regardless of
+// gameState -- works from the menu too, same as RESET_COMBO/
+// DRUNK_TOGGLE_COMBO above.
+static void updateDebugCombo(u16 state, u16 prevState)
+{
+    if (((state & DEBUG_VIEW_COMBO) == DEBUG_VIEW_COMBO) && ((prevState & DEBUG_VIEW_COMBO) != DEBUG_VIEW_COMBO))
+    {
+        debugViewOn = !debugViewOn;
+        if (!debugViewOn)
+            clearDebugView();
+    }
+}
+
+// The debug panel itself (user request: "quiero que hagas un display
+// debug... y pintes en esa pantalla, a tiempo real, toda la informacion
+// que consideres necesaria del estado del juego"). BG_B, high priority,
+// same plane/trick as the FPS counter and HUD -- draws over BG_A without
+// either needing to coordinate. Call once per frame; a no-op while
+// debugViewOn is FALSE (clearDebugView already wiped the rows once, right
+// when the combo turned it off).
+static void drawDebugView(void)
+{
+    char buf[40];
+
+    if (!debugViewOn)
+        return;
+
+    VDP_setTextPriority(1);
+
+    {
+        static const char *const stateNames[] = { "MENU", "PLAY", "WIN ", "OVER" };
+        static const char *const roomGenNames[] = { "CARVE", "TOMBO" };
+
+        sprintf(buf, "ST:%s CM:%d RG:%s", stateNames[gameState], controlMode, roomGenNames[roomGenMode]);
+        VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW);
+    }
+
+    sprintf(buf, "COL:%d ROW:%d INS:%d MAPV:%d HUE:%d",
+            currentCol, currentRow, inInsertRoom, mapViewOpen, GuideMap_roomSection(currentCol, currentRow));
+    VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 1);
+
+    {
+        const MapCell cell = guideMap[currentRow][currentCol];
+        // Same short-circuit pattern loadRoom() uses -- only reads a
+        // neighbor's lock state when a real door exists that way, so this
+        // never indexes guideMap out of bounds at a grid edge.
+        const bool lockedN = cell.doorN && GuideMap_isRoomLocked(currentCol, currentRow - 1);
+        const bool lockedE = cell.doorE && GuideMap_isRoomLocked(currentCol + 1, currentRow);
+        const bool lockedS = cell.doorS && GuideMap_isRoomLocked(currentCol, currentRow + 1);
+        const bool lockedW = cell.doorW && GuideMap_isRoomLocked(currentCol - 1, currentRow);
+
+        sprintf(buf, "DR N:%d/%d E:%d/%d S:%d/%d W:%d/%d (open/lock)",
+                cell.doorN, lockedN, cell.doorE, lockedE, cell.doorS, lockedS, cell.doorW, lockedW);
+        VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 2);
+    }
+
+    {
+        static const char *const dirNames[] = { "UP", "LE", "DN", "RI", "--" };
+
+        sprintf(buf, "PLR X:%d Y:%d TX:%d TY:%d D:%s",
+                player.x, player.y, player.x / MAZE_TILE_PX, player.y / MAZE_TILE_PX, dirNames[player.dir]);
+        VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 3);
+    }
+
+    sprintf(buf, "SPD:%d BNC:%d WBLK:%d SLDDST:%d", moveSpeedDebug, bounceModeDebug, wasWallBlocked, slideDistance);
+    VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 4);
+
+    {
+        static const char *const enemyStateNames[] = { "DNG", "VUL" };
+
+        sprintf(buf, "ENM A:%d ST:%s X:%d Y:%d",
+                enemy.alive, enemyStateNames[enemy.state], enemy.x, enemy.y);
+        VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 5);
+    }
+
+    sprintf(buf, "ENM STMR:%d DTMR:%d GONE:%d", enemy.stateTimer, enemy.deathTimer, Enemy_isGone(&enemy));
+    VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 6);
+
+    sprintf(buf, "ITM %d/%d ALL:%d", Items_collectedCount(), itemCount, Items_allCollected());
+    VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 7);
+
+    sprintf(buf, "MSEED:%u RSEED:%u", mapSeed, roomSeedFor(currentCol, currentRow));
+    VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 8);
+
+    sprintf(buf, "SHK F:%d A:%d TMBMV:%d TIDX:%d", shakeFramesLeft, shakeAmplitude, tombMoving, tombSpeedIdx);
+    VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 9);
+
+    VDP_setTextPriority(0);
+}
+
 int main(bool hardReset)
 {
     u16 prevState = 0;
@@ -762,6 +920,8 @@ int main(bool hardReset)
     while (TRUE)
     {
         const u16 state = JOY_readJoypad(JOY_1);
+
+        updateDebugCombo(state, prevState); // checked every frame, any gameState (see its own doc comment)
 
         if (((state & RESET_COMBO) == RESET_COMBO) && ((prevState & RESET_COMBO) != RESET_COMBO))
         {
@@ -971,6 +1131,12 @@ int main(bool hardReset)
                     moveSpeed = NORMAL_MODE_SPEED;
                     break;
             }
+
+            // Mirrors for the debug view (drawDebugView) -- bounceMode/
+            // moveSpeed above are locals to this block, not reachable from
+            // the top-level draw call.
+            bounceModeDebug = bounceMode;
+            moveSpeedDebug = moveSpeed;
 
             // Map view disabled while still in the insertion room (spec
             // §27) -- currentCol/currentRow aren't set yet, and there's
@@ -1244,6 +1410,10 @@ int main(bool hardReset)
                         else
                         {
                             Enemy_kill(&enemy);
+                            // Remember it for good (user request: "los
+                            // enemigos no reaparecen") -- loadRoom() checks
+                            // this on every future visit to this room.
+                            GuideMap_markEnemyDead(currentCol, currentRow);
                             // Bounce (user request: "cuando haga melee...
                             // y lo mate, la nave rebota") -- reverses
                             // p->dir on the spot (UP<->DOWN, LEFT<->RIGHT),
@@ -1350,6 +1520,8 @@ int main(bool hardReset)
             VDP_drawTextBG(BG_B, modeLabels[controlMode], 0, 0);
             VDP_setTextPriority(0);
         }
+
+        drawDebugView(); // no-op unless the debug combo turned it on
 
         prevState = state;
 

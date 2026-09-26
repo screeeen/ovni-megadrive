@@ -36,9 +36,15 @@ typedef struct
 
 void Player_init(Player *p);
 
-// Multi-room system's spawn point (spec §5): the room's carve seed, always
-// a PATH cell, used only for the very first room of a run (no incoming
-// door to align with).
+// Places the player at the room's own hub/center (MAZE_DOOR_COL/ROW,
+// maze.h), facing DIR_DOWN. Not currently called anywhere -- the very
+// first spawn of a run used to land here (before an incoming door
+// existed to align with), but that depended on the center always being
+// on the insertion room's own path, which wasn't guaranteed and let the
+// ship spawn embedded in a wall; main.c's newGame() now spawns at the
+// mission door itself instead (positionPlayerEnteringViaDoorDir), the
+// same guaranteed-open cell every later re-entry already uses. Kept
+// around as a plain utility in case some other spawn context wants it.
 void Player_spawnAtRoomCenter(Player *p);
 
 // Same "rotate 90 degrees" action bound to SPACE in the original js13k game

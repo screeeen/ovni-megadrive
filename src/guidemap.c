@@ -158,6 +158,7 @@ static void clearMap(void)
             guideMap[row][col].doorS   = FALSE;
             guideMap[row][col].doorW   = FALSE;
             guideMap[row][col].visited = FALSE;
+            guideMap[row][col].enemyDead = FALSE;
         }
     }
 }
@@ -409,6 +410,16 @@ void GuideMap_recomputeLocks(void)
 bool GuideMap_isRoomLocked(u8 col, u8 row)
 {
     return roomLocked[row][col];
+}
+
+bool GuideMap_isEnemyDead(u8 col, u8 row)
+{
+    return guideMap[row][col].enemyDead;
+}
+
+void GuideMap_markEnemyDead(u8 col, u8 row)
+{
+    guideMap[row][col].enemyDead = TRUE;
 }
 
 // Picks (goalCol,goalRow) among rooms at >= GOAL_MIN_DISTANCE_PERCENT of the
@@ -922,7 +933,13 @@ void GuideMap_drawOverlay(void)
 
                     s[0] = letter;
                     s[1] = '\0';
+                    // Colored to match this room's own section hue (user
+                    // request) -- always the unlocked look: this pass only
+                    // ever runs for cell.visited rooms (the `continue`
+                    // above), which by construction can't be locked.
+                    Maze_setTextColorForHue(GuideMap_roomSection((u8) col, (u8) row));
                     VDP_drawText(s, rx + (ROOM_BOX_W / 2), ry);
+                    Maze_restoreTextColor();
                 }
             }
         }
@@ -960,7 +977,17 @@ void GuideMap_drawOverlay(void)
 
             s[0] = (char) ('A' + n);
             s[1] = '\0';
+            // Colored to match this item's own door (user request): yellow
+            // while its room is still locked (same yellow maze.c's own
+            // locked-door wall tiles use), that room's section hue once
+            // it's reachable -- this is the one letter-drawing pass that
+            // actually covers locked, never-visited item rooms too.
+            if (GuideMap_isRoomLocked(icol, irow))
+                Maze_setTextColorLocked();
+            else
+                Maze_setTextColorForHue(GuideMap_roomSection(icol, irow));
             VDP_drawText(s, rx + (ROOM_BOX_W / 2), ry);
+            Maze_restoreTextColor();
         }
     }
 

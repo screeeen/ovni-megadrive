@@ -28,6 +28,28 @@
 
 static u8 grid[MAZE_H][MAZE_W];
 
+// Which cells are a currently-SEALED door (user request: "marca las
+// puertas cerradas de color amarillo") -- Maze_draw() below reads this to
+// pick PAL3 (yellow, see menu.h's LOCKED_DOOR_INK_INDEX) instead of the
+// room's own hue for just those cells, same dither shape either way (no
+// new tile art needed -- see randomWallVariant()'s own doc comment on
+// spec §19: a sealed door still uses an ordinary wall variant, this only
+// changes which palette renders it). Reset at the top of every
+// Maze_generateRoom/Maze_generateInsertionRoom call (the insertion room
+// never actually sets any cell here, its doors are never locked, but it
+// still needs a clean FALSE grid since Maze_draw() doesn't know which
+// generator last ran).
+static bool lockedDoorCell[MAZE_H][MAZE_W];
+
+static void clearLockedDoorCells(void)
+{
+    s16 x, y;
+
+    for (y = 0; y < MAZE_H; y++)
+        for (x = 0; x < MAZE_W; x++)
+            lockedDoorCell[y][x] = FALSE;
+}
+
 // Offset into the current hue's 9-cell block (spec §18): 0, 9, 18 or 27,
 // set once at the top of Maze_generate()/Maze_generateRoom() and read by
 // every randomWallVariant() call for the rest of that room's carve.
@@ -1535,29 +1557,34 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
     // room's own hue and dither noise instead of standing out as its own
     // fixed-color shape. Position along the border is doorOffsets[dir]
     // now (spec §30), not always the room's own center column/row.
+    clearLockedDoorCells();
     if (doorN)
     {
         const s16 c = anchorX[MAZE_DIR_N];
         grid[0][c] = lockedN ? randomWallVariant() : PATH; grid[0][c + 1] = lockedN ? randomWallVariant() : PATH;
         grid[1][c] = lockedN ? randomWallVariant() : PATH; grid[1][c + 1] = lockedN ? randomWallVariant() : PATH;
+        if (lockedN) { lockedDoorCell[0][c] = TRUE; lockedDoorCell[0][c + 1] = TRUE; lockedDoorCell[1][c] = TRUE; lockedDoorCell[1][c + 1] = TRUE; }
     }
     if (doorS)
     {
         const s16 c = anchorX[MAZE_DIR_S];
         grid[MAZE_H - 1][c] = lockedS ? randomWallVariant() : PATH; grid[MAZE_H - 1][c + 1] = lockedS ? randomWallVariant() : PATH;
         grid[MAZE_H - 2][c] = lockedS ? randomWallVariant() : PATH; grid[MAZE_H - 2][c + 1] = lockedS ? randomWallVariant() : PATH;
+        if (lockedS) { lockedDoorCell[MAZE_H - 1][c] = TRUE; lockedDoorCell[MAZE_H - 1][c + 1] = TRUE; lockedDoorCell[MAZE_H - 2][c] = TRUE; lockedDoorCell[MAZE_H - 2][c + 1] = TRUE; }
     }
     if (doorE)
     {
         const s16 r = anchorY[MAZE_DIR_E];
         grid[r][MAZE_W - 1] = lockedE ? randomWallVariant() : PATH; grid[r + 1][MAZE_W - 1] = lockedE ? randomWallVariant() : PATH;
         grid[r][MAZE_W - 2] = lockedE ? randomWallVariant() : PATH; grid[r + 1][MAZE_W - 2] = lockedE ? randomWallVariant() : PATH;
+        if (lockedE) { lockedDoorCell[r][MAZE_W - 1] = TRUE; lockedDoorCell[r + 1][MAZE_W - 1] = TRUE; lockedDoorCell[r][MAZE_W - 2] = TRUE; lockedDoorCell[r + 1][MAZE_W - 2] = TRUE; }
     }
     if (doorW)
     {
         const s16 r = anchorY[MAZE_DIR_W];
         grid[r][0] = lockedW ? randomWallVariant() : PATH; grid[r + 1][0] = lockedW ? randomWallVariant() : PATH;
         grid[r][1] = lockedW ? randomWallVariant() : PATH; grid[r + 1][1] = lockedW ? randomWallVariant() : PATH;
+        if (lockedW) { lockedDoorCell[r][0] = TRUE; lockedDoorCell[r + 1][0] = TRUE; lockedDoorCell[r][1] = TRUE; lockedDoorCell[r + 1][1] = TRUE; }
     }
 }
 
@@ -1603,6 +1630,7 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
     s16 anchorX, anchorY;
     s16 menuAnchorX, menuAnchorY;
 
+    clearLockedDoorCells(); // this room's doors are never locked, but Maze_draw() always reads this grid
     anchorForDoor(doorDir, doorOffset, &anchorX, &anchorY);
     anchorForDoor(menuDoorDir, menuDoorOffset, &menuAnchorX, &menuAnchorY);
 
@@ -1613,28 +1641,27 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
     // its own on purpose (spec §27's uniform look) -- no letter, always
     // exactly these 2 doors -- so it doesn't need either roomGenMode's
     // usual generator, just the corridor a ship actually needs: wall
-    // everywhere, a 1-cell-wide path (same one-axis-at-a-time L shape as
-    // bridgeToSeed, see carveLPath's own doc comment) from one door's
-    // anchor to the other's, routed through the room's own center (see the
-    // BUG FIX comment right below for why). Unconditional regardless of
+    // everywhere, a single 1-cell-wide path (same one-axis-at-a-time L
+    // shape as bridgeToSeed, see carveLPath's own doc comment) straight
+    // from one door's anchor to the other's. Unconditional regardless of
     // MAZE_ROOMGEN_CARVE/TOMBO -- this room's shape doesn't depend on that
     // switch.
-    // BUG FIX (user report + screenshot: the ship could spawn embedded in
-    // a wall in this very room). Player_spawnAtRoomCenter -- used for the
-    // very first spawn of a run, before currentCol/currentRow even exist --
-    // always places the ship at (MAZE_DOOR_COL,MAZE_DOOR_ROW), the room's
-    // center, regardless of where either door's anchor is. A single direct
-    // anchor-to-anchor path (what this used to carve) generally never
-    // passes through that exact cell, so the very first thing a new game
-    // could do was spawn the ship inside solid wall. Routed through the
-    // center instead -- two L-legs meeting there -- so that spawn point is
-    // always ON the path, same as every dead-end/tombo room already
-    // guarantees for ITS own hub (spec §5/§13).
+    //
+    // This USED to detour through the room's center (MAZE_DOOR_COL/ROW)
+    // instead of going anchor-to-anchor directly: main.c's very first
+    // spawn of a run used to land the ship exactly there
+    // (Player_spawnAtRoomCenter), and a direct path generally never passes
+    // through that unrelated cell -- the ship could spawn embedded in
+    // solid wall. Fixed properly at the SPAWN site instead (main.c's
+    // newGame() now lands the ship at the mission door itself, the same
+    // "just inside this door" cell every later re-entry already uses,
+    // moving inward from frame one) -- which means this room's own path no
+    // longer needs to detour anywhere to stay correct, so it's back to the
+    // simplest shape.
     (void) roomGenMode;
     setRandomSeed(roomSeed); // no random draws happen below, but keeps this room's own stream slot occupied like every other Maze_generate*() call
     fillWallsFixed(INSERT_WALL_VARIANT);
-    carveLPath(anchorX, anchorY, MAZE_DOOR_COL, MAZE_DOOR_ROW);
-    carveLPath(MAZE_DOOR_COL, MAZE_DOOR_ROW, menuAnchorX, menuAnchorY);
+    carveLPath(anchorX, anchorY, menuAnchorX, menuAnchorY);
     tomboResetDebugGraph(); // no explicit graph here -- Maze_drawDebugGraph() should draw nothing
 
     for (x = 0; x < MAZE_W; x++)
@@ -1671,8 +1698,17 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
     punchBorderDoor(menuDoorDir, menuAnchorX, menuAnchorY);
 }
 
+// The 4 section-hue colors (spec §18), single source of truth -- shared by
+// Maze_loadGraphics below (the walls' own palette) and
+// Maze_setTextColorForHue (user request: "los colores de las letras tienen
+// que tener el mismo color de su puerta" -- an item's letter now matches
+// the hue of the room/door it lives behind).
+static const u32 hueColorRGB[MAZE_SECTION_COUNT] = { 0x987DFA, 0x4AECC4, 0xFFA53E, 0xE85D75 };
+
 void Maze_loadGraphics(void)
 {
+    u8 hue;
+
     // index0/1: exact colors from ovni's src/image_edit.png (dither wall
     // art) -- hue 0, unchanged, also what the guide map overlay always
     // uses (spec §18). index2-4: the 3 extra section hues, new palette
@@ -1682,12 +1718,50 @@ void Maze_loadGraphics(void)
     // out/release/res/resources.s after rebuilding, same as the index0
     // gotcha noted in guidemap.c.
     PAL_setColor(0, RGB24_TO_VDPCOLOR(0x252525));
-    PAL_setColor(1, RGB24_TO_VDPCOLOR(0x987DFA)); // hue 0: violet
-    PAL_setColor(2, RGB24_TO_VDPCOLOR(0x4AECC4)); // hue 1: teal
-    PAL_setColor(3, RGB24_TO_VDPCOLOR(0xFFA53E)); // hue 2: orange
-    PAL_setColor(4, RGB24_TO_VDPCOLOR(0xE85D75)); // hue 3: pink
+    for (hue = 0; hue < MAZE_SECTION_COUNT; hue++)
+        PAL_setColor(1 + hue, RGB24_TO_VDPCOLOR(hueColorRGB[hue]));
 
     VDP_loadTileSet(&mazeTiles, BASE_TILE, DMA);
+}
+
+// Absolute CRAM index of PAL0's index1 -- the shared default every OTHER
+// text draw in the game (HUD, FPS counter, control-mode label, map status)
+// assumes is always hue 0's violet. Maze_setTextColorForHue/
+// Maze_restoreTextColor borrow it only for the brief window around a
+// single letter draw, mirroring the same "set, draw, restore" shape
+// VDP_setTextPriority is already used with everywhere in this codebase.
+#define HUE_TEXT_INK_INDEX ((PAL0 * 16) + 1)
+
+// Call right before drawing an item's letter with VDP_drawText/
+// VDP_drawTextBG so it comes out in that room's own section-hue color
+// (matching its walls/door) instead of the default violet. Follow with
+// Maze_restoreTextColor() immediately after the draw -- every other text
+// draw in the game relies on the default being restored.
+void Maze_setTextColorForHue(u8 hue)
+{
+    VDP_setTextPalette(PAL0);
+    if (hue != 0) // hue 0 IS the default already -- skip the pointless round-trip
+        PAL_setColor(HUE_TEXT_INK_INDEX, RGB24_TO_VDPCOLOR(hueColorRGB[hue]));
+}
+
+// Call right before drawing an item's letter that's still behind a LOCKED
+// door -- PAL3's index1 is already yellow throughout gameplay (menu.c's
+// Menu_setVisible, same color maze.c's own locked-door wall tiles use), so
+// this just points text at it, no color value to touch at all. Follow with
+// Maze_restoreTextColor() immediately after.
+void Maze_setTextColorLocked(void)
+{
+    VDP_setTextPalette(PAL3);
+}
+
+// Undoes either of the two above: back to PAL0 as the selected text
+// palette, and PAL0's index1 back to hue 0's own violet (a no-op value-wise
+// if Maze_setTextColorForHue(0) was the one actually used, but always
+// correct either way).
+void Maze_restoreTextColor(void)
+{
+    PAL_setColor(HUE_TEXT_INK_INDEX, RGB24_TO_VDPCOLOR(hueColorRGB[0]));
+    VDP_setTextPalette(PAL0);
 }
 
 void Maze_draw(void)
@@ -1706,11 +1780,15 @@ void Maze_draw(void)
             const u16 tl = BASE_TILE + (2 * grid[y][x]);
             const u16 bl = tl + CELL_ROW_TILES;
             const u16 i = (u16) (x * 2);
+            // Locked doors (user request) render with PAL3 (yellow, see
+            // menu.c's LOCKED_DOOR_INK_INDEX) instead of PAL0 -- same tile,
+            // same dither shape, just a different palette slot.
+            const u8 pal = lockedDoorCell[y][x] ? PAL3 : PAL0;
 
-            band[i] = TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, tl);
-            band[i + 1] = TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, tl + 1);
-            band[(MAZE_W * 2) + i] = TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, bl);
-            band[(MAZE_W * 2) + i + 1] = TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, bl + 1);
+            band[i] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tl);
+            band[i + 1] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tl + 1);
+            band[(MAZE_W * 2) + i] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, bl);
+            band[(MAZE_W * 2) + i + 1] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, bl + 1);
         }
 
         VDP_setTileMapDataRect(BG_A, band, 0, y * 2, MAZE_W * 2, 2, MAZE_W * 2, CPU);

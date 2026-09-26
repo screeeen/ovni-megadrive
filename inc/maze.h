@@ -11,12 +11,14 @@
 
 // The room's own interior hub / carve seed -- where Maze_generateRoom's
 // carve() always starts (guaranteed-open regardless of door layout), and
-// where Player_spawnAtRoomCenter/items.c's fixed item position/
-// positionPlayerEnteringViaDoorDir's insertion-room landing spot all
-// still anchor (spec §5/§13/§27). Door POSITIONS along their own borders
-// no longer derive from this (spec §30: they're independently random per
-// door, see MapCell's doorOffsetN/E/S/W in guidemap.h) -- this is now
-// only the room's center, not a door coordinate.
+// where items.c's fixed item position anchors (spec §5/§13). The
+// insertion room no longer anchors its own path or its player spawn here
+// (main.c's newGame() spawns at the mission door itself instead -- see
+// player.h's Player_spawnAtRoomCenter for why). Door POSITIONS along
+// their own borders don't derive from this either (spec §30: they're
+// independently random per door, see MapCell's doorOffsetN/E/S/W in
+// guidemap.h) -- this is only ever a room's center, not a door
+// coordinate.
 #define MAZE_DOOR_COL (MAZE_W / 2)
 #define MAZE_DOOR_ROW ((MAZE_H / 2) & ~1)
 
@@ -45,6 +47,22 @@
 // section, since the per-section coloring is a gameplay-view-only
 // feature (spec §18).
 #define MAZE_WALL_DITHER_TILE(hue) (TILE_USER_INDEX + (2 * (((hue) * 9) + 5)))
+
+// Item-letter coloring (user request: "los colores de las letras tienen
+// que tener el mismo color de su puerta") -- an exception to this file's
+// own MAZE_WALL_DITHER_TILE comment above ("guidemap.c's overlay always
+// uses hue 0... since per-section coloring is a gameplay-view-only
+// feature"): a letter now shows that hue too, so it visually matches the
+// room/door it lives behind, and yellow while that door is still locked
+// (matching maze.c's own locked-door wall tiles, menu.c's
+// LOCKED_DOOR_INK_INDEX). Call one of these two right before a
+// VDP_drawText/VDP_drawTextBG call that draws an item's letter, then
+// Maze_restoreTextColor() immediately after -- every OTHER text draw in
+// the game (HUD, FPS, control-mode label...) assumes the default (PAL0,
+// hue 0's violet) is restored in between.
+void Maze_setTextColorForHue(u8 hue);
+void Maze_setTextColorLocked(void);
+void Maze_restoreTextColor(void);
 
 // Which interior room-generation algorithm Maze_generateRoom/
 // Maze_generateInsertionRoom use (user request, menu-switchable via

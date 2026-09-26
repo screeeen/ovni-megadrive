@@ -30,6 +30,16 @@ typedef struct
     u8 doorS  : 1;
     u8 doorW  : 1;
     u8 visited: 1;
+    // TRUE once this room's enemy has been killed by the player (user
+    // request: "los enemigos no reaparecen, si los matas en una room no
+    // vuelven a aparecer en esa room") -- checked by main.c's loadRoom()
+    // every time this room is (re)entered: an enemy is only ever spawned
+    // if this is still FALSE. Persists for the rest of the run (reset only
+    // by clearMap(), i.e. a new game or the menu resetting the whole map),
+    // same lifetime as `visited` above. Read/written via
+    // GuideMap_isEnemyDead/GuideMap_markEnemyDead so main.c doesn't need
+    // to know the MapCell layout.
+    u8 enemyDead: 1;
     // Where each active door sits along its border (spec §30): a maze
     // column (for doorN/doorS) or maze row (for doorE/doorW), in
     // MAZE_TILE_PX cell units -- no longer always the room's own center.
@@ -140,6 +150,13 @@ u8 GuideMap_roomSection(u8 col, u8 row);
 void GuideMap_recomputeLocks(void);
 
 bool GuideMap_isRoomLocked(u8 col, u8 row);
+
+// See MapCell's own enemyDead field doc comment above: TRUE once (col,row)'s
+// enemy has been killed, in which case main.c's loadRoom() must not spawn a
+// new one there. GuideMap_markEnemyDead() is main.c's own call, right when
+// a melee kill lands.
+bool GuideMap_isEnemyDead(u8 col, u8 row);
+void GuideMap_markEnemyDead(u8 col, u8 row);
 
 // Uploads the overlay tileset to VRAM (right after maze.c's tileset --
 // see MAZE_TILE_COUNT) and sets up PAL2 for the current-room highlight.
