@@ -35,13 +35,6 @@ static bool collideDown(s16 newY, s16 x)
     return wallAt(x, newY + BOX) || wallAt(x + BOX, newY + BOX);
 }
 
-void Player_init(Player *p)
-{
-    p->x = Maze_startPixelX();
-    p->y = Maze_startPixelY();
-    p->dir = DIR_DOWN;
-}
-
 void Player_spawnAtRoomCenter(Player *p)
 {
     p->x = MAZE_DOOR_COL * MAZE_TILE_PX;
@@ -103,22 +96,6 @@ static void movePlayer(Player *p, bool bounceOnWall)
             break;
         }
     }
-}
-
-bool Player_update(Player *p)
-{
-    if (p->y >= MAZE_TILE_PX * (MAZE_H - 1))
-        return TRUE;
-
-    if (p->y <= 0)
-    {
-        p->dir = DIR_DOWN;
-        p->y = 1;
-    }
-
-    movePlayer(p, TRUE); // single-room prototype, always the original bounce behavior
-
-    return FALSE;
 }
 
 // tile is the door span's first column/row (spec §30: wherever this

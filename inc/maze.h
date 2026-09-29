@@ -9,16 +9,15 @@
 #define MAZE_W          20
 #define MAZE_H          14
 
-// The room's own interior hub / carve seed -- where Maze_generateRoom's
-// carve() always starts (guaranteed-open regardless of door layout), and
-// where items.c's fixed item position anchors (spec §5/§13). The
-// insertion room no longer anchors its own path or its player spawn here
-// (main.c's newGame() spawns at the mission door itself instead -- see
-// player.h's Player_spawnAtRoomCenter for why). Door POSITIONS along
-// their own borders don't derive from this either (spec §30: they're
-// independently random per door, see MapCell's doorOffsetN/E/S/W in
-// guidemap.h) -- this is only ever a room's center, not a door
-// coordinate.
+// The room's own interior hub -- the letter's cell, the point every tombo
+// room's generated graph is built around (maze.c's generateRoomTombo), and
+// where items.c's fixed item position anchors (spec §5/§13). The insertion
+// room no longer anchors its own path or its player spawn here (main.c's
+// newGame() spawns at the mission door itself instead -- see player.h's
+// Player_spawnAtRoomCenter for why). Door POSITIONS along their own
+// borders don't derive from this either (spec §30: they're independently
+// random per door, see MapCell's doorOffsetN/E/S/W in guidemap.h) -- this
+// is only ever a room's center, not a door coordinate.
 #define MAZE_DOOR_COL (MAZE_W / 2)
 #define MAZE_DOOR_ROW ((MAZE_H / 2) & ~1)
 
@@ -64,63 +63,50 @@ void Maze_setTextColorForHue(u8 hue);
 void Maze_setTextColorLocked(void);
 void Maze_restoreTextColor(void);
 
-// Which interior room-generation algorithm Maze_generateRoom/
-// Maze_generateInsertionRoom use (user request, menu-switchable via
-// main.c's START button): MAZE_ROOMGEN_CARVE is the original recursive-
-// backtracker + forced-target/bridge approach this file always used.
-// MAZE_ROOMGEN_TOMBO ("tombo", a Tomb of the Mask homage) is a graph-
-// first generator built for that game's movement (main.c's CONTROL_TOMB:
-// the ship slides in a straight line until a wall stops it and can only
-// turn from a stop) -- the only control scheme it guarantees anything
-// for. It builds an OPEN room -- walls are only ~10% of the interior, a
-// scatter of small obstacles (each one gives the ship stops on every side,
-// so there are many nodes and many routes between them, not a single
-// corridor), plus a few deliberately placed ones next to each door and
-// near the hub so those are always reachable -- then
-// ACCEPTS the room only after simulating actual slides over the finished
-// grid (see maze.c's tomboValidate): from every way of entering the room
-// (each active door, and the spawn for the insertion room) every active
-// door must be leavable from every stop the ship can reach, and the hub
-// (the letter) must be crossed -- so the ship can never be stuck, whichever
-// door it wants next. Rooms are also puzzles (user request: the player has
-// to work out how to reach the doors and the letter): the validator counts
-// the slides a solution takes and demands a minimum for each door and for
-// the letter, easing off in tiers only for the rare door layouts where
-// nothing harder turns up (see maze.c's puzzleTiers). Rejected layouts are re-rolled (bounded attempts
-// from the room's seed, then bounded deterministic ones that were
-// verified exhaustively host-side over every door subset x offset
-// combination). MAZE_ROOMGEN_CARVE's own pipeline is only the last-resort
-// fallback if all of those somehow fail, and carries no such guarantee.
-typedef enum { MAZE_ROOMGEN_CARVE, MAZE_ROOMGEN_TOMBO } MazeRoomGenMode;
+// Room generation ("tombo", a Tomb of the Mask homage, user request:
+// "borra el codigo para generar las habitaciones en modo normal... nos
+// vamos a enfocar en tombo" -- the earlier MAZE_ROOMGEN_CARVE recursive-
+// backtracker pipeline, and the menu switch that picked between it and
+// this, are gone; tombo is the only generator now). Built for that game's
+// movement (main.c's CONTROL_TOMB: the ship slides in a straight line
+// until a wall stops it and can only turn from a stop) -- the only
+// control scheme it guarantees anything for. It builds an OPEN room --
+// walls are only ~10% of the interior, a scatter of small obstacles (each
+// one gives the ship stops on every side, so there are many nodes and
+// many routes between them, not a single corridor), plus a few
+// deliberately placed ones next to each door and near the hub so those
+// are always reachable -- then ACCEPTS the room only after simulating
+// actual slides over the finished grid (see maze.c's tomboValidate): from
+// every way of entering the room (each active door, and the spawn for the
+// insertion room) every active door must be leavable from every stop the
+// ship can reach, and the hub (the letter) must be crossed -- so the ship
+// can never be stuck, whichever door it wants next. Rooms are also
+// puzzles (user request: the player has to work out how to reach the
+// doors and the letter): the validator counts the slides a solution
+// takes and demands a minimum for each door and for the letter, easing
+// off in tiers only for the rare door layouts where nothing harder turns
+// up (see maze.c's puzzleTiers). Rejected layouts are re-rolled (bounded
+// attempts from the room's seed, then bounded deterministic ones that
+// were verified exhaustively host-side over every door subset x offset
+// combination) -- a trivial open-interior fallback exists only as a
+// safety net for if every single one of those somehow fails, and carries
+// no puzzle guarantee; it's never actually been observed to trigger.
 
-// Accepted-attempt cache for MAZE_ROOMGEN_TOMBO (see maze.c's attempt
-// codes): one byte per room remembers which generation attempt was
-// accepted, so re-entering a room replays only that attempt -- the very
-// same layout, without repeating the search. Slots 0..79 are for grid
-// rooms (main.c passes row * MAX_MAP_COLS + col; MAX_MAP_COLS *
-// MAX_MAP_ROWS must not exceed MAZE_ROOM_CACHE_SLOTS - 1), the last one is
-// the insertion room's.
+// Accepted-attempt cache (see maze.c's attempt codes): one byte per room
+// remembers which generation attempt was accepted, so re-entering a room
+// replays only that attempt -- the very same layout, without repeating
+// the search. Slots 0..79 are for grid rooms (main.c passes row *
+// MAX_MAP_COLS + col; MAX_MAP_COLS * MAX_MAP_ROWS must not exceed
+// MAZE_ROOM_CACHE_SLOTS - 1), the last one is the insertion room's.
 #define MAZE_ROOM_CACHE_SLOTS  81
 #define MAZE_INSERT_CACHE_SLOT 80
 
-// Forgets every cached attempt. Call whenever the layout inputs change:
-// a new game or a resumed one (mapSeed, doors), or a different room-gen mode.
+// Forgets every cached attempt. Call whenever the layout inputs change: a
+// new game or a resumed one (mapSeed, doors).
 void Maze_clearRoomCache(void);
-
-// Sets which algorithm the NEXT Maze_generateRoom/Maze_generateInsertionRoom
-// call (and every one after it, until called again) uses. Defaults to
-// MAZE_ROOMGEN_CARVE. A global toggle, not per-room -- main.c's own
-// roomGenMode mirrors this so it can show/persist the current choice in
-// the planet menu.
-void Maze_setRoomGenMode(MazeRoomGenMode mode);
 
 // Uploads the maze tileset to VRAM and sets its palette. Call once at boot.
 void Maze_loadGraphics(void);
-
-// Carves a new maze (recursive-backtracker, ported from ovni's generateMap.js)
-// and leaves it ready to draw. Single-room prototype only (main.c's current
-// game loop) -- untouched by the multi-room guide map system below.
-void Maze_generate(void);
 
 // Carves a room for the Mapa Guía system (docs/spec-mapa-guia.md §5):
 // deterministic from roomSeed (same seed -> byte-identical grid, so a room's
@@ -158,8 +144,9 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
 // know where to send the player once they leave, and to punch open a
 // matching real border opening on that specific side of the target room
 // -- spec §29, not a blind teleport into its center). Deterministic from
-// roomSeed, same carve algorithm as Maze_generateRoom, seeded from the
-// room's own center exactly like every other room. Always a single fixed
+// roomSeed, a single 1-cell-wide corridor between its two doors (see
+// maze.c's carveLPath) rather than tombo's usual generator -- this room
+// never held a real puzzle of its own. Always a single fixed
 // wall-dither cell throughout instead of the usual random mix -- a
 // deliberately uniform look distinct from every other room in the game.
 // Two doors now (spec §36, user request: "tiene que haber una salida en
@@ -187,17 +174,24 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
 // Draws the current maze to plane BG_A.
 void Maze_draw(void);
 
+// Full-screen static/white-noise effect (user request, refined further:
+// "más granular... veo tiles"), drawn to BG_A through PAL1 -- genuine
+// per-pixel random noise, regenerated into a small dedicated block of VRAM
+// tiles every call (see maze.c's own doc comment), not a shuffle of fixed
+// pre-drawn shapes. Caller (main.c) is responsible for pointing PAL1's
+// index1 at white before the first call (same CRAM slot/trick as the
+// map-ship blink, PLAYER_SHIP_INK_INDEX) and restoring both it and the
+// real screen once the effect ends. Call once per frame while it's active.
+void Maze_drawNoiseFrame(void);
+
 // Debug overlay (user request): one small dot per node of the room's
-// slide graph -- every cell the ship can stop in -- from the most recent
-// MAZE_ROOMGEN_TOMBO generation. Draws nothing for a MAZE_ROOMGEN_CARVE
-// room, or one that fell back to it. Call right after Maze_draw(), every
-// time Maze_draw() is called.
+// slide graph -- every cell the ship can stop in. Draws nothing for a
+// room that exhausted every generation attempt and fell back to a
+// trivial open interior. Call right after Maze_draw(), every time
+// Maze_draw() is called.
 void Maze_drawDebugGraph(void);
 
 // tx/ty in maze-cell units. Out-of-range coordinates count as wall.
 bool Maze_isWall(s16 tx, s16 ty);
-
-s16 Maze_startPixelX(void);
-s16 Maze_startPixelY(void);
 
 #endif

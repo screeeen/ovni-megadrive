@@ -51,145 +51,16 @@ static void clearLockedDoorCells(void)
 }
 
 // Offset into the current hue's 9-cell block (spec §18): 0, 9, 18 or 27,
-// set once at the top of Maze_generate()/Maze_generateRoom() and read by
-// every randomWallVariant() call for the rest of that room's carve.
+// set once at the top of Maze_generateRoom() and read by every
+// randomWallVariant() call for the rest of that room's generation.
 static u8 wallHueBase;
-
-static const s16 startX = 2;
-static const s16 startY = 2;
-static const s16 endX = MAZE_W - 1;
-static const s16 endY = MAZE_H - 1;
-
-static const s8 dirX[4] = {  0, 0, -2, 2 };
-static const s8 dirY[4] = { -2, 2,  0, 0 };
-
-// carve()'s "always descend here regardless of the walls>=2 heuristic"
-// targets. The single-room Maze_generate() below sets this to the one
-// hardcoded {endX,endY} pair (original js13k behavior, byte-for-byte);
-// Maze_generateRoom() sets it to one entry per active door instead.
-#define MAX_FORCED_TARGETS 4
-static s16 forcedTargetX[MAX_FORCED_TARGETS];
-static s16 forcedTargetY[MAX_FORCED_TARGETS];
-static u8 forcedTargetCount;
 
 static u8 randomWallVariant(void)
 {
     return wallHueBase + 1 + (random() % WALL_VARIANTS);
 }
 
-static bool isValid(s16 x, s16 y)
-{
-    return (x > 0) && (y > 0) && (x < MAZE_W - 1) && (y < MAZE_H - 1) && (grid[y][x] != PATH);
-}
-
-static bool isForcedTarget(s16 x, s16 y)
-{
-    u8 i;
-
-    for (i = 0; i < forcedTargetCount; i++)
-        if ((forcedTargetX[i] == x) && (forcedTargetY[i] == y))
-            return TRUE;
-
-    return FALSE;
-}
-
-static void shuffleDirs(s8 order[4])
-{
-    for (s16 i = 3; i > 0; i--)
-    {
-        s16 j = random() % (i + 1);
-        s8 tmp = order[i];
-
-        order[i] = order[j];
-        order[j] = tmp;
-    }
-}
-
-// Recursive-backtracker carve, ported from ovni's src/app/maps/generateMap.js
-static void carve(s16 x, s16 y)
-{
-    s8 order[4] = { 0, 1, 2, 3 };
-    s16 i;
-
-    for (s16 dx = 0; dx < 2; dx++)
-    {
-        for (s16 dy = 0; dy < 2; dy++)
-        {
-            if ((x + dx < MAZE_W) && (y + dy < MAZE_H))
-                grid[y + dy][x + dx] = PATH;
-        }
-    }
-
-    shuffleDirs(order);
-
-    for (i = 0; i < 4; i++)
-    {
-        s16 dx = dirX[(u16) order[i]];
-        s16 dy = dirY[(u16) order[i]];
-        s16 nx = x + dx;
-        s16 ny = y + dy;
-
-        if (isValid(nx, ny))
-        {
-            u16 walls = 0;
-            s16 j;
-
-            for (j = 0; j < 4; j++)
-            {
-                s16 ax = nx + dirX[j];
-                s16 ay = ny + dirY[j];
-
-                if ((ax > 0) && (ay > 0) && (ax < MAZE_W - 1) && (ay < MAZE_H - 1) && (grid[ay][ax] != PATH))
-                    walls++;
-            }
-
-            if ((walls >= 2) || isForcedTarget(nx, ny))
-                carve(nx, ny);
-        }
-    }
-}
-
-void Maze_generate(void)
-{
-    s16 x, y;
-
-    wallHueBase = 0; // single-room prototype, spec §18 doesn't apply here -- always the original violet
-
-    for (y = 0; y < MAZE_H; y++)
-        for (x = 0; x < MAZE_W; x++)
-            grid[y][x] = randomWallVariant();
-
-    forcedTargetCount = 1;
-    forcedTargetX[0] = endX;
-    forcedTargetY[0] = endY;
-
-    carve(startX, startY);
-
-    for (x = 0; x < MAZE_W; x++)
-    {
-        grid[0][x] = randomWallVariant();
-        grid[MAZE_H - 1][x] = randomWallVariant();
-    }
-    for (y = 0; y < MAZE_H; y++)
-    {
-        grid[y][0] = randomWallVariant();
-        grid[y][MAZE_W - 1] = randomWallVariant();
-    }
-
-    // Guaranteed clear path around the start/end, same hardcoded punch-through
-    // as the original generateMap.js.
-    grid[startY][startX] = PATH;
-    grid[startY - 1][startX + 1] = PATH;
-    grid[startY - 1][startX] = PATH;
-    grid[startY - 2][startX] = PATH;
-
-    grid[endY][endX - 1] = PATH;
-    grid[endY][endX - 2] = PATH;
-    grid[endY - 1][endX - 1] = PATH;
-    grid[endY - 2][endX - 1] = PATH;
-}
-
-// The room's carve seed doubles as the player's spawn point in the very
+// The room's own hub doubles as the player's spawn point in the very
 // first room of a run (spec §5) -- it's the same (col,row), just named
 // differently depending on which role is relevant at the call site.
 #define ROOM_SEED_COL MAZE_DOOR_COL
@@ -213,7 +84,8 @@ void Maze_generate(void)
 #define ANCHOR_DEPTH_W 2
 
 // Combines a direction's fixed depth with its along-border offset (spec
-// §30) into the actual (x,y) anchor point carve() targets for that door.
+// §30) into the actual (x,y) anchor point tombo aims its generation at
+// for that door.
 static void anchorForDoor(u8 dir, u8 offset, s16 *outX, s16 *outY)
 {
     switch (dir)
@@ -225,24 +97,16 @@ static void anchorForDoor(u8 dir, u8 offset, s16 *outX, s16 *outY)
     }
 }
 
-// BUG FIX (user report: a screenshot under MAZE_ROOMGEN_TOMBO showing a
-// fully sealed exit -- the arrow pointed at a door, but the border right
-// there was solid wall). Root cause: ANCHOR_DEPTH_S/E sit 2 cells short
-// of their own border's punch zone (S's punch inner row is MAZE_H-2, but
-// ANCHOR_DEPTH_S is MAZE_H-4; E's punch inner col is MAZE_W-2, but
-// ANCHOR_DEPTH_E is MAZE_W-4) while ANCHOR_DEPTH_N/W sit only 1 cell
-// short of theirs (already touching -- N's punch inner row is 1,
-// ANCHOR_DEPTH_N is 2). That extra 1-cell gap on S/E was never actually
-// guaranteed closed by anything: carve()'s original recursive
-// exploration usually paints through it anyway, as an incidental side
-// effect of its own broad wandering near the edges, but "usually" isn't
-// "always" -- it was a latent gap in the ORIGINAL carve()/bridgeToSeed()
-// pipeline too, just masked by that incidental coverage often enough
-// never to have been noticed. tombo's much more targeted, minimal-
-// footprint corridors don't get that same luck, which is why it turned
-// up reliably there. Fixes it for BOTH modes by guaranteeing the throat
-// cell explicitly instead of hoping for it -- a no-op on N/W, which
-// never had a gap to begin with.
+// BUG FIX (user report: a screenshot showing a fully sealed exit -- the
+// arrow pointed at a door, but the border right there was solid wall).
+// Root cause: ANCHOR_DEPTH_S/E sit 2 cells short of their own border's
+// punch zone (S's punch inner row is MAZE_H-2, but ANCHOR_DEPTH_S is
+// MAZE_H-4; E's punch inner col is MAZE_W-2, but ANCHOR_DEPTH_E is
+// MAZE_W-4) while ANCHOR_DEPTH_N/W sit only 1 cell short of theirs
+// (already touching -- N's punch inner row is 1, ANCHOR_DEPTH_N is 2).
+// That extra 1-cell gap on S/E is never guaranteed closed by anything
+// else the generator does, so it's guaranteed explicitly here instead --
+// a no-op on N/W, which never had a gap to begin with.
 static void connectAnchorToBorder(u8 dir, s16 ax, s16 ay)
 {
     switch (dir)
@@ -253,47 +117,13 @@ static void connectAnchorToBorder(u8 dir, s16 ax, s16 ay)
     }
 }
 
-// carve()'s "walls>=2 OR isForcedTarget" trick only visits a target if the
-// DFS's natural wandering happens to reach a cell adjacent to it first --
-// misses do happen, and more often now that door anchors (spec §30) can
-// land anywhere along their border instead of always sharing an axis with
-// (ROOM_SEED_COL, ROOM_SEED_ROW). Moves ONE axis at a time -- first
-// closes the X gap (marking every intermediate cell along that row),
-// then the Y gap (along the resulting column) -- an "L-shaped" path
-// where every consecutive pair of marked cells shares a full edge.
-//
-// BUG FIXED (spec §30bis, found by fuzzing): an earlier version moved
-// both axes in the same step whenever they both still differed --
-// producing a staircase where consecutive cells only touched at a
-// CORNER (e.g. (3,2) and (4,3)), not an edge. That was invisible before
-// this feature because every old anchor shared an axis with the seed (so
-// only one coordinate ever needed to move, degenerating to a straight
-// line either way) -- with independent per-door offsets, anchors
-// routinely differ on both axes, and the diagonal version left the
-// anchor end of the bridge completely disconnected from 4-directional
-// player movement despite every cell along it reading as PATH.
-static void bridgeToSeed(s16 x, s16 y)
-{
-    s16 cx = x, cy = y;
-
-    while (cx != ROOM_SEED_COL)
-    {
-        grid[cy][cx] = PATH;
-        if (cx < ROOM_SEED_COL) cx++;
-        else cx--;
-    }
-    while (cy != ROOM_SEED_ROW)
-    {
-        grid[cy][cx] = PATH;
-        if (cy < ROOM_SEED_ROW) cy++;
-        else cy--;
-    }
-}
-
-// Same one-axis-at-a-time L-shaped walk as bridgeToSeed above (see its own
-// doc comment for why it can't move both axes at once), but between two
-// arbitrary points instead of always ending at ROOM_SEED_COL/ROW -- used by
-// the insertion room (Maze_generateInsertionRoom) to carve nothing but the
+// One-axis-at-a-time L-shaped walk between two arbitrary points -- first
+// closes the X gap (marking every intermediate cell along that row), then
+// the Y gap (along the resulting column), so every consecutive pair of
+// marked cells shares a full edge, never just a corner (a diagonal
+// version would leave the path disconnected from 4-directional player
+// movement despite every cell along it reading as PATH). Used by the
+// insertion room (Maze_generateInsertionRoom) to carve nothing but the
 // single corridor connecting its two doors.
 static void carveLPath(s16 x0, s16 y0, s16 x1, s16 y1)
 {
@@ -310,15 +140,6 @@ static void carveLPath(s16 x0, s16 y0, s16 x1, s16 y1)
         cy += (cy < y1) ? 1 : -1;
         grid[cy][cx] = PATH;
     }
-}
-
-static void fillWallsRandom(void)
-{
-    s16 x, y;
-
-    for (y = 0; y < MAZE_H; y++)
-        for (x = 0; x < MAZE_W; x++)
-            grid[y][x] = randomWallVariant();
 }
 
 static void fillWallsFixed(u8 variant)
@@ -361,13 +182,6 @@ static void fillWallsFixed(u8 variant)
 // Then the room is only ACCEPTED after simulating real slides over the
 // finished grid (tomboValidate below); a layout that fails is re-rolled.
 // ---------------------------------------------------------------------
-
-static MazeRoomGenMode roomGenMode = MAZE_ROOMGEN_CARVE;
-
-void Maze_setRoomGenMode(MazeRoomGenMode mode)
-{
-    roomGenMode = mode;
-}
 
 // Unit cardinal steps indexed by MAZE_DIR_N/E/S/W (0/1/2/3).
 static const s8 tomboDX[4] = {  0, 1, 0, -1 };
@@ -1433,10 +1247,11 @@ static bool tomboTryCode(u16 code, s16 hubX, s16 hubY, u8 doorMask, const u8 doo
 // Full tombo pipeline for one room: attempts in code order (strict puzzle,
 // then the middle tier, then the fixed-seed no-puzzle ones -- see the tier
 // comments above), stopping at the first the validator accepts. FALSE only
-// if every one is rejected -- the caller then falls back to carve() (never
-// observed: see the exhaustive host fuzz in TOMBO_FALLBACK_ATTEMPTS's
-// comment). If cacheSlot already holds an accepted code, only that attempt
-// is replayed (same room, no search, no validation).
+// if every one is rejected -- the caller (Maze_generateRoom) then falls
+// back to a trivial open interior (never observed: see the exhaustive host
+// fuzz in TOMBO_FALLBACK_ATTEMPTS's comment). If cacheSlot already holds an
+// accepted code, only that attempt is replayed (same room, no search, no
+// validation).
 // useFixedWall/fixedWallVariant let the insertion room keep its own
 // uniform look (spec §27) under tombo too. spawnAtHub additionally
 // requires the insertion room's spawn point (the hub) to be a working
@@ -1496,38 +1311,25 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
     // Required sockets (every ACTIVE door's anchor, regardless of locked
     // state -- a currently-locked door can still unlock on a later visit
     // without this room's interior ever being regenerated, so its anchor
-    // must already be reachable either way, same as the carve/bridge
-    // path below always guaranteed).
+    // must already be reachable either way).
 
-    if ((roomGenMode == MAZE_ROOMGEN_TOMBO) &&
-        generateRoomTombo(ROOM_SEED_COL, ROOM_SEED_ROW,
-                          (u8) ((doorN ? 1 : 0) | (doorE ? 2 : 0) | (doorS ? 4 : 0) | (doorW ? 8 : 0)),
-                          doorOffsets, roomSeed, FALSE, 0, FALSE, cacheSlot))
+    // User request: "borra el codigo para generar las habitaciones en modo
+    // normal... nos vamos a enfocar en tombo" -- the old
+    // MAZE_ROOMGEN_CARVE recursive-backtracker pipeline (and the mode
+    // switch that picked between it and tombo) is gone; this always runs
+    // tombo now. Its own bounded-attempts search across 3 puzzle-difficulty
+    // tiers was verified exhaustively (host-side, every door subset x
+    // every legal offset combination) to always accept some attempt, so
+    // the trivial fallback below is a safety net that's never actually
+    // been observed to trigger, not a real second algorithm.
+    if (!generateRoomTombo(ROOM_SEED_COL, ROOM_SEED_ROW,
+                            (u8) ((doorN ? 1 : 0) | (doorE ? 2 : 0) | (doorS ? 4 : 0) | (doorW ? 8 : 0)),
+                            doorOffsets, roomSeed, FALSE, 0, FALSE, cacheSlot))
     {
-        // tombo succeeded -- grid is already fully carved, nothing more
-        // to do here before the shared border/door-punch code below.
-    }
-    else
-    {
-        // MAZE_ROOMGEN_CARVE, or tombo exhausted every attempt (spec
-        // §33/§34's fallback -- this pipeline has always shipped as
-        // reliable on its own).
-        setRandomSeed(roomSeed);
-        fillWallsRandom();
+        for (y = 1; y < (MAZE_H - 1); y++)
+            for (x = 1; x < (MAZE_W - 1); x++)
+                grid[y][x] = PATH;
         tomboResetDebugGraph(); // no explicit graph here -- Maze_drawDebugGraph() should draw nothing
-
-        forcedTargetCount = 0;
-        if (doorN) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_N]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_N]; forcedTargetCount++; }
-        if (doorE) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_E]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_E]; forcedTargetCount++; }
-        if (doorS) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_S]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_S]; forcedTargetCount++; }
-        if (doorW) { forcedTargetX[forcedTargetCount] = anchorX[MAZE_DIR_W]; forcedTargetY[forcedTargetCount] = anchorY[MAZE_DIR_W]; forcedTargetCount++; }
-
-        carve(ROOM_SEED_COL, ROOM_SEED_ROW);
-
-        if (doorN && (grid[anchorY[MAZE_DIR_N]][anchorX[MAZE_DIR_N]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_N], anchorY[MAZE_DIR_N]);
-        if (doorE && (grid[anchorY[MAZE_DIR_E]][anchorX[MAZE_DIR_E]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_E], anchorY[MAZE_DIR_E]);
-        if (doorS && (grid[anchorY[MAZE_DIR_S]][anchorX[MAZE_DIR_S]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_S], anchorY[MAZE_DIR_S]);
-        if (doorW && (grid[anchorY[MAZE_DIR_W]][anchorX[MAZE_DIR_W]] != PATH)) bridgeToSeed(anchorX[MAZE_DIR_W], anchorY[MAZE_DIR_W]);
     }
 
     // Guarantee every active door's anchor actually touches its own
@@ -1589,12 +1391,12 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
 }
 
 // Fixed dither cell used throughout the insertion room (spec §27) -- any
-// single nonzero value works exactly as far as carve()/bridgeToSeed() are
-// concerned (they only ever distinguish PATH=0 from "not yet carved"), so
-// this just picks one deliberately instead of the usual randomWallVariant()
-// mix, giving the room a uniform, deliberately distinct look. Never
-// re-hued per section (spec §18 doesn't apply -- this room lives outside
-// the grid/tree entirely, so wallHueBase is left untouched here).
+// single nonzero value works exactly as far as carveLPath is concerned (it
+// only ever distinguishes PATH=0 from "not yet carved"), so this just picks
+// one deliberately instead of the usual randomWallVariant() mix, giving the
+// room a uniform, deliberately distinct look. Never re-hued per section
+// (spec §18 doesn't apply -- this room lives outside the grid/tree
+// entirely, so wallHueBase is left untouched here).
 #define INSERT_WALL_VARIANT 1
 
 // Punches a room's 2-cell-wide door open on grid border dir, at anchor
@@ -1639,13 +1441,10 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
     // further: "el minimo path para poder entrar y salir... rellena todo lo
     // que no es path con bloques"). This room never held a real puzzle of
     // its own on purpose (spec §27's uniform look) -- no letter, always
-    // exactly these 2 doors -- so it doesn't need either roomGenMode's
-    // usual generator, just the corridor a ship actually needs: wall
-    // everywhere, a single 1-cell-wide path (same one-axis-at-a-time L
-    // shape as bridgeToSeed, see carveLPath's own doc comment) straight
-    // from one door's anchor to the other's. Unconditional regardless of
-    // MAZE_ROOMGEN_CARVE/TOMBO -- this room's shape doesn't depend on that
-    // switch.
+    // exactly these 2 doors -- so it doesn't need tombo's usual generator
+    // either, just the corridor a ship actually needs: wall everywhere, a
+    // single 1-cell-wide path (see carveLPath's own doc comment) straight
+    // from one door's anchor to the other's.
     //
     // This USED to detour through the room's center (MAZE_DOOR_COL/ROW)
     // instead of going anchor-to-anchor directly: main.c's very first
@@ -1658,7 +1457,6 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
     // moving inward from frame one) -- which means this room's own path no
     // longer needs to detour anywhere to stay correct, so it's back to the
     // simplest shape.
-    (void) roomGenMode;
     setRandomSeed(roomSeed); // no random draws happen below, but keeps this room's own stream slot occupied like every other Maze_generate*() call
     fillWallsFixed(INSERT_WALL_VARIANT);
     carveLPath(anchorX, anchorY, menuAnchorX, menuAnchorY);
@@ -1795,11 +1593,88 @@ void Maze_draw(void)
     }
 }
 
+// BUG FIX (user report: "podrías hacer que el ruido visual fuese más
+// granular? veo tiles"). The first version reused the maze's own wall-
+// dither art -- a handful of FIXED triangular shapes, randomly placed and
+// flipped -- which still reads as tiles because every one of them is a
+// coherent shape, just shuffled. Real static needs the PIXELS themselves
+// to be random, not just which pre-drawn picture sits where.
+//
+// So this owns a small dedicated block of VRAM tiles (right after
+// guidemap.c's own overlay tileset -- maze.c doesn't #include guidemap.h,
+// see Maze_generateRoom's own comment on that, so GUIDEMAP_TILE_COUNT is
+// kept as a literal here instead) and REWRITES THEIR PIXEL DATA every
+// call: each of the 8 rows of each tile is one random bit per pixel
+// (randomNoiseRow, below) -- true per-pixel black/white noise, not a
+// shape. The 40x28 screen then just picks one of those freshly-random
+// tiles per position; the picking is almost free (no flips needed either
+// -- flipping a tile that's already pure noise looks identical to not
+// flipping it), all the actual randomness is spent regenerating the small
+// tile pool instead of shuffling a big screen of fixed shapes.
+#define NOISE_TILE_COUNT 24
+#define NOISE_TILE_BASE  (TILE_USER_INDEX + MAZE_TILE_COUNT + 10 /* guidemap.h's GUIDEMAP_TILE_COUNT */)
+
+// One row (8 pixels, 4bpp) of pure noise: bit i of one random() draw
+// becomes nibble i's low bit (0 = background/index0, 1 = white/index1 --
+// see Maze_drawNoiseFrame's own doc comment on PAL1). Only 1 random() call
+// per row instead of 8, for the same 8 independent random pixels.
+static u32 randomNoiseRow(void)
+{
+    const u16 bits = (u16) random();
+    u32 row = 0;
+    u8 i;
+
+    for (i = 0; i < 8; i++)
+        if (bits & (1 << i))
+            row |= (u32) 1 << (i * 4);
+
+    return row;
+}
+
+// Rewrites every one of the NOISE_TILE_COUNT tiles' pixel data with fresh
+// random rows.
+static void regenerateNoiseTiles(void)
+{
+    static u32 tileData[NOISE_TILE_COUNT * 8]; // 8 u32 rows per 8x8 4bpp tile
+    u16 i;
+
+    for (i = 0; i < (NOISE_TILE_COUNT * 8); i++)
+        tileData[i] = randomNoiseRow();
+
+    VDP_loadTileData(tileData, NOISE_TILE_BASE, NOISE_TILE_COUNT, DMA);
+}
+
+// Full-screen static (user request: "crea una pantalla que sea ruido
+// visual, white noise. Mientras el usuario pulsa C se activa"). Drawn
+// through PAL1, not PAL0 -- the caller (main.c) is responsible for
+// pointing PAL1's index1 at white before the first call (the exact same
+// CRAM slot/trick already used for the map-ship blink, PLAYER_SHIP_INK_INDEX)
+// and restoring it, and the real screen underneath, once the effect ends.
+void Maze_drawNoiseFrame(void)
+{
+    static u16 band[40];
+    s16 x, y;
+
+    regenerateNoiseTiles();
+
+    for (y = 0; y < 28; y++)
+    {
+        for (x = 0; x < 40; x++)
+        {
+            const u16 index = (u16) (NOISE_TILE_BASE + (random() % NOISE_TILE_COUNT));
+
+            band[x] = TILE_ATTR_FULL(PAL1, 0, FALSE, FALSE, index);
+        }
+
+        VDP_setTileMapDataRect(BG_A, band, 0, y, 40, 1, 40, CPU);
+    }
+}
+
 // Debug overlay (user request: "pinta puntitos de todo el grafo de cada
 // habitacion para debugear") -- one small dot per node of the accepted
 // room's slide graph (every cell the ship can stop in). Reuses
-// VDP_drawText like every other in-room label. Draws nothing when the room
-// came from MAZE_ROOMGEN_CARVE or from tombo's carve fallback
+// VDP_drawText like every other in-room label. Draws nothing when tombo
+// exhausted every attempt and fell back to a trivial open interior
 // (slideCount is reset to 0 there). Call right after Maze_draw().
 void Maze_drawDebugGraph(void)
 {
@@ -1815,14 +1690,4 @@ bool Maze_isWall(s16 tx, s16 ty)
         return TRUE;
 
     return grid[ty][tx] != PATH;
-}
-
-s16 Maze_startPixelX(void)
-{
-    return startX * MAZE_TILE_PX;
-}
-
-s16 Maze_startPixelY(void)
-{
-    return (startY - 1) * MAZE_TILE_PX;
 }

@@ -19,62 +19,28 @@
 // collected letters, unlike leaving mid-run or winning.
 typedef enum { STATE_MENU, STATE_PLAYING, STATE_WIN, STATE_GAMEOVER } GameState;
 
-// Control scheme (spec §40-44, user request: wants to try several,
-// cycled with a debug combo -- spec §43). Five so far:
-// - CONTROL_NORMAL: each D-pad direction moves the ship that way
-//   directly -- a fresh press sets it, constant speed from then on
-//   (spec §41), not held-to-move. Stops (doesn't bounce) at a wall.
-//   The default.
+// Control scheme (spec §40-44). Cut back down to 2 (user request: "borra
+// toda la logica de esquemas de movimiento de la nave excepto borracho y
+// tumba" -- CONTROL_NORMAL/THRUST/INERTIA were exploratory debug schemes,
+// removed along with their own state/speed constants; CONTROL_DRUNK is
+// kept deliberately, earmarked for a later feature, not because it's
+// still a live alternative to TOMB):
 // - CONTROL_DRUNK: the control this game always had before the §40
 //   rework (the original js13k scheme) -- the ship auto-moves every
 //   frame in whatever direction it's currently facing, bouncing off
 //   walls, and LEFT/RIGHT only rotate that facing 90 degrees instead
 //   of moving directly. Named for how disorienting it feels compared
 //   to direct control.
-// - CONTROL_THRUST ("asteroids sin rebote"): LEFT/RIGHT rotate like
-//   DRUNK -- repeatedly while held, not just once per press (spec §44,
-//   user request: "creo que la nave tiene que rotar tipo asteroids"),
-//   so holding it down keeps spinning the facing around, closer to
-//   Asteroids' continuous turn than a single 90-degree tap -- but the
-//   ship only moves while UP is actually held (real thrust, not
-//   auto-forward), and stops instead of bouncing at a wall, like
-//   NORMAL.
-// - CONTROL_INERTIA: same direct D-pad control as NORMAL, but speed
-//   ramps up over a few frames after a fresh direction press instead
-//   of jumping straight to full speed (spec §44: widened ramp/ceiling,
-//   user request: "inercia tiene que tener más umbral de
-//   acceleracion"), for a heavier "real ship" feel.
-// - CONTROL_TOMB (spec §44, user request: "un modo que sea como tomb
-//   of the mask, se mueve hasta las paredes muy rapido"): same direct
-//   D-pad control as NORMAL, but at an extremely high sub-step speed
-//   -- a single press slides the ship almost instantly all the way to
-//   the next wall, exactly like that game's signature move.
-// Starts in NORMAL; persists across games/menu visits (not reset per
-// newGame()) since it's a player preference, not part of any one
-// run's state.
-typedef enum { CONTROL_NORMAL, CONTROL_DRUNK, CONTROL_THRUST, CONTROL_INERTIA, CONTROL_TOMB, CONTROL_MODE_COUNT } ControlMode;
-// Starts in CONTROL_TOMB now (user request, alongside defaulting
-// roomGenMode to MAZE_ROOMGEN_TOMBO below: "por defecto esta activado
-// el sistema tombo y el esquema de movimiento tomba") -- was NORMAL.
+// - CONTROL_TOMB (spec §44, user request: "un modo que sea como tomb of
+//   the mask"): the ship slides in a straight line until a wall stops
+//   it, turning only from a stop -- the only control scheme the room
+//   generator's slide-graph validator (maze.c) guarantees anything
+//   for, and now the only one the game actually ships with. The
+//   default.
+typedef enum { CONTROL_DRUNK, CONTROL_TOMB, CONTROL_MODE_COUNT } ControlMode;
 static ControlMode controlMode = CONTROL_TOMB;
 
-// Room-generation mode (user request, "tombo": graph-first backbone +
-// real movement-simulation validation, see maze.h's MazeRoomGenMode
-// doc comment) -- switcher lives in the planet-select menu, bound to
-// BUTTON_START (free there -- see the STATE_MENU input handling below),
-// unlike controlMode's combo (which needs to work mid-game too). Starts
-// in MAZE_ROOMGEN_TOMBO now (user request); persists across games/menu
-// visits, same reasoning as controlMode. main() below still has to hand
-// this to maze.c explicitly via Maze_setRoomGenMode() once at boot --
-// maze.c's own internal default is still CARVE, this variable existing
-// here is just main.c's mirror of it for the menu label/toggle.
-static MazeRoomGenMode roomGenMode = MAZE_ROOMGEN_TOMBO;
-
-// Every mode but DRUNK moves faster than its original 1px/frame (spec
-// §42/§44, user request: "que vaya más rápido en el modo normal") --
-// implemented as Player_updateRoom repeating its untouched 1px-step
-// logic this many times per visual frame (see its own doc comment for
-// why a bigger single jump isn't safe), not as a bigger jump.
+// DRUNK_MODE_SPEED: original 1px/frame speed, untouched.
 // Tomb slide speed (spec §44, revised: user request "que haya interpolación
 // en la animación, que no sea de un frame a otro sino que haya un
 // movimiento") used to be 250 -- a whole slide done inside ONE frame, the
@@ -82,10 +48,7 @@ static MazeRoomGenMode roomGenMode = MAZE_ROOMGEN_TOMBO;
 // a slide across the 320px room takes ~0.35s at top speed, visibly travelling the
 // whole way. Collision/exit/letter checks are unaffected -- every 1px
 // sub-step is still checked individually, whatever the speed.
-#define NORMAL_MODE_SPEED 3
 #define DRUNK_MODE_SPEED 1
-#define THRUST_MODE_SPEED 3
-#define INERTIA_MAX_SPEED 4
 // Ease-in (user request): a slide does not start at full speed, it
 // accelerates -- px per frame for the 1st, 2nd, 3rd... frame of a slide,
 // then holds the last value (the top speed) until the ship stops. Reaches
@@ -94,16 +57,7 @@ static MazeRoomGenMode roomGenMode = MAZE_ROOMGEN_TOMBO;
 static const u8 tombRamp[] = { 2, 4, 7, 10, 13 };
 #define TOMB_RAMP_LAST ((u8) (sizeof(tombRamp) - 1))
 
-// CONTROL_INERTIA's ramp state (spec §43/§44): speed climbs by 1 each
-// frame the ship keeps moving in the SAME direction, up to
-// INERTIA_MAX_SPEED, and snaps back down to 1 the instant a NEW
-// direction is pressed (or to 0 when nothing has ever been pressed
-// yet) -- deliberately simple (no decay on hitting a wall; a debug
-// scheme to try out, not a finished physics model).
-static u8 inertiaSpeed;
-static u8 inertiaLastDir = DIR_NONE;
-
-// CONTROL_TOMB's slide state. A slide now lasts many frames, so (as in the
+// CONTROL_TOMB's slide state. A slide lasts many frames, so (as in the
 // game it is modelled on) the ship cannot be steered while it is moving --
 // only from a stop, which is also what the room generator's slide graph
 // assumes. tombMoving = the ship changed position last frame; a press
@@ -112,15 +66,6 @@ static u8 inertiaLastDir = DIR_NONE;
 static bool tombMoving;
 static u8 tombQueuedDir = DIR_NONE;
 static u8 tombSpeedIdx; // where the current slide is on tombRamp
-
-// CONTROL_THRUST's repeat-rotate state (spec §44): holding LEFT/RIGHT
-// keeps rotating every THRUST_ROTATE_REPEAT_FRAMES frames instead of
-// just once per press, closer to Asteroids' continuous turn than a
-// single 90-degree tap (this game's collision is cardinal-direction
-// only, so true free-angle rotation isn't on the table -- this is the
-// closest fit within that constraint).
-#define THRUST_ROTATE_REPEAT_FRAMES 8
-static u16 thrustRotateTimer;
 
 typedef struct { u8 cols, rows, letters; } SizePreset;
 
@@ -271,6 +216,22 @@ static u16 slideDistance;
 // of gameState, so it works from the menu too.
 #define DEBUG_VIEW_COMBO (BUTTON_B | BUTTON_C | BUTTON_DOWN)
 static bool debugViewOn;
+
+// White-noise easter egg (user request: "crea una pantalla que sea ruido
+// visual, white noise", folded into the map button per later requests:
+// "la A es como un dispositivo mapa. Cuando el player la coge, pulsando A
+// en lugar de ver ruido ya ve el mapa" -- letter A doubles as the in-
+// fiction "map device", so BUTTON_A shows static instead of the real
+// guide map until the player has actually collected letter A
+// (Items_collectedCount()); then "el ruido es mientras esta pulsado A" --
+// unlike the real map (an on/off toggle, unchanged), the no-device static
+// is HELD, not toggled: it shows for exactly as long as A stays down and
+// vanishes the instant it's released, same as fiddling with a TV that
+// isn't picking up a signal. TRUE for the entire time mapViewOpen is TRUE
+// because of the held-static path rather than the real map toggle --
+// checked back in that same per-frame block below to know which of the
+// two mapViewOpen actually means right now.
+static bool mapShowingNoise;
 
 // Rows on BG_B the debug panel prints to (user request: "toda la
 // informacion que consideres necesaria... en tiempo real") -- left-
@@ -659,12 +620,6 @@ static void drawMenu(void)
     // free the extra vertical room the widened orbits need (menu.c).
     VDP_drawText("OVNI", 18, 3);
 
-    // Room-generation mode switcher (user request) -- row 5, clear of
-    // both the title above and the widened planet orbits below (menu.c's
-    // SUN_CENTER_Y=122px/~row15 is well past this).
-    len = sprintf(buf, "SALAS: %s (START)", (roomGenMode == MAZE_ROOMGEN_TOMBO) ? "TOMBO " : "NORMAL");
-    VDP_drawText(buf, (40 - len) / 2, 5);
-
     // Letter count shown alongside the grid size (spec §33) -- the
     // preset's real difficulty is the combination of both, not the grid
     // size alone, now that they vary independently.
@@ -688,9 +643,8 @@ static void drawMenu(void)
 #define RESET_COMBO (BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_UP)
 
 // Control-mode debug combo (spec §40, extended in §43 to cycle rather
-// than just toggle, per user request: "quiero probar varias... combo
-// por ahora"): UP+B+C together, from anywhere, advances to the NEXT
-// ControlMode (wrapping back to CONTROL_NORMAL after the last one) --
+// than just toggle): UP+B+C together, from anywhere, toggles between the
+// 2 remaining ControlModes (DRUNK/TOMB, see the enum's own doc comment) --
 // a subset of RESET_COMBO's own buttons (missing only A), checked as a
 // separate `else if` right after it in the main loop, so holding all 4
 // (A+B+C+UP) always resolves as the reset alone, never both at once.
@@ -823,9 +777,8 @@ static void drawDebugView(void)
 
     {
         static const char *const stateNames[] = { "MENU", "PLAY", "WIN ", "OVER" };
-        static const char *const roomGenNames[] = { "CARVE", "TOMBO" };
 
-        sprintf(buf, "ST:%s CM:%d RG:%s", stateNames[gameState], controlMode, roomGenNames[roomGenMode]);
+        sprintf(buf, "ST:%s CM:%d", stateNames[gameState], controlMode);
         VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW);
     }
 
@@ -908,8 +861,6 @@ int main(bool hardReset)
 
     JOY_init();
 
-    Maze_setRoomGenMode(roomGenMode); // sync maze.c's own default (CARVE) to roomGenMode's actual starting value (TOMBO)
-
     gameState = STATE_MENU;
     SPR_setVisibility(playerSprite, HIDDEN);
     SPR_setVisibility(mapShipSprite, HIDDEN);
@@ -930,8 +881,6 @@ int main(bool hardReset)
         else if (((state & DRUNK_TOGGLE_COMBO) == DRUNK_TOGGLE_COMBO) && ((prevState & DRUNK_TOGGLE_COMBO) != DRUNK_TOGGLE_COMBO))
         {
             controlMode = (ControlMode) ((controlMode + 1) % CONTROL_MODE_COUNT);
-            inertiaSpeed = 0;
-            inertiaLastDir = DIR_NONE; // fresh ramp if CONTROL_INERTIA is entered next
         }
         else if (gameState == STATE_MENU)
         {
@@ -965,12 +914,6 @@ int main(bool hardReset)
                 Menu_setVisible(FALSE);
                 gameState = STATE_PLAYING;
                 newGame();
-            }
-            if ((state & BUTTON_START) && !(prevState & BUTTON_START))
-            {
-                roomGenMode = (roomGenMode == MAZE_ROOMGEN_CARVE) ? MAZE_ROOMGEN_TOMBO : MAZE_ROOMGEN_CARVE;
-                Maze_setRoomGenMode(roomGenMode);
-                drawMenu();
             }
         }
         else if (gameState == STATE_WIN) // spec §34
@@ -1007,45 +950,11 @@ int main(bool hardReset)
                 if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
                     Player_rotateCW(&player);
             }
-            else if (controlMode == CONTROL_THRUST)
-            {
-                // Repeat-rotate while held (spec §44, user request:
-                // "creo que la nave tiene que rotar tipo asteroids") --
-                // rotates on the initial press, then again every
-                // THRUST_ROTATE_REPEAT_FRAMES frames for as long as the
-                // same button stays held, instead of needing a fresh
-                // tap each time. Cardinal-direction quantized either way
-                // (this game's collision only supports 4 directions),
-                // but holding down a turn now keeps spinning through
-                // them, closer to Asteroids' continuous rotation than a
-                // single 90-degree step per press.
-                if (state & BUTTON_LEFT)
-                {
-                    if (!(prevState & BUTTON_LEFT) || (++thrustRotateTimer >= THRUST_ROTATE_REPEAT_FRAMES))
-                    {
-                        Player_rotateCCW(&player);
-                        thrustRotateTimer = 0;
-                    }
-                }
-                else if (state & BUTTON_RIGHT)
-                {
-                    if (!(prevState & BUTTON_RIGHT) || (++thrustRotateTimer >= THRUST_ROTATE_REPEAT_FRAMES))
-                    {
-                        Player_rotateCW(&player);
-                        thrustRotateTimer = 0;
-                    }
-                }
-                else
-                {
-                    thrustRotateTimer = 0;
-                }
-            }
-            else // CONTROL_NORMAL, CONTROL_INERTIA or CONTROL_TOMB (spec
-                 // §40/§41/§44): each D-pad direction sets the ship's
-                 // facing directly -- edge-triggered (a NEW press, not
-                 // held), so once set it keeps going until a fresh press
-                 // of a DIFFERENT direction redirects it, or a wall stops
-                 // it in place (movePlayer's bounceOnWall=FALSE). No
+            else // CONTROL_TOMB (spec §44): each D-pad direction sets the
+                 // ship's facing directly -- edge-triggered (a NEW press,
+                 // not held), so once set it keeps going until a fresh
+                 // press of a DIFFERENT direction redirects it, or a wall
+                 // stops it in place (movePlayer's bounceOnWall=FALSE). No
                  // rotation. Priority order when more than one is newly
                  // pressed the same frame (no diagonals): UP, DOWN, LEFT,
                  // RIGHT.
@@ -1057,12 +966,7 @@ int main(bool hardReset)
                 else if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT)) pressed = DIR_LEFT;
                 else if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT)) pressed = DIR_RIGHT;
 
-                if (controlMode != CONTROL_TOMB)
-                {
-                    if (pressed != DIR_NONE)
-                        player.dir = pressed;
-                }
-                else if (tombMoving)
+                if (tombMoving)
                 {
                     // Mid-slide: can't steer, but remember the latest press.
                     if (pressed != DIR_NONE)
@@ -1079,57 +983,28 @@ int main(bool hardReset)
                 }
             }
 
-            switch (controlMode)
+            if (controlMode == CONTROL_DRUNK)
             {
-                case CONTROL_DRUNK:
-                    bounceMode = TRUE;
-                    moveSpeed = DRUNK_MODE_SPEED;
-                    break;
-                case CONTROL_THRUST:
-                    // "Asteroids sin rebote": only actually moves while
-                    // UP is HELD (real thrust, not auto-forward like
-                    // DRUNK) -- speed 0 makes Player_updateRoom's
-                    // sub-step loop run zero times, doing nothing at all
-                    // this frame (no movement, no exit check either --
-                    // can't drift through a door while not thrusting).
-                    bounceMode = FALSE;
-                    moveSpeed = (state & BUTTON_UP) ? THRUST_MODE_SPEED : 0;
-                    break;
-                case CONTROL_INERTIA:
-                    // Ramps speed up while continuing the same direction,
-                    // snaps down to 1 on a fresh direction press, 0 once
-                    // nothing has ever been pressed.
-                    bounceMode = FALSE;
-                    if (player.dir == DIR_NONE)
-                        inertiaSpeed = 0;
-                    else if (player.dir != inertiaLastDir)
-                        inertiaSpeed = 1;
-                    else if (inertiaSpeed < INERTIA_MAX_SPEED)
-                        inertiaSpeed++;
-                    inertiaLastDir = player.dir;
-                    moveSpeed = inertiaSpeed;
-                    break;
-                case CONTROL_TOMB:
-                    // "Tomb of the Mask" (spec §44): one press slides the
-                    // ship all the way to the next wall or door, same as
-                    // that game's signature move -- stops there (bounceMode
-                    // FALSE) rather than bouncing back.
-                    bounceMode = FALSE;
-                    // Ease-in: the first frame of a slide (the ship was at a
-                    // stop, tombMoving FALSE) is tombRamp[0]; every frame it
-                    // keeps travelling steps one further up the ramp. A stop
-                    // sends it back to the start, and a room change mid-slide
-                    // just carries on (the ship still counts as moving).
-                    if ((player.dir == DIR_NONE) || !tombMoving)
-                        tombSpeedIdx = 0;
-                    else if (tombSpeedIdx < TOMB_RAMP_LAST)
-                        tombSpeedIdx++;
-                    moveSpeed = (player.dir == DIR_NONE) ? 0 : tombRamp[tombSpeedIdx];
-                    break;
-                default: // CONTROL_NORMAL
-                    bounceMode = FALSE;
-                    moveSpeed = NORMAL_MODE_SPEED;
-                    break;
+                bounceMode = TRUE;
+                moveSpeed = DRUNK_MODE_SPEED;
+            }
+            else // CONTROL_TOMB
+            {
+                // "Tomb of the Mask" (spec §44): one press slides the
+                // ship all the way to the next wall or door, same as
+                // that game's signature move -- stops there (bounceMode
+                // FALSE) rather than bouncing back.
+                bounceMode = FALSE;
+                // Ease-in: the first frame of a slide (the ship was at a
+                // stop, tombMoving FALSE) is tombRamp[0]; every frame it
+                // keeps travelling steps one further up the ramp. A stop
+                // sends it back to the start, and a room change mid-slide
+                // just carries on (the ship still counts as moving).
+                if ((player.dir == DIR_NONE) || !tombMoving)
+                    tombSpeedIdx = 0;
+                else if (tombSpeedIdx < TOMB_RAMP_LAST)
+                    tombSpeedIdx++;
+                moveSpeed = (player.dir == DIR_NONE) ? 0 : tombRamp[tombSpeedIdx];
             }
 
             // Mirrors for the debug view (drawDebugView) -- bounceMode/
@@ -1144,10 +1019,58 @@ int main(bool hardReset)
             // grid.
             // Map toggle (user request: moved from C to A -- A is free
             // during gameplay, unlike C's original slot which nothing else
-            // uses either, just felt less reachable mid-play).
-            if (!inInsertRoom && (state & BUTTON_A) && !(prevState & BUTTON_A))
+            // uses either, just felt less reachable mid-play). Two
+            // completely different interactions depending on whether
+            // letter A -- the in-fiction "map device" -- has actually
+            // been collected yet (Items_collectedCount(), see
+            // mapShowingNoise's own doc comment):
+            //  - not collected: HELD, not toggled (user request: "el
+            //    ruido es mientras esta pulsado A") -- static shows for
+            //    exactly as long as A stays down, same as fiddling with a
+            //    TV that isn't picking up a signal, and vanishes the
+            //    instant it's released, no on/off memory.
+            //  - collected: the original press-to-open/press-to-close
+            //    toggle, unchanged.
+            if (!inInsertRoom && !(Items_collectedCount() > 0))
+            {
+                if (state & BUTTON_A)
+                {
+                    if (!mapViewOpen)
+                    {
+                        // No map device yet -- static instead of a real
+                        // map, same PAL1-white-ink/PSG-noise-channel pair
+                        // Maze_drawNoiseFrame's own doc comment describes.
+                        // Nothing marks the current room (there's no
+                        // mapShip blink for a screen with no signal), so
+                        // just hide everything room-related.
+                        SPR_setVisibility(playerSprite, HIDDEN);
+                        SPR_setVisibility(mapShipSprite, HIDDEN);
+                        SPR_setVisibility(enemySprite, HIDDEN);
+                        PAL_setColor(PLAYER_SHIP_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF));
+                        PSG_setNoise(PSG_NOISE_TYPE_WHITE, PSG_NOISE_FREQ_CLOCK2);
+                        PSG_setEnvelope(3, 0); // 0 = loudest (PSG_ENVELOPE_MAX)
+                        mapViewOpen = TRUE;
+                        mapShowingNoise = TRUE;
+                    }
+
+                    Maze_drawNoiseFrame(); // fresh static every frame it's held
+                }
+                else if (mapViewOpen) // was showing noise, just released
+                {
+                    PSG_setEnvelope(3, PSG_ENVELOPE_MIN); // silence
+                    PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR);
+                    Maze_draw();
+                    Items_drawInRoom(currentCol, currentRow);
+                    SPR_setVisibility(playerSprite, VISIBLE);
+                    SPR_setVisibility(enemySprite, Enemy_blinkVisible(&enemy) ? VISIBLE : HIDDEN);
+                    mapViewOpen = FALSE;
+                    mapShowingNoise = FALSE;
+                }
+            }
+            else if (!inInsertRoom && (state & BUTTON_A) && !(prevState & BUTTON_A))
             {
                 mapViewOpen = !mapViewOpen;
+                mapShowingNoise = FALSE;
 
                 if (mapViewOpen)
                 {
@@ -1170,7 +1093,6 @@ int main(bool hardReset)
                     SPR_setVisibility(mapShipSprite, VISIBLE);
                     SPR_setVisibility(enemySprite, HIDDEN); // frozen with everything else while the map is open
                     mapBlinkTimer = 0;
-
                 }
                 else
                 {
@@ -1192,15 +1114,21 @@ int main(bool hardReset)
 
             if (mapViewOpen)
             {
-                // Blink mapShip on the map (spec §23/§24): flip
-                // visibility every MAP_BLINK_FRAMES frames while the
-                // overlay stays open. Position doesn't need re-setting
-                // each frame -- it's static while viewing the map.
-                mapBlinkTimer++;
-                if (mapBlinkTimer >= MAP_BLINK_FRAMES)
+                // Static (mapShowingNoise) already got a fresh
+                // Maze_drawNoiseFrame() call above, for as long as A stays
+                // held -- nothing more to do for it here. The real map's
+                // own mapShip blink (spec §23/§24): flip visibility every
+                // MAP_BLINK_FRAMES frames while the overlay stays open.
+                // Position doesn't need re-setting each frame -- it's
+                // static while viewing the map.
+                if (!mapShowingNoise)
                 {
-                    mapBlinkTimer = 0;
-                    SPR_setVisibility(mapShipSprite, SPR_isVisible(mapShipSprite, FALSE) ? HIDDEN : VISIBLE);
+                    mapBlinkTimer++;
+                    if (mapBlinkTimer >= MAP_BLINK_FRAMES)
+                    {
+                        mapBlinkTimer = 0;
+                        SPR_setVisibility(mapShipSprite, SPR_isVisible(mapShipSprite, FALSE) ? HIDDEN : VISIBLE);
+                    }
                 }
             }
             else if (inInsertRoom)
@@ -1503,17 +1431,16 @@ int main(bool hardReset)
             VDP_setTextPriority(0);
         }
 
-        // Control-mode readout (spec §40, 5 modes since §44), top-left
-        // corner on BG_B, same row/plane/priority trick as the FPS
-        // counter above -- lets the player (and, since this session
-        // can't take screenshots, the developer) confirm at a glance
-        // which mode is active from anywhere, menu included. Every
-        // label is padded to 8 chars (BORRACHO's own length) so cycling
-        // modes can't leave a stray trailing character from a previous,
-        // longer label.
+        // Control-mode readout (spec §40), top-left corner on BG_B, same
+        // row/plane/priority trick as the FPS counter above -- lets the
+        // player (and, since this session can't take screenshots, the
+        // developer) confirm at a glance which mode is active from
+        // anywhere, menu included. Every label is padded to 8 chars
+        // (BORRACHO's own length) so cycling modes can't leave a stray
+        // trailing character from a previous, longer label.
         {
             static const char *const modeLabels[CONTROL_MODE_COUNT] = {
-                "NORMAL  ", "BORRACHO", "IMPULSO ", "INERCIA ", "TUMBA   "
+                "BORRACHO", "TUMBA   "
             };
 
             VDP_setTextPriority(1);
