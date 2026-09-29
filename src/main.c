@@ -223,14 +223,17 @@ static bool debugViewOn;
 // en lugar de ver ruido ya ve el mapa" -- letter A doubles as the in-
 // fiction "map device", so BUTTON_A shows static instead of the real
 // guide map until the player has actually collected letter A
-// (Items_collectedCount()); then "el ruido es mientras esta pulsado A" --
-// unlike the real map (an on/off toggle, unchanged), the no-device static
-// is HELD, not toggled: it shows for exactly as long as A stays down and
-// vanishes the instant it's released, same as fiddling with a TV that
-// isn't picking up a signal. TRUE for the entire time mapViewOpen is TRUE
-// because of the held-static path rather than the real map toggle --
-// checked back in that same per-frame block below to know which of the
-// two mapViewOpen actually means right now.
+// (Items_collectedCount()). Both halves are HELD, not toggled (user
+// request, first for the static -- "el ruido es mientras esta pulsado A"
+// -- then extended to the real map too -- "el mapa tampoco se activa, si
+// no que se muestra mientras A esta pulsado"): whichever one is showing,
+// it lasts for exactly as long as A stays down and vanishes the instant
+// it's released, no on/off memory either way -- the static like fiddling
+// with a TV with no signal, the map like holding a viewfinder up to your
+// eye. TRUE for the entire time mapViewOpen is TRUE because of the static
+// path rather than the real map -- checked back in that same per-frame
+// block below to know which of the two mapViewOpen actually means right
+// now.
 static bool mapShowingNoise;
 
 // Rows on BG_B the debug panel prints to (user request: "toda la
@@ -1017,98 +1020,91 @@ int main(bool hardReset)
             // §27) -- currentCol/currentRow aren't set yet, and there's
             // nothing to preview before the player has even entered the
             // grid.
-            // Map toggle (user request: moved from C to A -- A is free
-            // during gameplay, unlike C's original slot which nothing else
-            // uses either, just felt less reachable mid-play). Two
-            // completely different interactions depending on whether
-            // letter A -- the in-fiction "map device" -- has actually
-            // been collected yet (Items_collectedCount(), see
-            // mapShowingNoise's own doc comment):
-            //  - not collected: HELD, not toggled (user request: "el
-            //    ruido es mientras esta pulsado A") -- static shows for
-            //    exactly as long as A stays down, same as fiddling with a
-            //    TV that isn't picking up a signal, and vanishes the
-            //    instant it's released, no on/off memory.
-            //  - collected: the original press-to-open/press-to-close
-            //    toggle, unchanged.
-            if (!inInsertRoom && !(Items_collectedCount() > 0))
+            // HELD, not toggled (user request: "el mapa tampoco se activa,
+            // si no que se muestra mientras A esta pulsado" -- the real
+            // map used to be a press-to-open/press-to-close toggle; now it
+            // follows the exact same "shows for as long as A stays down"
+            // rule the static noise already had, so both halves of this
+            // device behave identically). Which of the two actually shows
+            // depends on whether letter A -- the in-fiction "map device"
+            // -- has been collected yet (Items_collectedCount(), see
+            // mapShowingNoise's own doc comment): static beforehand, the
+            // real overlay afterwards. Either way it vanishes the instant
+            // A is released, no on/off memory.
+            if (!inInsertRoom)
             {
                 if (state & BUTTON_A)
                 {
                     if (!mapViewOpen)
                     {
-                        // No map device yet -- static instead of a real
-                        // map, same PAL1-white-ink/PSG-noise-channel pair
-                        // Maze_drawNoiseFrame's own doc comment describes.
-                        // Nothing marks the current room (there's no
-                        // mapShip blink for a screen with no signal), so
-                        // just hide everything room-related.
-                        SPR_setVisibility(playerSprite, HIDDEN);
-                        SPR_setVisibility(mapShipSprite, HIDDEN);
-                        SPR_setVisibility(enemySprite, HIDDEN);
-                        PAL_setColor(PLAYER_SHIP_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF));
-                        PSG_setNoise(PSG_NOISE_TYPE_WHITE, PSG_NOISE_FREQ_CLOCK2);
-                        PSG_setEnvelope(3, 0); // 0 = loudest (PSG_ENVELOPE_MAX)
                         mapViewOpen = TRUE;
-                        mapShowingNoise = TRUE;
+                        mapShowingNoise = !(Items_collectedCount() > 0);
+
+                        if (mapShowingNoise)
+                        {
+                            // No map device yet -- static instead of a
+                            // real map, same PAL1-white-ink/PSG-noise-
+                            // channel pair Maze_drawNoiseFrame's own doc
+                            // comment describes. Nothing marks the current
+                            // room (there's no mapShip blink for a screen
+                            // with no signal), so just hide everything
+                            // room-related.
+                            SPR_setVisibility(playerSprite, HIDDEN);
+                            SPR_setVisibility(mapShipSprite, HIDDEN);
+                            SPR_setVisibility(enemySprite, HIDDEN);
+                            PAL_setColor(PLAYER_SHIP_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF));
+                            PSG_setNoise(PSG_NOISE_TYPE_WHITE, PSG_NOISE_FREQ_CLOCK2);
+                            PSG_setEnvelope(3, 0); // 0 = loudest (PSG_ENVELOPE_MAX)
+                        }
+                        else
+                        {
+                            u16 mx, my;
+
+                            GuideMap_drawOverlay();
+
+                            // mapShip (spec §24, 8x8, same size as a map
+                            // letter) marks the current room instead of
+                            // playerSprite (which hides) -- centered in
+                            // the 24x16px room box: (24-8)/2=8
+                            // horizontally, (16-8)/2=4 vertically. White
+                            // and blinking (spec §23): flip the shared ink
+                            // color, start visible, reset the blink timer
+                            // -- the per-frame toggle below picks it up
+                            // from here.
+                            GuideMap_roomBoxPixelPos(currentCol, currentRow, &mx, &my);
+                            SPR_setPosition(mapShipSprite, mx + 8, my + 4);
+                            PAL_setColor(PLAYER_SHIP_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF));
+                            SPR_setVisibility(playerSprite, HIDDEN);
+                            SPR_setVisibility(mapShipSprite, VISIBLE);
+                            SPR_setVisibility(enemySprite, HIDDEN); // frozen with everything else while the map is open
+                            mapBlinkTimer = 0;
+                        }
                     }
 
-                    Maze_drawNoiseFrame(); // fresh static every frame it's held
+                    if (mapShowingNoise)
+                        Maze_drawNoiseFrame(); // fresh static every frame it's held
                 }
-                else if (mapViewOpen) // was showing noise, just released
+                else if (mapViewOpen) // A just released -- close whichever was open
                 {
-                    PSG_setEnvelope(3, PSG_ENVELOPE_MIN); // silence
-                    PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR);
-                    Maze_draw();
-                    Items_drawInRoom(currentCol, currentRow);
-                    SPR_setVisibility(playerSprite, VISIBLE);
-                    SPR_setVisibility(enemySprite, Enemy_blinkVisible(&enemy) ? VISIBLE : HIDDEN);
-                    mapViewOpen = FALSE;
-                    mapShowingNoise = FALSE;
-                }
-            }
-            else if (!inInsertRoom && (state & BUTTON_A) && !(prevState & BUTTON_A))
-            {
-                mapViewOpen = !mapViewOpen;
-                mapShowingNoise = FALSE;
+                    if (mapShowingNoise)
+                        PSG_setEnvelope(3, PSG_ENVELOPE_MIN); // silence
 
-                if (mapViewOpen)
-                {
-                    u16 mx, my;
-
-                    GuideMap_drawOverlay();
-
-                    // mapShip (spec §24, 8x8, same size as a map letter)
-                    // marks the current room instead of playerSprite
-                    // (which hides) -- centered in
-                    // the 24x16px room box: (24-8)/2=8 horizontally,
-                    // (16-8)/2=4 vertically. White and blinking (spec
-                    // §23): flip the shared ink color, start visible,
-                    // reset the blink timer -- the per-frame toggle below
-                    // picks it up from here.
-                    GuideMap_roomBoxPixelPos(currentCol, currentRow, &mx, &my);
-                    SPR_setPosition(mapShipSprite, mx + 8, my + 4);
-                    PAL_setColor(PLAYER_SHIP_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF));
-                    SPR_setVisibility(playerSprite, HIDDEN);
-                    SPR_setVisibility(mapShipSprite, VISIBLE);
-                    SPR_setVisibility(enemySprite, HIDDEN); // frozen with everything else while the map is open
-                    mapBlinkTimer = 0;
-                }
-                else
-                {
                     Maze_draw();
                     // Maze_draw() repaints every tile of BG_A, wiping the
-                    // room's letter along with the map overlay -- put it
-                    // back (the map is never open in the insertion room,
-                    // so currentCol/currentRow are always valid here).
+                    // room's letter along with the map overlay (or the
+                    // static) -- put it back (the map is never open in the
+                    // insertion room, so currentCol/currentRow are always
+                    // valid here).
                     Items_drawInRoom(currentCol, currentRow);
                     // Restores the ship's normal color (spec §23) -- only
-                    // the one word that PLAYER_SHIP_INK_INDEX touched,
-                    // the transparent index0 was never changed.
+                    // the one word that PLAYER_SHIP_INK_INDEX touched, the
+                    // transparent index0 was never changed.
                     PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR);
                     SPR_setVisibility(playerSprite, VISIBLE);
                     SPR_setVisibility(mapShipSprite, HIDDEN);
                     SPR_setVisibility(enemySprite, Enemy_blinkVisible(&enemy) ? VISIBLE : HIDDEN);
+                    mapViewOpen = FALSE;
+                    mapShowingNoise = FALSE;
                 }
             }
 

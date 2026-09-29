@@ -139,14 +139,18 @@ u8 GuideMap_doorOffset(u8 col, u8 row, u8 dir);
 // while playing. Valid once GuideMap_generate() returns.
 u8 GuideMap_roomSection(u8 col, u8 row);
 
-// Recomputes which rooms are locked (spec §16): a room is locked if every
-// path from the start to it crosses at least one door whose entire far
-// side (the whole branch beyond it, not just the immediate room) contains
-// no item at or before the one currently due (Items_isUnlocked). Call once
-// after GuideMap_generate()+Items_reset() (newGame) and again every time
-// Items_tryCollect() returns TRUE -- locking only ever loosens as
-// nextIndex advances, never the reverse, so a room already visited can
-// never become locked later. Read back via GuideMap_isRoomLocked().
+// Recomputes which rooms are locked (spec §16, user request: "quiero que
+// las compuertas cerradas esten unicamente en la misma habitacion donde
+// esta la letra"): only a not-yet-due letter's own dead-end room
+// (Items_isUnlocked) is ever locked -- never an intermediate room on the
+// way to it, and never the whole branch beyond some earlier door the way
+// this used to work. Since an item room's single door IS the room, this
+// also directly answers "is this door sealed" for whichever ordinary room
+// borders it. Call once after GuideMap_generate()+Items_reset() (newGame)
+// and again every time Items_tryCollect() returns TRUE -- locking only
+// ever loosens as nextIndex advances, never the reverse, so a room already
+// visited can never become locked later. Read back via
+// GuideMap_isRoomLocked().
 void GuideMap_recomputeLocks(void);
 
 bool GuideMap_isRoomLocked(u8 col, u8 row);

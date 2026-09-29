@@ -25,10 +25,9 @@ static u16 frontierCount;
 static u8 dist[MAX_MAP_ROWS][MAX_MAP_COLS];
 
 // roomLocked[][] from the most recent GuideMap_recomputeLocks() call (spec
-// §16). containsUnlockedScratch[][] is scratch space live only during that
-// call's own recursion, not meant to be read afterwards.
+// §16): TRUE only for the (at most itemCount) rooms that are a not-yet-due
+// letter's own dead end.
 static bool roomLocked[MAX_MAP_ROWS][MAX_MAP_COLS];
-static bool containsUnlockedScratch[MAX_MAP_ROWS][MAX_MAP_COLS];
 
 // roomSection[][] from the most recent computeSections() call, part of
 // GuideMap_generate() (spec §18) -- which of the (up to MAZE_SECTION_COUNT)
@@ -310,101 +309,45 @@ static u8 bfsFromStart(void)
     return bfsFromRoom(startCol, startRow);
 }
 
-static s16 itemIndexAtRoom(u8 col, u8 row)
-{
-    u8 i;
-
-    for (i = 0; i < itemCount; i++)
-        if ((itemCol[i] == col) && (itemRow[i] == row))
-            return i;
-
-    return -1;
-}
-
-static bool roomHasUnlockedItem(u8 col, u8 row)
-{
-    const s16 i = itemIndexAtRoom(col, row);
-
-    return (i >= 0) && Items_isUnlocked((u8) i);
-}
-
-// Post-order over the room tree (spec §16): does the subtree rooted at
-// (col,row) -- excluding the edge back to parentDir, -1 for the root call
-// -- contain a room whose item is at or before the one currently due?
-// Fills containsUnlockedScratch[][] for every room visited along the way,
-// which markLocked() below then reads top-down.
-static bool computeContainsUnlocked(u8 col, u8 row, s8 parentDir)
-{
-    bool result = roomHasUnlockedItem(col, row);
-    u8 d;
-
-    for (d = 0; d < 4; d++)
-    {
-        s16 ncol, nrow;
-
-        if (((s8) d) == parentDir) continue;
-        if (!GuideMap_hasDoor(col, row, d)) continue;
-
-        neighborInDir(col, row, d, &ncol, &nrow);
-        if (computeContainsUnlocked((u8) ncol, (u8) nrow, (s8) opposite(d)))
-            result = TRUE;
-    }
-
-    containsUnlockedScratch[row][col] = result;
-    return result;
-}
-
-// Marks every room in the subtree rooted at (col,row) as locked -- called
-// once the parent's side has already decided nothing due lives past this
-// edge, so the whole branch behind it seals (not just the door itself).
-static void markSubtreeLocked(u8 col, u8 row, s8 parentDir)
-{
-    u8 d;
-
-    roomLocked[row][col] = TRUE;
-
-    for (d = 0; d < 4; d++)
-    {
-        s16 ncol, nrow;
-
-        if (((s8) d) == parentDir) continue;
-        if (!GuideMap_hasDoor(col, row, d)) continue;
-
-        neighborInDir(col, row, d, &ncol, &nrow);
-        markSubtreeLocked((u8) ncol, (u8) nrow, (s8) opposite(d));
-    }
-}
-
-// Pre-order from the start (already known accessible): for each child
-// edge, either its subtree contains something due (recurse, stays open)
-// or it doesn't (markSubtreeLocked seals the whole branch) -- this finds
-// exactly the edge closest to the start where a locked branch begins.
-static void markLocked(u8 col, u8 row, s8 parentDir)
-{
-    u8 d;
-
-    roomLocked[row][col] = FALSE;
-
-    for (d = 0; d < 4; d++)
-    {
-        s16 ncol, nrow;
-
-        if (((s8) d) == parentDir) continue;
-        if (!GuideMap_hasDoor(col, row, d)) continue;
-
-        neighborInDir(col, row, d, &ncol, &nrow);
-
-        if (containsUnlockedScratch[nrow][ncol])
-            markLocked((u8) ncol, (u8) nrow, (s8) opposite(d));
-        else
-            markSubtreeLocked((u8) ncol, (u8) nrow, (s8) opposite(d));
-    }
-}
-
+// Every room is open except a not-yet-due item's own dead-end room (spec
+// §16 rewrite -- user request: "quiero que las compuertas cerradas esten
+// unicamente en la misma habitacion donde esta la letra... cuando la nave
+// coge la letra, la puerta se abre"). The old scheme locked the whole
+// SUBTREE from wherever it first branched off the already-open part of
+// the tree, which could be several rooms above the letter it was actually
+// protecting -- leaving perfectly ordinary, item-less rooms in between
+// sealed off for no reason visible to the player. selectItemRooms() only
+// ever places an item at a genuine dead end (doorCountAt == 1, never the
+// start room, but see the guard below for its one documented fallback
+// exception), so that room's single door IS the room -- sealing that one
+// edge is exactly equivalent to sealing the letter's own room, nothing
+// behind it left to protect. Every other room (including every
+// intermediate room on the way to a not-yet-due letter) is therefore
+// always open, whether or not that letter has been reached yet.
 void GuideMap_recomputeLocks(void)
 {
-    computeContainsUnlocked(startCol, startRow, -1);
-    markLocked(startCol, startRow, -1);
+    s16 col, row;
+    u8 n;
+
+    for (row = 0; row < mapRows; row++)
+        for (col = 0; col < mapCols; col++)
+            roomLocked[row][col] = FALSE;
+
+    for (n = 0; n < itemCount; n++)
+    {
+        // The start room can never be locked (the player begins there,
+        // and unlike a real item dead end it can have up to 4 through
+        // doors serving the rest of the map) -- selectItemRooms()'s one
+        // documented exception, using it as a fallback item room on a map
+        // too small for enough real dead ends, must leave it just as open
+        // as it always was rather than trying to seal a room with no
+        // single door to seal.
+        if ((itemCol[n] == startCol) && (itemRow[n] == startRow))
+            continue;
+
+        if (!Items_isUnlocked(n))
+            roomLocked[itemRow[n]][itemCol[n]] = TRUE;
+    }
 }
 
 bool GuideMap_isRoomLocked(u8 col, u8 row)
@@ -673,15 +616,15 @@ static void markPathToFirstItem(void)
 typedef struct { u8 col, row, dir; } LinkCandidate;
 
 // Picks (insertLinkCol,insertLinkRow,insertLinkDir) among rooms on the
-// path to letter A (spec §29bis, bug fix over §27/§29): unlocking is
-// monotonic (spec §16) and only that path is guaranteed unlocked from
-// the very start of the game, so a room picked off that path could be
-// sealed the instant the game begins (its own edge back toward start
-// gets walled off whenever its actual tree parent isn't itself on that
-// path) -- stranding the player in a loop between the insertion room and
-// one sealed room, unable to ever reach the rest of the map. Restricting
-// to the path-to-A guarantees the link room (and the way back out of it)
-// stays reachable forever, since nothing on that path is ever locked.
+// path to letter A (spec §29bis, originally a bug fix over §27/§29 for the
+// old whole-subtree lock scheme, back when any room off that specific path
+// could have been sealed from the very start of the game). Since spec §16's
+// rewrite (GuideMap_recomputeLocks' own comment) only a not-yet-due
+// letter's own dead end is ever locked, so in practice any ordinary room
+// would do just as well now -- kept restricted to the path-to-A anyway,
+// both because it's still always guaranteed safe and because it keeps the
+// insertion room's link close to the player's first objective rather than
+// picking anywhere at random on the grid.
 //
 // A candidate is (room-on-path, side) where that side has no real tree
 // door yet. Two tiers, tried in order:
@@ -974,6 +917,31 @@ void GuideMap_drawOverlay(void)
             putTile(MAP_TILE_CORNER_BL, PAL0, rx,     ry + 1);
             putTile(MAP_TILE_EDGE_B,    PAL0, rx + 1, ry + 1);
             putTile(MAP_TILE_CORNER_BR, PAL0, rx + 2, ry + 1);
+
+            // The one corridor stub connecting this item's dead end back to
+            // its (real, tree) parent -- user request: "muestra las
+            // puertas en el mapa, con sus estados". This is the only door
+            // that can ever be locked now (spec §16 rewrite), so it's the
+            // one door worth calling out with its own color here: PAL3
+            // (yellow, same convention as maze.c's locked-door walls and
+            // Maze_setTextColorLocked's letter) while still locked, plain
+            // PAL0 once unlocked -- which can happen before the player has
+            // actually walked in and set cell.visited, so this stub is the
+            // only way to see that a just-freed letter is now reachable
+            // without first finding it on foot. A dead-end room has
+            // exactly one door (selectItemRooms), so exactly one of these
+            // four fires -- except the documented start-room fallback,
+            // which is always already visited and never reaches this
+            // branch at all (see the `continue` above).
+            {
+                const u16 corridorPal = GuideMap_isRoomLocked(icol, irow) ? PAL3 : PAL0;
+                const MapCell icell = guideMap[irow][icol];
+
+                if (icell.doorE) putTile(MAP_TILE_CORRIDOR_H, corridorPal, rx + ROOM_BOX_W, ry);
+                if (icell.doorW) putTile(MAP_TILE_CORRIDOR_H, corridorPal, rx - 1, ry);
+                if (icell.doorS) putTile(MAP_TILE_CORRIDOR_V, corridorPal, rx + (ROOM_BOX_W / 2), ry + ROOM_BOX_H);
+                if (icell.doorN) putTile(MAP_TILE_CORRIDOR_V, corridorPal, rx + (ROOM_BOX_W / 2), ry - 1);
+            }
 
             s[0] = (char) ('A' + n);
             s[1] = '\0';
