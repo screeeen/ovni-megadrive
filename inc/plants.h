@@ -12,12 +12,15 @@
 // Unlike items.h's letters, there's no order/locking -- just a running
 // counter, and plants never gate anything.
 //
-// Placed in ONE line per room, several consecutive cells along a
-// straight run of open (non-wall) interior -- approximated with
-// Maze_isWall() scans rather than literally maze.c's internal tombo
-// slide-graph (that graph's nodes aren't exposed outside maze.c, see
-// Maze_drawDebugGraph's own doc comment), which in practice is the same
-// walkable area since tombo rooms are mostly open interior (maze.h).
+// Placed in ONE line per room, several consecutive cells along a real
+// EDGE of maze.c's own tombo slide graph (user request, tightened after
+// an earlier "any straight run of open cells" approximation missed that
+// an open-but-unreachable pocket could still pass that check: "las
+// lineas de plantas tienen que estar en una linea del grafo accesible
+// para la nave. Todas las plantas son susceptibles de ser cogidas.") --
+// maze.c's Maze_slideNodeCount/Pos/Edge expose that same graph
+// Maze_drawDebugGraph() already draws dots for, so every cell a plant
+// sits on is guaranteed to be one the ship's own slide actually crosses.
 
 // Clears every room's collected-plant state and the running total. Call
 // once per newGame(), alongside Items_reset().

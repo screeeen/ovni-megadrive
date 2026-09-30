@@ -52,13 +52,14 @@ static u32 rngNext(void)
     return x;
 }
 
-// Also excludes the room's own hub cell (the item letter's fixed spot,
-// maze.h's MAZE_DOOR_COL/ROW) so a plant glyph never overlaps it -- same
-// reasoning a real wall would block the line.
-static bool cellBlocked(s16 x, s16 y)
-{
-    return Maze_isWall(x, y) || ((x == MAZE_DOOR_COL) && (y == MAZE_DOOR_ROW));
-}
+// Unit cardinal steps, same 0=N/1=E/2=S/3=W convention Maze_slideEdge
+// documents (doorOffsets[4]'s convention throughout this codebase).
+static const s8 dirDX[4] = {  0, 1, 0, -1 };
+static const s8 dirDY[4] = { -1, 0, 1,  0 };
+
+// Generous upper bound on how many cells a single straight slide can ever
+// cross in either axis (the larger of MAZE_W/MAZE_H).
+#define PLANTS_MAX_EDGE_LEN 20
 
 void Plants_reset(void)
 {
@@ -74,39 +75,88 @@ void Plants_reset(void)
 
 void Plants_spawnForRoom(u16 roomSeed)
 {
+    const u16 nodeCount = Maze_slideNodeCount();
     u8 attempt;
 
     seedRng(roomSeed);
     curCount = 0;
 
+    // nodeCount == 0: no slide-graph guarantee for this room (the rare
+    // carve fallback -- maze.h's own doc comment says it's never actually
+    // been observed to trigger -- or the insertion room, which never
+    // builds one). No plants there rather than an unverifiable guess.
+    if (nodeCount == 0)
+        return;
+
     for (attempt = 0; (attempt < PLANTS_SPAWN_ATTEMPTS) && (curCount == 0); attempt++)
     {
-        const bool horiz = (rngNext() & 1) != 0;
-        const s16 dir = (rngNext() & 1) ? 1 : -1;
-        const s16 ax = (s16) (1 + (rngNext() % (MAZE_W - 2)));
-        const s16 ay = (s16) (1 + (rngNext() % (MAZE_H - 2)));
-        s16 x = ax, y = ay;
-        s16 cx[PLANTS_MAX_PER_ROOM], cy[PLANTS_MAX_PER_ROOM];
-        u8 found = 0;
+        const u16 node = (u16) (rngNext() % nodeCount);
+        const u8 dir = (u8) (rngNext() % 4);
+        const s16 target = Maze_slideEdge(node, dir);
+        s16 srcX, srcY, dstX, dstY;
+        s16 px[PLANTS_MAX_EDGE_LEN], py[PLANTS_MAX_EDGE_LEN];
+        u8 pathLen = 0;
+        bool hitHub = FALSE;
+        s16 x, y;
 
-        while ((found < PLANTS_MAX_PER_ROOM) && !cellBlocked(x, y))
+        if (target < 0)
+            continue; // that slide runs into a wall right away, or straight out a door -- no edge there
+
+        Maze_slideNodePos(node, &srcX, &srcY);
+        Maze_slideNodePos((u16) target, &dstX, &dstY);
+
+        // Walks every cell strictly between the two nodes, same straight
+        // run the ship's own slide crosses making this exact move (spec
+        // §48, user request: "las lineas de plantas tienen que estar en
+        // una linea del grafo accesible para la nave") -- these two nodes
+        // are both real, reachable stops (tomboValidate/tomboRebuildGraph
+        // already guarantee that), so every cell strictly between them,
+        // on the one straight line connecting them, is unavoidably
+        // crossed by that slide too.
+        //
+        // BUG FIX (found by host fuzzing with locked doors): the slide
+        // graph is always built as if every door in doorMask were
+        // unlocked (maze.h's own doc comment on Maze_generateRoom's
+        // lockedN/E/S/W: "the validator always treats doors as
+        // unlocked; sealing only closes the border"), and that sealing
+        // -- overwriting a locked door's threshold cells with a wall
+        // tile -- happens AFTER the graph is built, so a node/edge can
+        // sit exactly on what is, by the time this function runs, really
+        // a wall. Maze_isWall() below (checked on the FINAL, already-
+        // sealed grid) is the actual source of truth; the graph only
+        // picks realistic CANDIDATE lines to try, same spirit as
+        // enemy.c's own findOpenInLane re-checking Maze_isWall per cell
+        // instead of trusting a precomputed lane blindly.
+        x = (s16) (srcX + dirDX[dir]);
+        y = (s16) (srcY + dirDY[dir]);
+        while ((pathLen < PLANTS_MAX_EDGE_LEN) && !Maze_isWall(x, y))
         {
-            cx[found] = x;
-            cy[found] = y;
-            found++;
-            if (horiz) x = (s16) (x + dir);
-            else       y = (s16) (y + dir);
+            px[pathLen] = x;
+            py[pathLen] = y;
+            if ((x == MAZE_DOOR_COL) && (y == MAZE_DOOR_ROW))
+                hitHub = TRUE; // don't overlap the item letter's own fixed spot
+            pathLen++;
+
+            if ((x == dstX) && (y == dstY))
+                break;
+
+            x = (s16) (x + dirDX[dir]);
+            y = (s16) (y + dirDY[dir]);
         }
 
-        if (found >= PLANTS_LINE_MIN)
+        if (hitHub || (pathLen < PLANTS_LINE_MIN))
+            continue;
+
         {
-            const u8 len = (u8) (PLANTS_LINE_MIN + (rngNext() % ((found - PLANTS_LINE_MIN) + 1)));
+            const u8 cap = (pathLen < PLANTS_MAX_PER_ROOM) ? pathLen : PLANTS_MAX_PER_ROOM;
+            const u8 len = (u8) (PLANTS_LINE_MIN + (rngNext() % ((cap - PLANTS_LINE_MIN) + 1)));
+            const u8 startAt = (u8) (rngNext() % (pathLen - len + 1));
             u8 i;
 
             for (i = 0; i < len; i++)
             {
-                curCol[i] = (u8) cx[i];
-                curRow[i] = (u8) cy[i];
+                curCol[i] = (u8) px[startAt + i];
+                curRow[i] = (u8) py[startAt + i];
             }
             curCount = len;
         }

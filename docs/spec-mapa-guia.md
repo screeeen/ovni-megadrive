@@ -3264,17 +3264,28 @@ del grafo. Se colocan en grupos de varias en línea."
   real, ver la nota de "no verificado interactivamente" del §13/§18).
   Cabe en 1 celda de maze (16x16px = 2x2 tiles VDP), igual que la letra
   del ítem.
-- **Una línea de 3 a 5 plantas por habitación, dentro del "path del
-  grafo"**: aproximado como una tirada recta de celdas abiertas
-  (`Maze_isWall()` en `FALSE`), no literalmente el grafo interno de
-  deslizamiento de `maze.c` (sus nodos no se exponen fuera de
-  `maze.c` — ver el comentario de `Maze_drawDebugGraph`) — en la
-  práctica es la misma zona transitable, porque las salas TUMBA son
-  ~90% interior abierto (`maze.h`). `Plants_spawnForRoom` prueba hasta
-  24 combinaciones aleatorias de (ancla, eje, dirección); la primera que
-  encuentra ≥3 celdas abiertas consecutivas (sin pisar la celda del hub
-  donde vive la letra) fija una línea de longitud aleatoria entre 3 y lo
-  disponible (tope 5).
+- **Una línea de 3 a 5 plantas por habitación, sobre una ARISTA real del
+  grafo de deslizamiento**: primera versión (ver nota de corrección más
+  abajo) aproximaba "el path del grafo" como cualquier tirada recta de
+  celdas simplemente no-muro; el usuario corrigió explícitamente: "las
+  lineas de plantas tienen que estar en una linea del grafo accesible
+  para la nave. Todas las plantas son susceptibles de ser cogidas." Un
+  hueco abierto puede no ser alcanzable bajo movimiento TUMBA (deslizar
+  hasta el primer muro) aunque ninguna de sus celdas sea, individualmente,
+  un muro — exactamente el fallo que `maze.c`'s propio grafo de
+  deslizamiento (`slideNodeX/Y`/`slideTo`, el que ya usa
+  `tomboValidate`/`Maze_drawDebugGraph`) existe para prevenir. Se
+  exportaron 3 accesores nuevos en `maze.h`: `Maze_slideNodeCount()`,
+  `Maze_slideNodePos(index, &x, &y)`, `Maze_slideEdge(index, dir)` — la
+  misma vista de solo lectura que ya usa el overlay de depuración de
+  puntitos. `Plants_spawnForRoom` prueba hasta 24 combinaciones aleatorias
+  de (nodo, dirección); si `Maze_slideEdge` devuelve una arista real,
+  camina cada celda entre el nodo origen y el destino (la misma tirada
+  recta que la nave cruza deslizando ese movimiento exacto), la corta si
+  se topa con la celda del hub (no pisar la letra) o con un muro real
+  (ver nota de corrección de puertas bloqueadas más abajo), y si el tramo
+  resultante tiene ≥3 celdas fija una línea de longitud aleatoria entre 3
+  y lo disponible (tope 5) en una ventana aleatoria de ese tramo.
 - **PRNG propio, no el `random()` compartido**: igual que `enemy.c`
   evita el stream compartido, `plants.c` siembra su propio xorshift32
   desde `roomSeed` — necesario aquí porque la caché de intento aceptado
@@ -3310,29 +3321,83 @@ del grafo. Se colocan en grupos de varias en línea."
   contador y máscara vuelven a cero en cada partida nueva; no forma parte
   de `presetSave` (a diferencia de las letras), así que no sobrevive a
   salir de un planeta a medias.
-- **Verificación (arnés host, no comiteado, vive en el scratchpad de la
-  sesión)**: `plants.c` real compilado tal cual contra un `genesis.h` de
-  stub (con `VDP_drawText`/`VDP_drawTextBG`/`VDP_setTextPriority` como
-  no-ops) y un `Maze_isWall` sintético (densidad de muro interior
-  0%/10%/30%, hub siempre abierto) — caja blanca: el test lee
-  directamente `curCol`/`curRow`/`curCount`/`collectedMask` de
-  `plants.c`. 6000 salas simuladas (3 densidades × 2000 semillas): 0
-  fuera de rango, 0 plantas sobre un muro, 0 plantas sobre la celda del
-  hub, 0 líneas no rectas/no contiguas, 0 longitudes fuera de
-  `[PLANTS_LINE_MIN, PLANTS_MAX_PER_ROOM]`, 0 discrepancias de
-  determinismo (mismo `roomSeed` + mismo grid ⇒ línea byte-idéntica en
-  una segunda llamada), 0 fallos de recogida/doble-recogida. Solo 3/6000
-  salas salieron sin ninguna línea válida (las 24 combinaciones
-  aleatorias fallaron, esperable en la densidad de muro 30% — caso
-  degenerado aceptado, la sala simplemente no tiene planta ese caso,
-  igual de tolerable que el fallback sin garantía de `maze.c` para el
-  carve general). `make clean && make` sin errores ni warnings nuevos.
-  Arranque comprobado en BlastEm (mismo procedimiento que las secciones
-  anteriores): log limpio, proceso estable, cerrado sin crash.
+- **Verificación end-to-end (arnés host, no comiteado, vive en el
+  scratchpad de la sesión)**: a diferencia del primer arnés de esta
+  sección (sintético, solo probaba `plants.c` aislado), este compila el
+  `maze.c` REAL (generador tombo + validador completos) junto al
+  `plants.c` real contra un `genesis.h`/`resources.h` de stub —
+  `Maze_generateRoom`/`Maze_clearRoomCache` se llaman de verdad, así que
+  el grafo de deslizamiento que `plants.c` consulta es el genuino, no uno
+  simulado. 2400 salas (las 16 combinaciones de puertas × 150 semillas,
+  ⅓ de los intentos con un subconjunto aleatorio de puertas activas
+  bloqueadas): 0 fuera de rango, 0 plantas sobre un muro real, 0 sobre el
+  hub, 0 líneas no rectas, 0 longitudes fuera de rango, **0 pérdidas del
+  grafo al revisitar la sala, 0 discrepancias entre la línea de la
+  primera visita y la de una revisita** (ver los dos fallos reales
+  encontrados y corregidos abajo — antes de corregirlos, esta última
+  métrica fallaba en 427/640 salas). `make clean && make` sin errores ni
+  warnings nuevos (más allá de un warning preexistente y ajeno de
+  `rom_header.c`, regenerado por el propio Makefile). Arranque
+  reverificado en BlastEm: log limpio, proceso estable, cerrado sin
+  crash.
+- **Bug real encontrado y corregido en `maze.c` (no en `plants.c`):
+  el grafo de deslizamiento se perdía al revisitar cualquier sala**.
+  `generateRoomTombo`'s caché de intento aceptado (spec §5: "re-entering
+  a room replays only that attempt, without repeating the search")
+  saltaba el validador entero en una revisita (`tomboTryOnce(...,
+  validate=FALSE)`) y simplemente llamaba a `tomboResetDebugGraph()`
+  (pone `slideCount=0`) antes de devolver éxito — dejando
+  `Maze_drawDebugGraph()` (y ahora los accesores de plantas) sin grafo
+  alguno en **cualquier segunda visita o posterior** a cualquier sala, no
+  solo en el caso de fallback documentado. Invisible hasta ahora porque
+  el overlay de puntitos de depuración nunca se verificó interactivamente
+  ni se comparó entre visitas. Arreglo: nueva `tomboRebuildGraph()`
+  (`maze.c`, junto a `slideEntryCell`) — reconstruye solo el grafo
+  (nodos de entrada + `slideExpand`), sin repetir ninguna de las
+  comprobaciones de aceptación del validador (mucho más barato que la
+  búsqueda completa que la caché ya evita repetir) — llamada desde la
+  rama de repetición de `tomboTryOnce`.
+- **Segundo bug real, en el propio `tomboValidate`: el grafo final podía
+  ser el de un subconjunto de puertas bloqueadas, no el de la sala
+  completa**. Encontrado por el primer bug fix de arriba: tras
+  corregirlo, la línea de plantas seguía sin coincidir entre la primera
+  visita (búsqueda fresca) y una revisita (repetición). Causa raíz:
+  `tomboValidate` construye el grafo completo, decide que la sala es
+  válida... y **entonces** llama a `tomboAllSubsetsSafe`, que prueba cada
+  subconjunto de puertas parcialmente bloqueadas llamando a
+  `tomboValidateSubset` — y **cada una de esas llamadas reconstruye su
+  propio grafo (más pequeño, con puertas selladas) sobre las mismas
+  variables globales** (`slideNodeX/Y`/`slideTo`/`slideCount`). Cuando
+  `tomboValidate` por fin devuelve `TRUE`, esas variables globales
+  contenían el grafo del ÚLTIMO subconjunto probado, no el de la sala
+  real con todas sus puertas abiertas — un bug preexistente e invisible
+  para `Maze_drawDebugGraph()` en cualquier sala con 2+ puertas, por la
+  misma razón que el anterior (nunca verificado interactivamente).
+  Arreglo: `tomboValidate` llama a `tomboRebuildGraph()` una vez más,
+  justo antes de su propio `return TRUE`, para restaurar el grafo
+  completo antes de devolver el control.
+- **Bug real de plantas sobre puertas bloqueadas, encontrado por el mismo
+  arnés al añadir bloqueos aleatorios**: el grafo de deslizamiento se
+  construye siempre TRATANDO TODAS LAS PUERTAS COMO ABIERTAS (`maze.h`:
+  "the validator always treats doors as unlocked; sealing only closes
+  the border") — el sellado real de una puerta bloqueada (repintar sus
+  celdas de umbral como muro) ocurre DESPUÉS, en `Maze_generateRoom`, ya
+  fuera de `generateRoomTombo`. Una arista del grafo podía por tanto
+  terminar justo en el umbral de una puerta que, por el momento en que
+  `Plants_spawnForRoom` corre (después de que `Maze_generateRoom`
+  termina del todo), ya es un muro real. Arreglo en `plants.c`: el bucle
+  que camina la arista vuelve a comprobar `Maze_isWall()` en tiempo real
+  por cada celda (en vez de confiar ciegamente en la arista precomputada)
+  — mismo espíritu que `enemy.c`'s `findOpenInLane`, que tampoco confía
+  en un carril precalculado sin revisarlo. Verificado con el mismo arnés,
+  bloqueando puertas aleatoriamente en ⅓ de las 2400 salas: 0 plantas
+  sobre un muro.
 - **No verificado interactivamente**: igual que el resto de esta spec, no
   se pudo jugar una partida real en esta sesión — pendiente confirmar en
   BlastEm que las líneas de `'*'` se ven en las salas, que pasar por
   encima las recoge y sube el contador del HUD, que desaparecen tras
-  recogerse y no reaparecen al volver a entrar a la sala, y que
-  sobreviven a abrir/cerrar el mapa guía y a recoger la letra de esa
-  misma sala sin desaparecer ni duplicarse.
+  recogerse y no reaparecen al volver a entrar a la sala, que sobreviven
+  a abrir/cerrar el mapa guía y a recoger la letra de esa misma sala sin
+  desaparecer ni duplicarse, y que el overlay de depuración de puntitos
+  (`Maze_drawDebugGraph`, spec §11) ahora se ve en salas de 2+ puertas y
+  revisitadas, donde antes de esta sesión no debía verse nada.

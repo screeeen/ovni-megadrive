@@ -194,4 +194,18 @@ void Maze_drawDebugGraph(void);
 // tx/ty in maze-cell units. Out-of-range coordinates count as wall.
 bool Maze_isWall(s16 tx, s16 ty);
 
+// Read-only view of the just-generated room's own slide graph (same data
+// Maze_drawDebugGraph() draws dots for) -- spec §48, so a caller (plants.c)
+// can place things only on cells the ship can actually reach by sliding.
+// 0 nodes means no graph guarantee for this room (the carve fallback, or
+// the insertion room, which never builds one).
+u16 Maze_slideNodeCount(void);
+// Cell position (maze units) of slide-graph node `index` (0..Maze_slideNodeCount()-1).
+void Maze_slideNodePos(u16 index, s16 *outX, s16 *outY);
+// The node reached by sliding from node `index` in direction `dir` (0=N,
+// 1=E, 2=S, 3=W, same convention as doorOffsets[4] above), or a negative
+// value if that slide doesn't lead to another node. Every cell strictly
+// between the two nodes' positions is itself a real, reachable slide cell.
+s16 Maze_slideEdge(u16 index, u8 dir);
+
 #endif

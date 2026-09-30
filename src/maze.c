@@ -211,8 +211,14 @@ static void tomboMark(s16 x, s16 y)
 // Debug graph (user request: "pinta puntitos de todo el grafo de cada
 // habitacion para debugear") is the validator's own slide graph of the
 // accepted room -- every stop the ship can reach (see slideNodeX/Y below).
+// Also spec §48's Maze_slideNodeCount/Pos/Edge accessors, which plants.c
+// uses to only place plants on cells the ship can actually reach.
 // tomboResetDebugGraph() empties it, for rooms that never ran the
-// validator (carve fallback) so Maze_drawDebugGraph() draws nothing.
+// validator (carve fallback) so Maze_drawDebugGraph() draws nothing --
+// and momentarily, mid-search, between one rejected attempt and the
+// next. It stays correctly populated on a replayed cache-hit attempt
+// too (tomboTryOnce calls tomboRebuildGraph() for that case, spec §48 --
+// see its own doc comment for why that had to be added).
 static void tomboResetDebugGraph(void);
 
 // ---- slide graph (the validator) ------------------------------------
@@ -359,6 +365,79 @@ static void slideEntryCell(u8 dir, u8 offset, s16 *x, s16 *y)
         case MAZE_DIR_S: *x = offset;        *y = MAZE_H - 2;   break;
         default:         *x = 1;             *y = offset;       break; // MAZE_DIR_W
     }
+}
+
+// Rebuilds just the slide graph (entry nodes for doorMask's active doors,
+// plus the hub if spawnAtHub, then full expansion via slideExpand) for
+// the CURRENT grid, without running any of tomboValidate's acceptance
+// checks (canExit/reach/puzzle-depth/subset safety). Two call sites,
+// spec §48:
+//   - tomboValidate itself, right before it returns TRUE, to restore the
+//     FULL-doorMask graph into slideNodeX/Y/slideTo/slideCount. BUG FIX
+//     (found chasing spec §48's own plant-placement determinism, but
+//     pre-existing and equally real for Maze_drawDebugGraph before this):
+//     tomboValidate's own last step, tomboAllSubsetsSafe, calls
+//     tomboValidateSubset once per locked-door subset, and EACH of those
+//     calls slideGraphReset() and rebuilds its OWN (smaller/differently-
+//     sealed) graph into the very same globals -- so by the time
+//     tomboValidate returns TRUE, the globals reflected whichever subset
+//     was checked LAST, not the accepted room's real, full graph. Never
+//     visible before spec §48 needed the graph to stay stable and
+//     reproducible across multiple reads of the SAME accepted room.
+//   - tomboTryOnce's OTHER path, replaying an already-accepted attempt
+//     from the cache (spec §5's "re-entering a room replays only that
+//     attempt, without repeating the search"). That replay used to call
+//     tomboResetDebugGraph() and stop, leaving the graph empty (TRUE for
+//     Maze_drawDebugGraph's own old doc comment about the carve
+//     fallback, but ALSO true, undocumented, for every ordinary second-
+//     or-later visit to any tombo room -- harmless for that debug-only
+//     dot overlay, but spec §48's plants.c accessors need the real graph
+//     on every visit, not just the room's first).
+// Kept as its own small duplicate of tomboValidate's entry-registration
+// block rather than threaded through as a shared helper returning
+// entryNode[]/entryHub[], so tomboValidate's own already-fuzzed
+// acceptance-check logic (docs/spec-mapa-guia.md's extensive host
+// verification of it) stays completely untouched -- this only ever runs
+// AFTER (or instead of) that logic, never inside it. Silently skips a
+// door whose entry cell turns out blocked instead of failing -- can't
+// happen for a genuinely accepted attempt (tomboValidate already
+// required every active door's entry to be open), but this has no one to
+// report a failure to, so it degrades instead of crashing.
+static void tomboRebuildGraph(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, bool spawnAtHub)
+{
+    u8 e;
+
+    slideGraphReset();
+
+    for (e = 0; e < 4; e++)
+    {
+        s16 ix, iy, ex, ey;
+        bool hubHit;
+        s16 r;
+
+        if (!(doorMask & (1 << e)))
+            continue;
+
+        slideEntryCell(e, doorOff[e], &ix, &iy);
+        if (Maze_isWall(ix, iy))
+            continue;
+
+        hubHit = (ix == hubX) && (iy == hubY);
+        r = slideRun(ix, iy, tomboOpposite(e), hubX, hubY, &hubHit, &ex, &ey);
+        if (r == SLIDE_EXIT)
+            continue;
+        if (r == SLIDE_NO_MOVE)
+        {
+            ex = ix; ey = iy;
+        }
+
+        slideNode(ex, ey, hubX, hubY);
+    }
+
+    if (spawnAtHub && !Maze_isWall(hubX, hubY))
+        slideNode(hubX, hubY, hubX, hubY);
+
+    slideExpand(hubX, hubY);
 }
 
 // Puzzle depth (user request: the player should have to WORK OUT how to
@@ -836,9 +915,15 @@ static bool tomboValidate(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, 
     // Doors also need to survive every OTHER door in this room being
     // locked, one at a time or in combination -- see tomboAllSubsetsSafe's
     // own doc comment for why this can't just be inferred from the
-    // fully-open case above.
+    // fully-open case above. tomboAllSubsetsSafe's own subset checks
+    // leave the slide-graph globals holding whichever subset it checked
+    // LAST, not the full-doorMask graph this function itself already
+    // built above -- tomboRebuildGraph() below restores that (spec §48's
+    // own doc comment on tomboRebuildGraph explains why this matters).
     if (!tomboAllSubsetsSafe(doorMask, doorOff, hubX, hubY))
         return FALSE;
+
+    tomboRebuildGraph(doorMask, doorOff, hubX, hubY, spawnAtHub);
 
     return TRUE;
 }
@@ -1181,9 +1266,14 @@ static bool tomboTryOnce(u16 seed, s16 hubX, s16 hubY, u8 doorMask, const u8 doo
 
     // A replayed, previously accepted attempt (see generateRoomTombo) skips
     // the validator: it is the bulk of an attempt's cost, and the layout is
-    // already known to pass. The debug graph stays empty then.
+    // already known to pass. tomboRebuildGraph() still rebuilds the slide
+    // graph itself (its own doc comment on why) -- much cheaper than the
+    // full validator, so this doesn't undermine skipping that.
     if (!validate)
+    {
+        tomboRebuildGraph(doorMask, doorOff, hubX, hubY, spawnAtHub);
         return TRUE;
+    }
 
 #if TOMBO_EARLY_REJECT
     if (tomboTooEasy(doorMask, doorOff, hubX, hubY, spawnAtHub))
@@ -1675,13 +1765,49 @@ void Maze_drawNoiseFrame(void)
 // room's slide graph (every cell the ship can stop in). Reuses
 // VDP_drawText like every other in-room label. Draws nothing when tombo
 // exhausted every attempt and fell back to a trivial open interior
-// (slideCount is reset to 0 there). Call right after Maze_draw().
+// (slideCount is reset to 0 there, and never rebuilt for it -- no graph
+// guarantee to show). Call right after Maze_draw().
 void Maze_drawDebugGraph(void)
 {
     u16 i;
 
     for (i = 0; i < slideCount; i++)
         VDP_drawText(".", (u16) (slideNodeX[i] * 2), (u16) (slideNodeY[i] * 2));
+}
+
+// Spec §48: plants.c's own read-only view of the same slide graph
+// Maze_drawDebugGraph() draws dots for, so it can only ever place a
+// plant on a cell the ship can actually reach by sliding -- user
+// request: "las lineas de plantas tienen que estar en una linea del
+// grafo accesible para la nave. Todas las plantas son susceptibles de
+// ser cogidas." 0 nodes (Maze_slideNodeCount() == 0) means no graph
+// guarantee for this room (the carve fallback, or the insertion room,
+// which never builds one) -- plants.c treats that as "no plants here."
+u16 Maze_slideNodeCount(void)
+{
+    return slideCount;
+}
+
+// Cell position (maze units) of slide-graph node `index`
+// (0..Maze_slideNodeCount()-1).
+void Maze_slideNodePos(u16 index, s16 *outX, s16 *outY)
+{
+    *outX = slideNodeX[index];
+    *outY = slideNodeY[index];
+}
+
+// The node reached by sliding from node `index` in direction `dir`
+// (0=N, 1=E, 2=S, 3=W -- same numeric convention doorOffsets[4] and
+// every other direction array in this codebase already use), or a
+// negative value if that slide doesn't lead to another node (a wall
+// right there, or it runs out through a door). Every cell strictly
+// between the two nodes' positions is itself a real cell the ship
+// slides across making this exact move -- reachable by construction,
+// the same guarantee tomboValidate already required of every node in
+// this graph.
+s16 Maze_slideEdge(u16 index, u8 dir)
+{
+    return slideTo[index][dir];
 }
 
 bool Maze_isWall(s16 tx, s16 ty)
