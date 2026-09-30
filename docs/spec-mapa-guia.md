@@ -3140,3 +3140,78 @@ pasar para salir, sin forma de esquivarlo.
   del test es sintético, no el generador real. Pendiente confirmar en
   BlastEm que, jugando, el enemigo nunca aparece plantado en el hueco de
   una puerta real.
+
+## 47. Bombo estilo Roland 909 al golpear un muro, activable desde el menú
+
+Petición del usuario: "cada vez que la nave golpee un muro suene un
+bombo como si fuese un bombo de una roland 909. No tiene que ser el
+mismo bombo, haz pequeñas variaciones casi imperceptibles" — activable
+desde el menú, por defecto apagado.
+
+- **Driver de sonido**: `Z80_DRIVER_PCM4` (`snd/pcm/snd_pcm4.h` de SGDK)
+  en vez de XGM — este juego no tiene música de fondo, así que basta el
+  driver PCM más simple capaz de mezclar la propia muestra sobre sí misma
+  (rebotar rápido en una esquina puede disparar el golpe varias veces
+  seguidas antes de que termine el anterior); 4 canales de 8 bits a 16kHz
+  fijos, suficiente para un efecto corto. `Sfx_loadDriver()`
+  (`SND_PCM4_loadDriver`) se llama una vez al arrancar, junto a
+  `Maze_loadGraphics()`/`Menu_loadGraphics()`.
+- **Nuevo módulo `sfx.c`/`sfx.h`**: `Sfx_setEnabled`/`Sfx_isEnabled`
+  (arranca en `FALSE`, "por defecto apagado") y `Sfx_playWallHit()` — no
+  hace nada si está desactivado; si no, llama a `SND_PCM4_startPlay` con
+  una de 4 muestras precocinadas, en `SOUND_PCM_CH_AUTO`.
+- **4 variantes del bombo, no una sola (`res/sound/kick0..3.wav`)**: el
+  driver PCM4 no tiene control de tono en tiempo real, así que la
+  variación "casi imperceptible" pedida se hornea de antemano en 4 WAV
+  distintos en vez de una sola muestra reproducida siempre igual.
+  Sintetizados con un script Python de un solo uso (no comiteado, la
+  receta queda documentada aquí para reproducirla): un oscilador seno
+  cuyo tono baratona rápido de ~220Hz a ~58Hz en ~35ms (la envolvente de
+  tono que da el "thump" descendente característico de un bombo de caja
+  de ritmos), amplitud con decaimiento exponencial de ~190ms, más un
+  breve chasquido de ruido filtrado en los primeros ~24ms para el
+  ataque. Cada variante tira los mismos parámetros con un jitter de
+  ±4-10% (semillas fijas 1000-1003 para reproducibilidad) — se oyen
+  como "el mismo bombo" pero nunca son bit-idénticos. 300ms, 16-bit mono
+  a 16000Hz de entrada; `rescomp` (`WAV ... PCM4`) los reconvierte a 8
+  bits para el driver — `res/resources.res` los declara como
+  `kick0`..`kick3`.
+- **Selección de variante**: no se consume el stream compartido de
+  `random()` (reservado para la generación determinista de mapa/sala/
+  ítems/enemigo, misma razón que ya documenta `shakeFramesLeft` del
+  screenshake) — en su lugar un contador `nextVariant` rota 0→1→2→3→0...
+  en `sfx.c`, lo que además garantiza que nunca suena la misma variante
+  dos veces seguidas (algo que una elección aleatoria real no
+  garantizaría).
+- **Disparo en el impacto, no en el enemigo**: `Sfx_playWallHit()` se
+  llama junto a `triggerShake(slideDistance)` en los dos sitios de
+  `main.c` que detectan un golpe contra un MURO (el bucle de sub-pasos de
+  una sala normal y la sala de inserción), dentro del mismo
+  `if (!wasWallBlocked)` edge-triggered que ya usa el screenshake — solo
+  el primer contacto del golpe, no cada frame que la nave siga
+  encajada. El tercer sitio que llama a `triggerShake` (colisión con el
+  enemigo) se deja intacto, sin bombo — el usuario pidió específicamente
+  "golpee un muro", no un enemigo.
+- **Activación desde el menú**: fila de texto nueva en `drawMenu()`, fila
+  1 (la única libre por encima del título — las órbitas de `menu.c`
+  ocupan casi todas las filas 4-23), "C: BOMBO AL GOLPEAR MURO ON/OFF".
+  `BUTTON_C` solo (libre en `STATE_MENU`: únicamente tiene significado
+  dentro de los combos de 3 botones `RESET_COMBO`/`DEBUG_VIEW_COMBO`/
+  `DRUNK_TOGGLE_COMBO`, que una pulsación aislada de C nunca satisface)
+  alterna `Sfx_setEnabled(!Sfx_isEnabled())` y redibuja el menú. El
+  estado vive en `sfx.c` (no en `main.c`), persiste durante toda la
+  sesión (mismo ciclo de vida que `controlMode`) — no se resetea al
+  volver al menú ni al empezar una partida nueva.
+- **Verificación**: `make clean && make` sin errores ni warnings nuevos
+  (ROM de 262144 bytes, subió de 128KB a 256KB de sizealign por las 4
+  muestras nuevas, ~19KB en total). Arranque comprobado en BlastEm
+  (`blastem -n out/release/rom.bin`, 3s en segundo plano): log limpio,
+  "Initialized 2 channel audio..." sin errores de carga del driver Z80,
+  proceso estable, cerrado manualmente sin crash.
+- **No verificado interactivamente**: igual que el resto de esta spec,
+  no se pudo automatizar pulsar C para activar el sonido ni chocar contra
+  un muro para escuchar el resultado real en esta sesión (misma
+  limitación de accesibilidad de macOS ya documentada en otras
+  secciones). Pendiente confirmar a oído en BlastEm: que suena a bombo
+  de 909, que las 4 variantes se perciben como "casi la misma", que el
+  toggle del menú realmente lo activa/desactiva y que arranca apagado.

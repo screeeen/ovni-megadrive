@@ -3,6 +3,10 @@
 #ifndef _RES_RESOURCES_H_
 #define _RES_RESOURCES_H_
 
+extern const u8 kick0[4864];
+extern const u8 kick1[4864];
+extern const u8 kick2[4864];
+extern const u8 kick3[4864];
 extern const TileSet mazeTiles;
 extern const TileSet mapTiles;
 extern const SpriteDefinition playerShip;

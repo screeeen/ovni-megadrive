@@ -8,3 +8,8 @@ SPRITE planetMedium "sprite/planet_medium.png" 2 2 BEST
 SPRITE planetLarge "sprite/planet_large.png" 3 3 BEST
 SPRITE cursorArrow "sprite/cursor_arrow.png" 1 1 BEST
 SPRITE menuSun "sprite/menu_sun.png" 4 4 BEST
+
+WAV kick0 "sound/kick0.wav" PCM4
+WAV kick1 "sound/kick1.wav" PCM4
+WAV kick2 "sound/kick2.wav" PCM4
+WAV kick3 "sound/kick3.wav" PCM4

@@ -6,6 +6,7 @@
 #include "items.h"
 #include "menu.h"
 #include "enemy.h"
+#include "sfx.h"
 
 // STATE_WIN (spec §34): reached by walking back out through the
 // insertion link once every letter is collected -- a static screen
@@ -608,7 +609,7 @@ static void newGame(void)
 // don't need to be redrawn here at all, only the text.
 static void drawMenu(void)
 {
-    char buf[24];
+    char buf[32]; // widened from 24 for the sound-toggle hint line (spec §47), longest of this function's sprintfs
     int len;
     const u8 letters = sizePresets[sizePresetIndex].letters;
     // Saved progress for the selected planet (spec §35) -- 0 only when
@@ -618,6 +619,13 @@ static void drawMenu(void)
     const u8 collected = presetSave[sizePresetIndex].hasSave ? presetSave[sizePresetIndex].collectedCount : 0;
 
     VDP_clearPlane(BG_A, TRUE);
+
+    // Sound toggle hint (spec §47, user request: "activable desde el
+    // menu y por defecto apagado") -- row 1, the only free row above the
+    // title (menu.c's orbits occupy most of rows 4-23), so it never
+    // collides with a planet sprite at any point in its orbit.
+    len = sprintf(buf, "C: BOMBO AL GOLPEAR MURO %s", Sfx_isEnabled() ? "ON" : "OFF");
+    VDP_drawText(buf, (40 - len) / 2, 1);
 
     // Title moved up and the bottom text pushed down (spec §32quat) to
     // free the extra vertical room the widened orbits need (menu.c).
@@ -848,6 +856,7 @@ int main(bool hardReset)
     Maze_loadGraphics();
     GuideMap_loadGraphics();
     Menu_loadGraphics(); // spec §31 -- must come after both above, its tiles stack right after theirs in VRAM
+    Sfx_loadDriver(); // spec §47 -- PCM4 driver for the wall-hit kick, independent of VRAM layout
 
     PAL_setPalette(PAL1, playerShip.palette->data, DMA);
     PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR);
@@ -917,6 +926,16 @@ int main(bool hardReset)
                 Menu_setVisible(FALSE);
                 gameState = STATE_PLAYING;
                 newGame();
+            }
+            // Sound toggle (spec §47, user request: "activable desde el
+            // menu y por defecto apagado") -- BUTTON_C alone, free in the
+            // menu (only ever meaningful as part of the 3-button
+            // RESET_COMBO/DEBUG_VIEW_COMBO/DRUNK_TOGGLE_COMBO chords
+            // above, which a lone C press never satisfies).
+            if ((state & BUTTON_C) && !(prevState & BUTTON_C))
+            {
+                Sfx_setEnabled(!Sfx_isEnabled());
+                drawMenu();
             }
         }
         else if (gameState == STATE_WIN) // spec §34
@@ -1167,7 +1186,10 @@ int main(bool hardReset)
                     if (blockedNow)
                     {
                         if (!wasWallBlocked)
+                        {
                             triggerShake(slideDistance);
+                            Sfx_playWallHit(); // spec §47, user request -- only the first contact, same edge as the shake
+                        }
                         slideDistance = 0;
                     }
                     else
@@ -1292,7 +1314,10 @@ int main(bool hardReset)
                         if (blockedNow)
                         {
                             if (!wasWallBlocked)
+                            {
                                 triggerShake(slideDistance);
+                                Sfx_playWallHit(); // spec §47, user request -- only the first contact, same edge as the shake
+                            }
                             slideDistance = 0; // this slide just ended, next one starts fresh
                         }
                         else if ((player.x != preShakeX) || (player.y != preShakeY))
