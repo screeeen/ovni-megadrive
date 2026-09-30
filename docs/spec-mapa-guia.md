@@ -3215,3 +3215,30 @@ desde el menú, por defecto apagado.
   secciones). Pendiente confirmar a oído en BlastEm: que suena a bombo
   de 909, que las 4 variantes se perciben como "casi la misma", que el
   toggle del menú realmente lo activa/desactiva y que arranca apagado.
+- **Volumen proporcional a la distancia (feedback del usuario: "como el
+  screenshake, el volumen que sea proporcional a la distancia")**:
+  `Sfx_playWallHit` gana un parámetro `distance` — el mismo
+  `slideDistance` que ya se le pasa a `triggerShake` en ambos sitios de
+  `main.c`, sin dato nuevo que llevar la cuenta — y calcula un volumen
+  con la misma forma que la amplitud del shake: un suelo
+  (`SFX_VOL_MIN=6`, para que hasta el toque más corto se oiga) más
+  `distance/SFX_VOL_DIST_PER_LEVEL` (16px por nivel), tope en
+  `SFX_VOL_MAX=15` (el máximo real del driver PCM4, a diferencia del
+  shake que se limita a 3 de sus propios niveles posibles por ser un
+  efecto visual que debe quedarse sutil — aquí no hay esa razón para
+  contenerlo).
+  - **Cambio de canal, forzado por esto**: `SND_PCM4_startPlay` con
+    `SOUND_PCM_CH_AUTO` no devuelve qué canal acabó usando, y fijar el
+    volumen *de ese hit* necesita saber su canal
+    (`SND_PCM4_setVolume(channel, vol)`, llamado antes del propio
+    `startPlay` para que la primera muestra mezclada ya use el nivel
+    nuevo). Se sustituyó el auto-scan por el mismo contador rotatorio
+    `nextVariant` (0→1→2→3) que ya elegía la variante de muestra — con 4
+    variantes y 4 canales PCM4, reutilizar el mismo índice para ambos
+    sigue repartiendo golpes rápidos (rebotar en una esquina) entre
+    canales distintos, igual que hacía el auto-scan de canal libre.
+  - `make clean && make` sin errores ni warnings nuevos; arranque
+    reverificado en BlastEm (mismo procedimiento que arriba), proceso
+    estable. Igual de pendiente que el resto de esta sección: confirmar
+    a oído que un golpe tras un deslizamiento largo suena más fuerte que
+    un toque corto.

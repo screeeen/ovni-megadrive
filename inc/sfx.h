@@ -31,6 +31,11 @@ bool Sfx_isEnabled(void);
 // responsible for calling this only on the actual wall-hit edge (same
 // edge-trigger main.c's own triggerShake() already uses), not every
 // frame the ship stays blocked.
-void Sfx_playWallHit(void);
+// distance (px the ship had slid before this impact) sets the volume,
+// same "amplitude proportional to travel" idea as main.c's own
+// triggerShake(distance) -- user request: "como el screenshake, el
+// volumen que sea proporcional a la distancia". Pass the exact same
+// value given to triggerShake() at each call site.
+void Sfx_playWallHit(u16 distance);
 
 #endif

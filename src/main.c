@@ -1188,7 +1188,7 @@ int main(bool hardReset)
                         if (!wasWallBlocked)
                         {
                             triggerShake(slideDistance);
-                            Sfx_playWallHit(); // spec §47, user request -- only the first contact, same edge as the shake
+                            Sfx_playWallHit(slideDistance); // spec §47, user request -- volume proportional to distance, like the shake
                         }
                         slideDistance = 0;
                     }
@@ -1316,7 +1316,7 @@ int main(bool hardReset)
                             if (!wasWallBlocked)
                             {
                                 triggerShake(slideDistance);
-                                Sfx_playWallHit(); // spec §47, user request -- only the first contact, same edge as the shake
+                                Sfx_playWallHit(slideDistance); // spec §47, user request -- volume proportional to distance, like the shake
                             }
                             slideDistance = 0; // this slide just ended, next one starts fresh
                         }
