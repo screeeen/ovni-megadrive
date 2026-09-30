@@ -3457,3 +3457,42 @@ PCM4, activable desde el único interruptor de sonido del menú.
   que las 4 variantes se perciben como "casi la misma", y que no corta
   el bombo si ambos sonidos caen en el mismo frame (golpear un muro justo
   al pasar sobre una planta).
+- **Ajuste tras feedback del usuario ("quiero que suene un hi-hat cerrado
+  por favor, ajusta ese sonido")**: la primera versión sonaba, según el
+  usuario, más a "acorde de ondas cuadradas" que a hi-hat metálico —
+  coherente con cómo estaba construida: 6 osciladores con una frecuencia
+  base baja (245Hz) en proporciones inventadas, y un filtro paso-alto
+  demasiado suave (una simple diferencia de una muestra, `y[n]=x[n]-x[n-1]`)
+  para aclarar realmente el sonido a 16kHz. Cambios:
+  - **Frecuencias reales de la 909**: las 6 frecuencias del banco de
+    osciladores "metal" de la TR-909 real (`205.3, 304.4, 369.6, 522.7,
+    800.0, 1108.2` Hz, de la ingeniería inversa del circuito original),
+    en vez de proporciones inventadas sobre una base arbitraria — más
+    altas y más separadas entre sí, que es lo que da el timbre metálico
+    tipo campana en vez de sonar a acorde musical.
+  - **Paso-alto real, en cascada**: un filtro RC de un polo de verdad
+    (`alpha = RC/(RC+dt)`, frecuencia de corte ajustable ~3.5kHz),
+    aplicado dos veces en cascada (-12dB/octava en vez de -6dB/octava)
+    para recortar mucho más el grave residual de las ondas cuadradas.
+  - **Más ruido, menos tono**: mezcla de ruido blanco subida de 0.18 a
+    ~0.32 — más "siseo", menos "zumbido".
+  - **Envolvente más corta**: `AMP_TAU_MS` de 16 a ~13, duración total de
+    140 a 100ms — más "cerrado" y seco.
+  - **Bug real encontrado al generar esta versión: quedaba demasiado
+    bajo de volumen**. El filtro en cascada recorta tanta energía de la
+    onda cuadrada original (que concentraba casi toda su potencia en
+    graves) que, con el mismo multiplicador fijo que usaba la v1, el
+    pico resultante caía a ~13% de la escala completa — casi inaudible
+    una vez convertido a 8 bits por el driver PCM4 (muy poca resolución
+    de cuantización sobrante a ese nivel). Arreglo: normalización real —
+    se calcula el pico de la señal ya filtrada y envuelta, y se escala
+    para que SIEMPRE llegue a un nivel sano (~91% de la escala completa),
+    sin importar cuánta energía se haya recortado. Verificado por script
+    tras el arreglo: pico 30000/32767 en las 4 variantes (antes ~4150),
+    RMS 2800-3400 (antes ~440), frecuencia de cruces por cero ~4700-4900Hz
+    (consistente con contenido de alta frecuencia dominante, esperable
+    para un platillo/hi-hat metálico).
+  - `make clean && make` sin errores ni warnings nuevos. Arranque
+    reverificado en BlastEm sin crash.
+  - **Sigue sin verificarse interactivamente** — mismo pendiente de
+    arriba, ahora con la versión ajustada.
