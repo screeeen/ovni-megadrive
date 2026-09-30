@@ -3496,3 +3496,27 @@ PCM4, activable desde el único interruptor de sonido del menú.
     reverificado en BlastEm sin crash.
   - **Sigue sin verificarse interactivamente** — mismo pendiente de
     arriba, ahora con la versión ajustada.
+- **Segundo ajuste tras feedback del usuario ("más brillo!")**: más
+  agresivo en la misma dirección que el ajuste anterior, siempre dentro
+  del límite físico de Nyquist a 16kHz (8kHz):
+  - Banco de osciladores transportado x1.4 (mismas proporciones
+    inarmónicas de la 909, solo más agudas — el mismo tipo de mando
+    "afinar el hi-hat más alto" que tendría una caja de ritmos real).
+  - Paso-alto subido de ~3.5kHz a ~6kHz, y de 2 a 3 etapas en cascada
+    (-18dB/octava en vez de -12dB/octava) — recorta bastante más del
+    residuo grave-medio.
+  - Mezcla de ruido subida de ~0.32 a ~0.48 — el ruido blanco ya es el
+    componente más "brillante" disponible (espectro plano hasta Nyquist
+    antes de filtrar), así que más proporción de ruido sube el brillo
+    medio directamente.
+  - Misma normalización de pico que el ajuste anterior (aquí filtra
+    todavía más agresivo, así que importa aún más). Verificado por
+    script: pico 30000/32767 en las 4 variantes, RMS 3300-4400,
+    frecuencia de cruces por cero ~5350-5530Hz (subida desde los
+    ~4700-4900Hz de la versión anterior — más contenido de alta
+    frecuencia dominante, medible aunque no se pueda escuchar en esta
+    sesión).
+  - `make clean && make` sin errores ni warnings nuevos. Arranque
+    reverificado en BlastEm sin crash.
+  - **Sigue sin verificarse interactivamente** — mismo pendiente,
+    ahora con la versión más brillante.
