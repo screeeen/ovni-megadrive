@@ -7,6 +7,7 @@
 #include "menu.h"
 #include "enemy.h"
 #include "sfx.h"
+#include "plants.h"
 
 // STATE_WIN (spec §34): reached by walking back out through the
 // insertion link once every letter is collected -- a static screen
@@ -456,8 +457,10 @@ static void loadRoom(u8 col, u8 row)
     Maze_generateRoom(doorN, doorE, doorS, doorW,
                        lockedN, lockedE, lockedS, lockedW, doorOffsets, sectionHue, seed,
                        (u8) ((row * MAX_MAP_COLS) + col));
+    Plants_spawnForRoom(seed); // spec §48 -- own line per room, same roomSeed as the layout itself
     Maze_draw();
     Items_drawInRoom(col, row);
+    Plants_drawInRoom(col, row);
 
     guideMap[row][col].visited = TRUE;
 
@@ -532,6 +535,7 @@ static void newGame(void)
     tombMoving = FALSE;
     tombQueuedDir = DIR_NONE;
     Items_reset();
+    Plants_reset(); // spec §48 -- own running counter, not part of presetSave
     if (save.hasSave)
         Items_fastForward(save.collectedCount); // spec §35 -- restore prior progress on this planet
     GuideMap_recomputeLocks(); // unlocks up through whichever letter is now due (spec §16)
@@ -566,6 +570,7 @@ static void newGame(void)
     Maze_draw();
     drawInsertRoomArrow(); // spec §37
     Items_drawHud();
+    Plants_drawHud();
     drawInsertRoomStatus(TRUE); // spec §34 -- always true here, itemCount is always >= 1
     // BUG FIX (user report + screenshot: still looked wrong after routing
     // the corridor through the center -- "coloca el principio de la nave
@@ -1110,11 +1115,12 @@ int main(bool hardReset)
 
                     Maze_draw();
                     // Maze_draw() repaints every tile of BG_A, wiping the
-                    // room's letter along with the map overlay (or the
-                    // static) -- put it back (the map is never open in the
-                    // insertion room, so currentCol/currentRow are always
-                    // valid here).
+                    // room's letter (and any plants, spec §48) along with
+                    // the map overlay (or the static) -- put them back
+                    // (the map is never open in the insertion room, so
+                    // currentCol/currentRow are always valid here).
                     Items_drawInRoom(currentCol, currentRow);
+                    Plants_drawInRoom(currentCol, currentRow);
                     // Restores the ship's normal color (spec §23) -- only
                     // the one word that PLAYER_SHIP_INK_INDEX touched, the
                     // transparent index0 was never changed.
@@ -1334,7 +1340,8 @@ int main(bool hardReset)
                         (player.y > (MAZE_DOOR_ROW - 1) * MAZE_TILE_PX) && (player.y < (MAZE_DOOR_ROW + 1) * MAZE_TILE_PX) &&
                         Items_tryCollect(currentCol, currentRow, player.x, player.y))
                     {
-                        Maze_draw();           // wipes the now-collected letter's tile
+                        Maze_draw();           // wipes the now-collected letter's tile (and any plants, spec §48)
+                        Plants_drawInRoom(currentCol, currentRow);
                         Items_drawHud();
                         // Unlocks the next branch (spec §16); the current
                         // room's own doors never change from this (items
@@ -1342,6 +1349,20 @@ int main(bool hardReset)
                         // not yet loaded -- they pick up the new lock
                         // state next time loadRoom() regenerates them.
                         GuideMap_recomputeLocks();
+                    }
+
+                    // Plant pickup (spec §48, user request) -- no cheap
+                    // box pre-check like the letter's above: plants can
+                    // sit anywhere in the room, not just the hub cell, but
+                    // Plants_tryCollect is only ever a handful of AABB
+                    // tests (PLANTS_MAX_PER_ROOM=5), cheap enough to just
+                    // call every sub-step unconditionally.
+                    if ((exitDir == EXIT_NONE) && Plants_tryCollect(currentCol, currentRow, player.x, player.y))
+                    {
+                        Maze_draw();           // wipes the now-collected plant's tile (and the letter, if still uncollected)
+                        Items_drawInRoom(currentCol, currentRow);
+                        Plants_drawInRoom(currentCol, currentRow);
+                        Plants_drawHud();
                     }
 
                     // Enemy contact (user request): ENEMY_DANGEROUS kills

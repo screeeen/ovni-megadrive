@@ -3242,3 +3242,97 @@ desde el menú, por defecto apagado.
     estable. Igual de pendiente que el resto de esta sección: confirmar
     a oído que un golpe tras un deslizamiento largo suena más fuerte que
     un toque corto.
+
+## 48. Plantas coleccionables: placeholder de 1 celda, en líneas por habitación
+
+Petición del usuario: "quiero que haya un tipo de planta que quepa en 1
+tile. El gráfico que sea un placeholder, cuando la nave pasa por ellas
+las recoge y suma un contador. Distribúyelas en líneas dentro del path
+del grafo. Se colocan en grupos de varias en línea."
+
+- **Nuevo módulo `plants.c`/`plants.h`**: sin orden ni bloqueo, a
+  diferencia de las letras (`items.h`) — solo un contador acumulado que
+  nunca condiciona nada más (no desbloquea puertas, no es requisito para
+  completar la fase).
+- **Placeholder gráfico**: un único carácter `'*'` vía `VDP_drawText`,
+  sin paleta propia ni override de color (a diferencia de la letra del
+  ítem, que sí recolorea `HUE_TEXT_INK_INDEX` por sección) — mismo
+  "reusar texto en vez de arte nuevo" que ya usan las letras, pero aquí
+  ni siquiera se toca el color: es explícitamente un placeholder, no
+  vale la pena arriesgar el mismo mecanismo de override-y-restaurar de
+  CRAM que usan las letras (que nunca se verificó visualmente a tiempo
+  real, ver la nota de "no verificado interactivamente" del §13/§18).
+  Cabe en 1 celda de maze (16x16px = 2x2 tiles VDP), igual que la letra
+  del ítem.
+- **Una línea de 3 a 5 plantas por habitación, dentro del "path del
+  grafo"**: aproximado como una tirada recta de celdas abiertas
+  (`Maze_isWall()` en `FALSE`), no literalmente el grafo interno de
+  deslizamiento de `maze.c` (sus nodos no se exponen fuera de
+  `maze.c` — ver el comentario de `Maze_drawDebugGraph`) — en la
+  práctica es la misma zona transitable, porque las salas TUMBA son
+  ~90% interior abierto (`maze.h`). `Plants_spawnForRoom` prueba hasta
+  24 combinaciones aleatorias de (ancla, eje, dirección); la primera que
+  encuentra ≥3 celdas abiertas consecutivas (sin pisar la celda del hub
+  donde vive la letra) fija una línea de longitud aleatoria entre 3 y lo
+  disponible (tope 5).
+- **PRNG propio, no el `random()` compartido**: igual que `enemy.c`
+  evita el stream compartido, `plants.c` siembra su propio xorshift32
+  desde `roomSeed` — necesario aquí porque la caché de intento aceptado
+  de `Maze_generateRoom` (`maze.h`) puede **repetir** un layout ya
+  cacheado sin rehacer la búsqueda original, así que el estado del
+  stream compartido tras `Maze_generateRoom()` NO es fiable de una
+  visita a otra a la misma sala — usar ese stream habría roto el
+  determinismo planta-por-sala.
+- **Persistencia de recogida**: `collectedMask[MAX_MAP_ROWS][MAX_MAP_COLS]`
+  (un array propio en `plants.c`, no empaquetado en `MapCell` como
+  `enemyDead` — hacen falta hasta 5 bits por sala, no 1) — mismo patrón
+  que "los enemigos no reaparecen" (§12), pero con más bits por celda.
+  Las posiciones en sí NO se guardan (se regeneran cada `loadRoom()`
+  desde `roomSeed`, igual que el propio grid de la sala) — solo qué
+  índices ya se recogieron.
+- **Enganche en `main.c`**: `Plants_spawnForRoom(seed)` justo después de
+  `Maze_generateRoom()` en `loadRoom()` (nunca en la sala de inserción,
+  mismo criterio que `enemy.c`); `Plants_tryCollect` en el mismo bucle de
+  sub-paso de 1px que ya comprueba la letra y el enemigo, sin pre-filtro
+  de caja barata (a lo sumo 5 comprobaciones AABB, barato). Cualquier
+  `Maze_draw()` durante el juego (recogida de letra, recogida de planta,
+  cerrar el mapa guía) repinta las 280 celdas de la sala y borra **todos**
+  los overlays de texto — se añadió `Plants_drawInRoom()` a los 3 sitios
+  que ya redibujaban `Items_drawInRoom()` tras un `Maze_draw()`, y
+  viceversa (`Items_drawInRoom()` añadido al nuevo bloque de recogida de
+  planta, por si la letra de esa sala sigue sin recoger).
+- **HUD**: `Plants_drawHud()` — "PLANTAS:NNN" en `BG_B`, fila 1 (la misma
+  que `Items_drawHud`), columna 14 en adelante (la barra de letras ocupa
+  como mucho las columnas 1-9, sin solape). `VDP_clearTextLineBG(BG_B, 1)`
+  de `resetToMenu()` ya limpiaba toda la fila 1, así que cubre el
+  contador de plantas sin cambios ahí.
+- **Reset**: `Plants_reset()` junto a `Items_reset()` en `newGame()` —
+  contador y máscara vuelven a cero en cada partida nueva; no forma parte
+  de `presetSave` (a diferencia de las letras), así que no sobrevive a
+  salir de un planeta a medias.
+- **Verificación (arnés host, no comiteado, vive en el scratchpad de la
+  sesión)**: `plants.c` real compilado tal cual contra un `genesis.h` de
+  stub (con `VDP_drawText`/`VDP_drawTextBG`/`VDP_setTextPriority` como
+  no-ops) y un `Maze_isWall` sintético (densidad de muro interior
+  0%/10%/30%, hub siempre abierto) — caja blanca: el test lee
+  directamente `curCol`/`curRow`/`curCount`/`collectedMask` de
+  `plants.c`. 6000 salas simuladas (3 densidades × 2000 semillas): 0
+  fuera de rango, 0 plantas sobre un muro, 0 plantas sobre la celda del
+  hub, 0 líneas no rectas/no contiguas, 0 longitudes fuera de
+  `[PLANTS_LINE_MIN, PLANTS_MAX_PER_ROOM]`, 0 discrepancias de
+  determinismo (mismo `roomSeed` + mismo grid ⇒ línea byte-idéntica en
+  una segunda llamada), 0 fallos de recogida/doble-recogida. Solo 3/6000
+  salas salieron sin ninguna línea válida (las 24 combinaciones
+  aleatorias fallaron, esperable en la densidad de muro 30% — caso
+  degenerado aceptado, la sala simplemente no tiene planta ese caso,
+  igual de tolerable que el fallback sin garantía de `maze.c` para el
+  carve general). `make clean && make` sin errores ni warnings nuevos.
+  Arranque comprobado en BlastEm (mismo procedimiento que las secciones
+  anteriores): log limpio, proceso estable, cerrado sin crash.
+- **No verificado interactivamente**: igual que el resto de esta spec, no
+  se pudo jugar una partida real en esta sesión — pendiente confirmar en
+  BlastEm que las líneas de `'*'` se ven en las salas, que pasar por
+  encima las recoge y sube el contador del HUD, que desaparecen tras
+  recogerse y no reaparecen al volver a entrar a la sala, y que
+  sobreviven a abrir/cerrar el mapa guía y a recoger la letra de esa
+  misma sala sin desaparecer ni duplicarse.
