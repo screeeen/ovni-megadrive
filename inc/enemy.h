@@ -47,7 +47,20 @@ typedef struct
 // ENEMY_DANGEROUS, timer reset. Caller must have already generated the
 // room's maze (this searches Maze_isWall for an open starting cell along
 // the chosen lane).
-void Enemy_spawnForRoom(Enemy *e, u16 roomSeed);
+// doorN/E/S/W and doorOffsets[4] (spec §30, same values/index convention
+// maze.c's own Maze_generateRoom takes -- 0=N,1=E,2=S,3=W -- passed
+// straight through rather than #including guidemap.h here, same reasoning
+// as maze.h's own doorDir comment) describe this room's active doors: user
+// request "un enemigo no puede estar en la trayectoria de entrada o salida
+// de una room" -- for each active door this traces the straight line a
+// ship slides along right after crossing it (and, symmetrically, right
+// before leaving through it) out to the first wall, and keeps the enemy's
+// entire patrol -- not just its spawn point -- off every cell on any of
+// those lines, so it can never be sitting exactly where the player is
+// about to arrive or has to stand to leave. See enemy.c's own
+// markDoorTrajectory.
+void Enemy_spawnForRoom(Enemy *e, u16 roomSeed, bool doorN, bool doorE, bool doorS, bool doorW,
+                         const u8 doorOffsets[4]);
 
 // Advances the enemy one pixel along its fixed axis, bouncing on
 // collision, and ticks its state/death timers. No-op once e->alive is

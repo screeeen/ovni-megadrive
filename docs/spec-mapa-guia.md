@@ -3088,3 +3088,55 @@ de amarillo."
   verificarse visualmente en esta sesión — pendiente de que el
   usuario complete algún planeta y confirme que se pinta de amarillo
   en el menú, sin afectar al color de los demás.
+
+## 46. El enemigo no puede patrullar la trayectoria de entrada/salida de una puerta
+
+Petición del usuario: "un enemigo no puede estar en la trayectoria de
+entrada o salida de una room". En modo TUMBA (spec §44/[[room_generation_tomb_only]]
+en memoria) la nave, al cruzar una puerta, desliza en línea recta hasta el
+primer muro — así que si un enemigo patrullaba justo esa línea, podía
+estar esperando exactamente donde la nave está obligada a aparecer o a
+pasar para salir, sin forma de esquivarlo.
+
+- **`enemy.c`'s `markDoorTrajectory`**: por cada puerta activa de la sala,
+  traza las 2 casillas de su hueco (spec §30: `doorOffsets[4]`, mismo
+  convenio de índices 0=N/1=E/2=S/3=W que `Maze_generateRoom`) hacia
+  dentro, casilla a casilla, hasta el primer muro — exactamente el mismo
+  camino que recorrería la nave al deslizar tras cruzar esa puerta (y, por
+  reversibilidad, el mismo que tiene que recorrer para salir por ella).
+  Resultado guardado en `doorTrajectory[MAZE_H][MAZE_W]`, recalculado en
+  cada `Enemy_spawnForRoom` (mismo ciclo de vida que la propia `grid[][]`
+  de la sala).
+- **`wallAt()`**: ahora también es muro si la casilla está en
+  `doorTrajectory`, además de si `Maze_isWall` ya lo decía. Como
+  `Enemy_update` nunca se mueve a una casilla para la que `wallAt()`
+  devuelve verdadero, esto no es solo una restricción en el spawn — es
+  estructural: el enemigo físicamente no puede entrar en esas casillas en
+  ningún frame posterior, igual que no puede atravesar un muro real.
+  `findOpenInLane` (elección de la casilla de arranque) también excluye
+  `doorTrajectory` por el mismo motivo.
+- **`main.c`**: `loadRoom` pasa `doorN/E/S/W` y `doorOffsets` (ya
+  calculados ahí mismo para `Maze_generateRoom`) también a
+  `Enemy_spawnForRoom`, sin datos nuevos que mantener.
+- **Verificación (arnés host, no comiteado, vive en el scratchpad de la
+  sesión)**: `enemy.c` real compilado tal cual contra un `genesis.h` de
+  stub y un `Maze_isWall` sintético (sala con muro de borde + densidad de
+  muro interior 0%/10%/30%, huecos de puerta forzados abiertos igual que
+  garantiza `tomboValidate`) — caja blanca: el test lee directamente el
+  `doorTrajectory[][]` estático de `enemy.c` en vez de reimplementar el
+  algoritmo por separado. Las 16 combinaciones de puertas activas × 500
+  semillas/offsets aleatorios por combinación (8000 salas) × 3000 pasos de
+  `Enemy_update` simulados cada una (24 millones de pasos): 0 salidas de
+  rango en `markDoorTrajectory`, 0 apariciones o pasos del enemigo sobre
+  una casilla de `doorTrajectory`, 0 pasos sobre un muro real, 0 salas
+  donde el enemigo se quedara inmóvil los 3000 pasos. `off[0..3]` cubrió
+  todo el rango válido de `DOOR_COL_MIN..MAX`/`DOOR_ROW_MIN..MAX` (spec
+  §30), incluido el caso límite de sala 0% de muro interior (trayectorias
+  de borde a borde, el caso más restrictivo para encontrar carril libre).
+  `make clean && make` sin errores ni warnings nuevos.
+- **No verificado interactivamente**: al igual que otras piezas de esta
+  spec, no se generaron salas TUMBA reales (`maze.c`'s
+  `generateRoomTombo`/`tomboValidate`) para este arnés — el `Maze_isWall`
+  del test es sintético, no el generador real. Pendiente confirmar en
+  BlastEm que, jugando, el enemigo nunca aparece plantado en el hueco de
+  una puerta real.

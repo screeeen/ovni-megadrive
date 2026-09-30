@@ -11,9 +11,24 @@ static s16 toTile(s16 px)
     return px >> 4;
 }
 
+// Every cell on a door's entry/exit trajectory (see markDoorTrajectory
+// below), rebuilt each time Enemy_spawnForRoom runs -- one room's worth of
+// state is all that's ever needed, same lifetime as the room's own grid in
+// maze.c. Read back by wallAt() below, so the enemy bounces off these
+// cells exactly like a real wall for the rest of its life in this room,
+// not just at spawn.
+static bool doorTrajectory[MAZE_H][MAZE_W];
+
 static bool wallAt(s16 px, s16 py)
 {
-    return Maze_isWall(toTile(px), toTile(py));
+    const s16 tx = toTile(px), ty = toTile(py);
+
+    if (Maze_isWall(tx, ty))
+        return TRUE;
+
+    // Maze_isWall already returned FALSE, so (tx,ty) is guaranteed in
+    // range -- safe to index doorTrajectory without a separate bounds check.
+    return doorTrajectory[ty][tx];
 }
 
 static bool collideUp(s16 newY, s16 x)    { return wallAt(x, newY) || wallAt(x + BOX, newY); }
@@ -46,7 +61,7 @@ static bool findOpenInLane(u8 lane, u16 seed, s16 *outX, s16 *outY)
         const s16 tx = horiz ? v : fixed;
         const s16 ty = horiz ? fixed : v;
 
-        if (!Maze_isWall(tx, ty))
+        if (!Maze_isWall(tx, ty) && !doorTrajectory[ty][tx])
         {
             *outX = tx;
             *outY = ty;
@@ -57,12 +72,55 @@ static bool findOpenInLane(u8 lane, u16 seed, s16 *outX, s16 *outY)
     return FALSE;
 }
 
-void Enemy_spawnForRoom(Enemy *e, u16 roomSeed)
+// Marks every interior cell a ship slides through right after crossing a
+// door -- and, since sliding is reversible, exactly the cells it must
+// cross to leave through the same door -- from the two bordering cells a
+// 2-cell-wide door spans, straight inward until the first wall (spec §16's
+// tomboValidate already guarantees these first steps are always open,
+// never blocked by an obstacle right at the threshold). borderX/borderY is
+// the door's own row/col on the border (one of the two spanning cells is
+// exactly this, offset picks which -- see the two call-site coordinates
+// below); dx/dy is the single inward step direction (exactly one of them
+// +-1, the other 0); offset is the door's own span start (spec §30) along
+// whichever axis dx/dy is 0 on.
+static void markDoorTrajectory(s16 borderX, s16 borderY, s16 dx, s16 dy, u8 offset)
+{
+    u8 lane;
+
+    for (lane = 0; lane < 2; lane++)
+    {
+        s16 x = (dx == 0) ? (s16) (offset + lane) : borderX;
+        s16 y = (dy == 0) ? (s16) (offset + lane) : borderY;
+
+        x += dx;
+        y += dy;
+        while (!Maze_isWall(x, y))
+        {
+            doorTrajectory[y][x] = TRUE; // Maze_isWall FALSE => in range
+            x += dx;
+            y += dy;
+        }
+    }
+}
+
+void Enemy_spawnForRoom(Enemy *e, u16 roomSeed, bool doorN, bool doorE, bool doorS, bool doorW,
+                         const u8 doorOffsets[4])
 {
     const u8 firstLane = (u8) (roomSeed & 3);
     s16 tx = MAZE_DOOR_COL, ty = MAZE_DOOR_ROW; // fallback: the room's own hub, always open
     bool found = FALSE;
-    u8 i;
+    u8 i, x, y;
+
+    for (y = 0; y < MAZE_H; y++)
+        for (x = 0; x < MAZE_W; x++)
+            doorTrajectory[y][x] = FALSE;
+
+    // Index convention matches maze.c's own doorOffsets[4] parameter:
+    // 0=N, 1=E, 2=S, 3=W (see enemy.h's own comment).
+    if (doorN) markDoorTrajectory(0, 0, 0, 1, doorOffsets[0]);
+    if (doorE) markDoorTrajectory(MAZE_W - 1, 0, -1, 0, doorOffsets[1]);
+    if (doorS) markDoorTrajectory(0, MAZE_H - 1, 0, -1, doorOffsets[2]);
+    if (doorW) markDoorTrajectory(0, 0, 1, 0, doorOffsets[3]);
 
     for (i = 0; (i < 4) && !found; i++)
         found = findOpenInLane((u8) ((firstLane + i) & 3), roomSeed, &tx, &ty);

@@ -478,7 +478,7 @@ static void loadRoom(u8 col, u8 row)
     }
     else
     {
-        Enemy_spawnForRoom(&enemy, seed);
+        Enemy_spawnForRoom(&enemy, seed, doorN, doorE, doorS, doorW, doorOffsets);
         PAL_setColor(ENEMY_INK_INDEX, ENEMY_DANGEROUS_COLOR);
         SPR_setPosition(enemySprite, enemy.x, enemy.y);
         SPR_setVisibility(enemySprite, VISIBLE);
