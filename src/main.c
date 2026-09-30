@@ -628,8 +628,12 @@ static void drawMenu(void)
     // Sound toggle hint (spec §47, user request: "activable desde el
     // menu y por defecto apagado") -- row 1, the only free row above the
     // title (menu.c's orbits occupy most of rows 4-23), so it never
-    // collides with a planet sprite at any point in its orbit.
-    len = sprintf(buf, "C: BOMBO AL GOLPEAR MURO %s", Sfx_isEnabled() ? "ON" : "OFF");
+    // collides with a planet sprite at any point in its orbit. Label
+    // generalized from "BOMBO AL GOLPEAR MURO" once the plant hi-hat
+    // (user request) started sharing the same Sfx_isEnabled() toggle --
+    // one single switch for every PCM4 one-shot in the game, not one
+    // per sound.
+    len = sprintf(buf, "C: SONIDO %s", Sfx_isEnabled() ? "ON" : "OFF");
     VDP_drawText(buf, (40 - len) / 2, 1);
 
     // Title moved up and the bottom text pushed down (spec §32quat) to
@@ -861,7 +865,7 @@ int main(bool hardReset)
     Maze_loadGraphics();
     GuideMap_loadGraphics();
     Menu_loadGraphics(); // spec §31 -- must come after both above, its tiles stack right after theirs in VRAM
-    Sfx_loadDriver(); // spec §47 -- PCM4 driver for the wall-hit kick, independent of VRAM layout
+    Sfx_loadDriver(); // spec §47/§49 -- PCM4 driver for the kick and plant hi-hat, independent of VRAM layout
 
     PAL_setPalette(PAL1, playerShip.palette->data, DMA);
     PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR);
@@ -1363,6 +1367,7 @@ int main(bool hardReset)
                         Items_drawInRoom(currentCol, currentRow);
                         Plants_drawInRoom(currentCol, currentRow);
                         Plants_drawHud();
+                        Sfx_playPlantPickup(); // user request: hi-hat cerrado de la 909 al recoger una planta
                     }
 
                     // Enemy contact (user request): ENEMY_DANGEROUS kills

@@ -3401,3 +3401,59 @@ del grafo. Se colocan en grupos de varias en línea."
   desaparecer ni duplicarse, y que el overlay de depuración de puntitos
   (`Maze_drawDebugGraph`, spec §11) ahora se ve en salas de 2+ puertas y
   revisitadas, donde antes de esta sesión no debía verse nada.
+
+## 49. Hi-hat cerrado de la 909 al recoger una planta
+
+Petición del usuario: "implementa un hi hat cerrado que suene como el de
+la 909 y con pequeñas variaciones cuando colisiona con las plantas."
+Mismo patrón que el bombo del §47: 4 muestras casi idénticas, driver
+PCM4, activable desde el único interruptor de sonido del menú.
+
+- **Síntesis (`res/sound/hihat0..3.wav`)**: receta clásica del hi-hat de
+  la 909 — 6 osciladores cuadrados en proporciones inarmónicas
+  (`1, 1.342, 1.2312, 1.6532, 1.9542, 2.1432` × ~245Hz base, el mismo
+  rango que usa la 909 real), mezclados y pasados por un paso-alto barato
+  de un polo (diferencia de primer orden, `y[n] = x[n] - x[n-1]`) para
+  quitar el fondo grave y dejar solo el timbre metálico agudo, más un
+  poco de ruido blanco mezclado para el "siseo". Envolvente de amplitud
+  exponencial muy rápida (`AMP_TAU_MS≈16`) — "cerrado" = corto y
+  apagado, muy distinto del bombo (`AMP_TAU_MS≈190` en el §47). Cada
+  variante tira los mismos parámetros con jitter de ±3-15% (semillas
+  fijas 2000-2003) — mismo "casi el mismo sonido, nunca bit-idéntico"
+  que el bombo. 140ms, 16-bit mono a 16000Hz de entrada, reconvertido a
+  8 bits por `rescomp` (`WAV ... PCM4`) igual que las muestras del
+  bombo.
+- **`sfx.c`'s `Sfx_playPlantPickup()`**: mismo patrón de rotación que
+  `Sfx_playWallHit` (contador `nextHihatVariant` 0→1→2→3→0..., nunca la
+  misma variante dos veces seguidas, sin tirar del `random()`
+  compartido) pero con una diferencia deliberada: usa
+  `SOUND_PCM_CH_AUTO` en vez de fijar el canal a mano. El bombo necesita
+  saber su propio canal PCM4 porque llama a `SND_PCM4_setVolume` antes
+  de reproducir (spec §47bis, volumen proporcional a la distancia); el
+  hi-hat no tiene ese concepto (no hay "golpe más fuerte" al recoger una
+  planta), así que no necesita saberlo y deja que el driver escoja
+  cualquier canal libre de los 4 — igual de simple que el bombo antes de
+  que el §47bis le añadiera volumen.
+- **Interruptor único, no uno nuevo**: el hi-hat se activa/desactiva con
+  el mismo `Sfx_isEnabled()`/`BUTTON_C` del menú que ya controla el
+  bombo — no se pidió un interruptor separado, y un solo "SONIDO ON/OFF"
+  es más simple que dos. La etiqueta del menú se generalizó de "C: BOMBO
+  AL GOLPEAR MURO" a "C: SONIDO", ya que ahora cubre dos sonidos, no
+  solo el del muro.
+- **Disparo**: `Sfx_playPlantPickup()` se llama en `main.c` justo dentro
+  del bloque que ya redibuja tras `Plants_tryCollect()` devolver `TRUE`
+  (spec §48) — un efecto por planta recogida, nunca por frame mientras
+  la nave sigue sobre la celda (la recogida en sí ya es un evento de un
+  solo disparo, `collectedMask` se marca inmediatamente).
+- **Verificación**: `make clean && make` sin errores ni warnings nuevos
+  (aparte del warning preexistente y ajeno de `rom_header.c`). Muestras
+  revisadas por script (pico ~21000/32767, sin clipping; RMS bajo pero
+  esperable para un transitorio corto con mucha cola de silencio).
+  Arranque comprobado en BlastEm: log limpio, proceso estable, cerrado
+  sin crash.
+- **No verificado interactivamente**: igual que el resto de esta spec, no
+  se pudo escuchar el resultado real en esta sesión — pendiente confirmar
+  en BlastEm que suena a hi-hat cerrado de 909 (no a ruido blanco plano),
+  que las 4 variantes se perciben como "casi la misma", y que no corta
+  el bombo si ambos sonidos caen en el mismo frame (golpear un muro justo
+  al pasar sobre una planta).

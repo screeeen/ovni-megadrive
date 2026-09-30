@@ -13,3 +13,8 @@ WAV kick0 "sound/kick0.wav" PCM4
 WAV kick1 "sound/kick1.wav" PCM4
 WAV kick2 "sound/kick2.wav" PCM4
 WAV kick3 "sound/kick3.wav" PCM4
+
+WAV hihat0 "sound/hihat0.wav" PCM4
+WAV hihat1 "sound/hihat1.wav" PCM4
+WAV hihat2 "sound/hihat2.wav" PCM4
+WAV hihat3 "sound/hihat3.wav" PCM4
