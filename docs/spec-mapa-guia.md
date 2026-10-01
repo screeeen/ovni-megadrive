@@ -3242,30 +3242,6 @@ desde el menú, por defecto apagado.
     estable. Igual de pendiente que el resto de esta sección: confirmar
     a oído que un golpe tras un deslizamiento largo suena más fuerte que
     un toque corto.
-- **Ajuste tras feedback del usuario ("puedes hacer el bombo más
-  grave?")**: mismo modelo de síntesis (seno con barrido de tono +
-  decaimiento exponencial + click de ataque), parámetros bajados:
-  - `F_START` 220→150Hz, `F_END` 58→42Hz — ambos extremos del barrido de
-    tono más bajos, así que el "thump" se asienta en un fundamental
-    claramente más grave en vez de pasar por un registro más agudo de
-    camino hacia abajo.
-  - `AMP_TAU_MS` 190→210 — decaimiento un poco más largo, algo más de
-    peso/sustain grave (se percibe como "más profundo", no solo "más
-    bajo de tono").
-  - `CLICK_AMP` 0.35→0.28 — click de ataque más discreto, porque un
-    click fuerte y brillante compite perceptualmente con "grave" (es el
-    único elemento de banda ancha/alta frecuencia en un sonido por lo
-    demás todo graves).
-  - `DURATION_S` escalada proporcionalmente con `AMP_TAU_MS` (misma
-    proporción ~1.58x tau que ya usaba la v1) para que la cola se corte
-    en la misma proporción relativa de antes, no más brusca.
-  - Verificado por script: frecuencia de cruces por cero de la cola ya
-    asentada (150-280ms, pasado el barrido) ≈ 42Hz, coincidiendo con el
-    nuevo `F_END` objetivo — unos 5 semitonos más grave que el
-    fundamental anterior de 58Hz. `make clean && make` sin errores ni
-    warnings nuevos; arranque reverificado en BlastEm sin crash.
-  - **Sigue sin verificarse a oído en esta sesión** — mismo pendiente de
-    siempre, ahora con la versión más grave.
 
 ## 48. Plantas coleccionables: placeholder de 1 celda, en líneas por habitación
 
