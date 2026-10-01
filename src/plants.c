@@ -262,3 +262,24 @@ void Plants_drawHud(void)
     VDP_drawTextBG(BG_B, buf, 14, 1);
     VDP_setTextPriority(0);
 }
+
+u16 Plants_collectedCount(void)
+{
+    return total;
+}
+
+void Plants_setCollected(u16 count)
+{
+    total = count;
+}
+
+u16 Plants_lastRoomCount(void)
+{
+    u16 sum = 0;
+    u8 line;
+
+    for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
+        sum += curCount[line];
+
+    return sum;
+}

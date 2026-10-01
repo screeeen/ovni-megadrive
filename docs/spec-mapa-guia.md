@@ -3629,3 +3629,86 @@ habitación.
   pendiente confirmar jugando que se ven 3 grupos de `'*'` por
   habitación (no 1), que ninguno se superpone visualmente con otro ni
   con la letra del ítem, y que las 3 suman al contador del HUD.
+
+## 51. Status de plantas recogidas por planeta, en el menú
+
+Petición del usuario: "puedes contar todas las plantas de cada planeta
+y pintar en el menu un status de cuantas ha recogido el player en cada
+planeta?"
+
+- **El total no es una constante del preset, a diferencia de las
+  letras**: `sizePresets[].letters` es un número fijo elegido por el
+  usuario al diseñar cada preset; el número de plantas depende del mapa
+  realmente generado (spec §48/§50: 3 líneas de 3-5 celdas por
+  habitación, sobre aristas reales del grafo de deslizamiento) — no hay
+  forma de saberlo sin generar efectivamente cada habitación del mapa.
+  Antes de implementar, se le preguntó al usuario CUÁNDO calcularlo,
+  dado el coste real en CPU (generar una habitación entera, incluida la
+  búsqueda del validador TUMBA, multiplicado por hasta 80 habitaciones
+  en el preset más grande). Eligió: **al ver el planeta en el menú**, no
+  al pulsar "empezar" — así nunca hay pausa al iniciar partida.
+- **`scanPlanetPlantTotal(presetIndex)` (`main.c`)**: genera cada
+  habitación `CELL_ROOM` del mapa guardado de ese preset (mismo cálculo
+  de `doorN/E/S/W`/`doorOffsets`/`roomSeed` que ya hace `loadRoom()`,
+  incluida la puerta extra de la sala de enlace de inserción) y suma
+  `Plants_lastRoomCount()` (nuevo accesor en `plants.c`: total de las 3
+  líneas de la última sala generada) de cada una. **Candados siempre
+  tratados como abiertos** (`lockedN/E/S/W` forzados a `FALSE`) a
+  propósito: el candado solo sella el borde después de que el interior
+  y el grafo ya están construidos (spec §16/§19), así que nunca cambia
+  qué plantas caben dentro — pero SÍ puede truncar una línea candidata
+  que cruzara justo el umbral de una puerta todavía bloqueada (spec §48,
+  el chequeo `Maze_isWall` en vivo de `plants.c`). Contar con todo
+  desbloqueado da un número estable, el mismo sin importar cuánto haya
+  progresado la partida — no uno que fuera subiendo según se desbloquean
+  ramas.
+- **Coste asumido, no evitado**: la función pisa
+  `mapCols`/`mapRows`/`itemCount`/`mapSeed`/`guideMap`/`insertLink*`/la
+  rejilla de la sala actual — inocuo porque solo se llama desde
+  `STATE_MENU`, y `newGame()` ya reinicializa los mismos globales desde
+  cero en cuanto se pulsa "empezar", sin importar en qué quedaron tras
+  el escaneo.
+- **Cacheado por planeta, una sola vez**: `presetSave` gana
+  `plantsTotal`/`plantsTotalKnown` (además de `plantsCollected`, que
+  espeja `collectedCount` de las letras — se guarda en `resetToMenu()` y
+  se restaura con el nuevo `Plants_setCollected()` en `newGame()`, sin
+  necesidad de reproducir orden como `Items_fastForward`, porque las
+  plantas no tienen orden). `drawMenu()` comprueba
+  `hasSave && !plantsTotalKnown` y llama a `scanPlanetPlantTotal()` solo
+  esa vez; las visitas siguientes al mismo planeta en el menú leen el
+  valor ya cacheado, sin recalcular. Un planeta nunca jugado
+  (`!hasSave`) no tiene `mapSeed` aún comprometido, así que no se
+  escanea — no se dibuja la fila.
+- **Fila nueva en el menú**: "`C DE T PLANTAS`" en la fila 24 (el único
+  hueco libre entre las órbitas de `menu.c`, filas 4-23, y el bloque de
+  texto inferior que empieza en la fila 25) — mismo hueco simétrico al
+  que ya usa la fila 1 para el aviso de sonido por encima de las
+  órbitas.
+- **Verificación (arnés host, no comiteado, vive en el scratchpad de la
+  sesión)**: dos arneses.
+  - El de plantas por sala del §48/§50 reutilizado sin cambios (sigue en
+    verde: 0 fallos).
+  - Uno nuevo que reproduce a mano la lógica de `scanPlanetPlantTotal`
+    contra el `guidemap.c`/`items.c`/`maze.c`/`plants.c` REALES
+    (compilados juntos contra el stub de `genesis.h`/`resources.h` ya
+    usado en esta spec, ampliado con `VDP_clearPlane`/`VDP_setTileMapXY`
+    y el símbolo `mapTiles`) — 900 combinaciones (los 3 tamaños reales
+    de `sizePresets[]`: 6x4/8x6/10x8, × 1-5 letras × 60 semillas cada
+    una): **0 totales fuera de rango** (`≤ cols×rows×15`, el máximo
+    teórico), **0 discrepancias al re-escanear el mismo mapa dos veces**
+    (estabilidad/idempotencia, la misma garantía que necesita el cacheo
+    "una sola vez" del menú). Totales de muestra para hacerse una idea
+    de la escala: 6x4/1 letra → 231 plantas; 8x6/5 letras → 474; 10x8/5
+    letras → 899 (consistente con ~3-15 plantas por sala real, sobre
+    las ~20-70 salas que tiene cada tamaño tras la poda de hojas del
+    §4.2). `make clean && make` sin errores ni warnings nuevos; arranque
+    comprobado en BlastEm sin crash (sin partidas guardadas en un
+    arranque limpio, así que el escaneo no se dispara en este smoke
+    test — comportamiento esperado, no una limitación de la prueba).
+- **No verificado interactivamente**: igual que el resto de esta spec —
+  pendiente confirmar jugando que, tras dejar un planeta a medias y
+  volver al menú, aparece "`C DE T PLANTAS`" en la fila 24 sin solaparse
+  con nada, que el número coincide con lo recogido de verdad, que la
+  primera vez que se ve un planeta con guardado se nota una pausa breve
+  (el escaneo) y las siguientes no, y que un planeta nunca jugado no
+  muestra esa fila en absoluto.

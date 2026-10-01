@@ -268,7 +268,29 @@ static u8 sizePresetIndex = SIZE_PRESET_DEFAULT;
 // idea as maze.c already relies on at the per-room level. collectedCount
 // is enough to restore item state too (Items_fastForward) since
 // collection is always strictly in order (spec §13) -- never a subset.
-typedef struct { bool hasSave; u16 mapSeed; u8 collectedCount; } PresetSave;
+// plantsCollected mirrors collectedCount for plants (spec §51,
+// Plants_setCollected -- no ordering to replay, just the raw count).
+// plantsTotal/plantsTotalKnown (spec §51, user request: "pintar en el
+// menu un status de cuantas ha recogido el player en cada planeta",
+// which needs a denominator) cache the full-map plant count computed by
+// scanPlanetPlantTotal() -- unlike collectedCount/plantsCollected, this
+// isn't something the normal play loop produces for free: a planet's
+// total is NOT a fixed preset constant (sizePresets[].letters is,
+// plants are not), computing it means generating every room in the map
+// to see how many plants spec §48's slide-graph placement puts in each
+// one. Too expensive to redo every frame, so it's computed once -- the
+// first time drawMenu() shows a planet that already has a save (no
+// mapSeed committed yet for one that was never played, so nothing to
+// scan) -- and cached here for the rest of this boot.
+typedef struct
+{
+    bool hasSave;
+    u16 mapSeed;
+    u8 collectedCount;
+    u16 plantsCollected;
+    u16 plantsTotal;
+    bool plantsTotalKnown;
+} PresetSave;
 static PresetSave presetSave[SIZE_PRESET_COUNT];
 
 // Deterministic per-room seed (spec §5): same (col,row) under the same
@@ -419,6 +441,78 @@ static u8 doorOffsetFor(u8 col, u8 row, u8 dir)
 // One cache slot per grid room (maze.h) -- the room grid must fit in them.
 _Static_assert(MAX_MAP_COLS * MAX_MAP_ROWS <= MAZE_INSERT_CACHE_SLOT, "MAZE_ROOM_CACHE_SLOTS too small for the map grid");
 
+// Computes the full plant total for presetSave[presetIndex]'s saved map
+// (spec §51, user request: "contar todas las plantas de cada planeta")
+// -- generates every room in it and sums Plants_lastRoomCount() across
+// all of them. Locks are ignored on purpose (every door generated as if
+// already unlocked): a room's interior/plant line never actually depends
+// on lock state (only its border gets sealed, spec §16/§19, after the
+// interior -- and the slide graph -- are already built), but the
+// opposite isn't true: a SEALED door's threshold cells can truncate a
+// candidate plant line early (plants.c's own Maze_isWall recheck, spec
+// §48). Scanning with every door unlocked gives one stable total for
+// this map, independent of how far the player has actually progressed,
+// instead of a number that would keep changing as branches unlock.
+//
+// Expensive: one real tombo generation per room, same per-room cost
+// loadRoom() already pays during ordinary play, just for every room in
+// the map back-to-back instead of one at a time as the player wanders
+// in. Call this at most once per planet and cache the result (drawMenu()
+// does, into presetSave[].plantsTotal/plantsTotalKnown) -- never from
+// the main per-frame loop.
+//
+// Clobbers mapCols/mapRows/itemCount/mapSeed/guideMap/insertLink*/the
+// current room's own grid -- all harmless here since this only ever
+// runs from STATE_MENU, and newGame() unconditionally reinitializes
+// every one of them from scratch the moment the player actually starts
+// or resumes a planet, regardless of whatever this scan left them at.
+static u16 scanPlanetPlantTotal(u8 presetIndex)
+{
+    u16 total = 0;
+    u8 col, row;
+
+    mapCols = sizePresets[presetIndex].cols;
+    mapRows = sizePresets[presetIndex].rows;
+    itemCount = sizePresets[presetIndex].letters;
+    mapSeed = presetSave[presetIndex].mapSeed; // roomSeedFor() reads this global directly
+    setRandomSeed(mapSeed);
+    GuideMap_generate();
+    Maze_clearRoomCache(); // this map's own door/offset layout may not match whatever was cached before
+
+    for (row = 0; row < mapRows; row++)
+    {
+        for (col = 0; col < mapCols; col++)
+        {
+            const MapCell cell = guideMap[row][col];
+            bool doorN, doorE, doorS, doorW;
+            u8 doorOffsets[4];
+            u16 seed;
+            bool isInsertLinkRoom;
+
+            if (cell.type != CELL_ROOM)
+                continue;
+
+            isInsertLinkRoom = (col == insertLinkCol) && (row == insertLinkRow);
+            doorN = cell.doorN || (isInsertLinkRoom && (insertLinkDir == DOOR_N));
+            doorE = cell.doorE || (isInsertLinkRoom && (insertLinkDir == DOOR_E));
+            doorS = cell.doorS || (isInsertLinkRoom && (insertLinkDir == DOOR_S));
+            doorW = cell.doorW || (isInsertLinkRoom && (insertLinkDir == DOOR_W));
+            doorOffsets[DOOR_N] = doorOffsetFor(col, row, DOOR_N);
+            doorOffsets[DOOR_E] = doorOffsetFor(col, row, DOOR_E);
+            doorOffsets[DOOR_S] = doorOffsetFor(col, row, DOOR_S);
+            doorOffsets[DOOR_W] = doorOffsetFor(col, row, DOOR_W);
+            seed = roomSeedFor(col, row);
+
+            Maze_generateRoom(doorN, doorE, doorS, doorW, FALSE, FALSE, FALSE, FALSE,
+                               doorOffsets, 0, seed, (u8) ((row * MAX_MAP_COLS) + col));
+            Plants_spawnForRoom(seed);
+            total += Plants_lastRoomCount();
+        }
+    }
+
+    return total;
+}
+
 static void loadRoom(u8 col, u8 row)
 {
     const MapCell cell = guideMap[row][col];
@@ -535,9 +629,12 @@ static void newGame(void)
     tombMoving = FALSE;
     tombQueuedDir = DIR_NONE;
     Items_reset();
-    Plants_reset(); // spec §48 -- own running counter, not part of presetSave
+    Plants_reset(); // spec §48 -- running counter, now also saved/restored per planet (spec §51)
     if (save.hasSave)
+    {
         Items_fastForward(save.collectedCount); // spec §35 -- restore prior progress on this planet
+        Plants_setCollected(save.plantsCollected); // spec §51
+    }
     GuideMap_recomputeLocks(); // unlocks up through whichever letter is now due (spec §16)
 
     // The player's actual physical starting point is the special
@@ -654,6 +751,28 @@ static void drawMenu(void)
     VDP_drawText(buf, (40 - len) / 2, 26);
 
     VDP_drawText("PULSA A PARA EMPEZAR", 10, 27);
+
+    // Plant status (spec §51, user request: "contar todas las plantas de
+    // cada planeta... pintar en el menu un status de cuantas ha recogido
+    // el player"). Row 24 -- the one free row between menu.c's orbits
+    // (rows 4-23) and this bottom text block (25-27), same kind of gap
+    // row 1's sound hint uses above the orbits. Only for a planet that's
+    // actually been played: an unplayed one has no committed mapSeed yet
+    // to scan (scanPlanetPlantTotal's own doc comment), so there is
+    // nothing to count -- VDP_clearPlane above already leaves this row
+    // blank in that case, nothing else to do.
+    if (presetSave[sizePresetIndex].hasSave)
+    {
+        if (!presetSave[sizePresetIndex].plantsTotalKnown)
+        {
+            presetSave[sizePresetIndex].plantsTotal = scanPlanetPlantTotal(sizePresetIndex);
+            presetSave[sizePresetIndex].plantsTotalKnown = TRUE;
+        }
+
+        len = sprintf(buf, "%d DE %d PLANTAS", presetSave[sizePresetIndex].plantsCollected,
+                      presetSave[sizePresetIndex].plantsTotal);
+        VDP_drawText(buf, (40 - len) / 2, 24);
+    }
 }
 
 // Hard reset combo (user request): A+B+C+UP together, from anywhere
@@ -689,6 +808,7 @@ static void resetToMenu(void)
         presetSave[sizePresetIndex].hasSave = TRUE;
         presetSave[sizePresetIndex].mapSeed = mapSeed;
         presetSave[sizePresetIndex].collectedCount = Items_collectedCount();
+        presetSave[sizePresetIndex].plantsCollected = Plants_collectedCount(); // spec §51
     }
 
     gameState = STATE_MENU;

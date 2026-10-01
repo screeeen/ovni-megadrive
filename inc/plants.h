@@ -65,4 +65,24 @@ void Plants_drawInRoom(u8 col, u8 row);
 // Plants_tryCollect() returns TRUE.
 void Plants_drawHud(void);
 
+// How many plants have been collected so far THIS session (spec §51) --
+// same value Plants_drawHud() prints. main.c saves this into
+// presetSave[].plantsCollected on resetToMenu(), same pattern
+// Items_collectedCount() already has for letters.
+u16 Plants_collectedCount(void);
+
+// Restores a saved running total instantly (spec §51, resuming a
+// planet) -- unlike Items_fastForward, there's no order/position to
+// replay, a plant pickup is just a counter, so this is a plain setter.
+// Call right after Plants_reset(), before any room loads.
+void Plants_setCollected(u16 count);
+
+// Total plants in whichever room Plants_spawnForRoom last ran for,
+// summed across all PLANTS_LINES_PER_ROOM lines (spec §51: main.c's
+// scanPlanetPlantTotal() calls Plants_spawnForRoom() once per room in a
+// saved planet's map and adds this up, to show "collected / total" in
+// the menu -- a planet's plant total isn't a fixed preset constant like
+// its letter count, so it has to be computed this way).
+u16 Plants_lastRoomCount(void);
+
 #endif
