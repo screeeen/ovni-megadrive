@@ -3543,3 +3543,89 @@ PCM4, activable desde el único interruptor de sonido del menú.
     reverificado en BlastEm sin crash.
   - **Sigue sin verificarse interactivamente** — mismo pendiente,
     ahora con la versión más brillante.
+- **Tercer ajuste tras feedback del usuario ("el hihat más agudo")**:
+  "agudo" pide específicamente tono más alto, no solo "brillo" genérico
+  — el ajuste anterior había subido sobre todo la mezcla de ruido
+  (siseo de banda ancha, sin tono definido), no necesariamente el tono
+  de los osciladores. Cambios:
+  - Banco de osciladores transportado otra vez, de x1.4 a x1.9 sobre
+    las frecuencias base de la 909.
+  - Paso-alto subido de ~6kHz a ~7.2kHz (siempre con margen por debajo
+    de los 8kHz de Nyquist a 16kHz).
+  - Mezcla de ruido bajada de ~0.48 a ~0.40, amplitud de los
+    osciladores subida de 0.09 a 0.11 — más proporción de tono
+    (ahora más agudo) frente a siseo, para que el cambio de afinación
+    se note en vez de quedar tapado por ruido.
+  - Decaimiento acortado un poco más (9.5→8.5ms) — un transitorio más
+    corto también se percibe como más agudo/ajustado.
+  - **Límite real encontrado al intentar medirlo**: la frecuencia de
+    cruces por cero (ZCR) de la señal final, la métrica usada para
+    verificar los dos ajustes anteriores, resultó **poco fiable** aquí
+    — comparando la señal solo-osciladores y solo-ruido por separado a
+    varios cortes de filtro, se vio que una vez el paso-alto está tan
+    cerca de Nyquist, lo que sobrevive del espectro lo decide sobre
+    todo la frecuencia de corte del filtro, no tanto el tono base de
+    los osciladores (sus armónicos por debajo del corte se eliminan
+    igual sea cual sea el oscilador al que pertenecían) — el ZCR total
+    medido (~5000-5500Hz) salió prácticamente igual que en la versión
+    anterior, sin un patrón claro ni monótono al variar los parámetros.
+    Por eso el corte del paso-alto (el que sí demostró mover el ZCR de
+    forma consistente en el análisis comparativo) es el cambio principal
+    aquí, con la transposición de osciladores y el decaimiento más
+    corto como refuerzo adicional, razonado pero sin confirmación
+    numérica limpia.
+  - `make clean && make` sin errores ni warnings nuevos (junto con el
+    cambio de plantas de la §50, build conjunto). Arranque reverificado
+    en BlastEm sin crash.
+  - **Sigue sin verificarse a oído** — y esta vez, a diferencia de los
+    dos ajustes anteriores, tampoco hay una métrica numérica limpia que
+    lo respalde del todo; el cambio es razonado (sube el corte del
+    filtro, el oscilador, acorta el decaimiento) pero no está confirmado
+    por análisis. Si al escucharlo no se nota más agudo, el corte del
+    paso-alto es el parámetro a subir primero.
+
+## 50. Tres hileras de plantas por habitación, en vez de una
+
+Petición del usuario: "añade dos hileras más de plantas (recogibles) en
+cada room" — 2 líneas más sobre la original del §48, 3 en total por
+habitación.
+
+- **`plants.c`**: `curCol`/`curRow` pasan de arrays planos
+  `[PLANTS_MAX_PER_LINE]` a `[PLANTS_LINES_PER_ROOM][PLANTS_MAX_PER_LINE]`
+  (`PLANTS_LINES_PER_ROOM=3`), `curCount` pasa de `u8` a
+  `u8[PLANTS_LINES_PER_ROOM]`. `collectedMask` se ensancha de `u8` a
+  `u16` por celda del mapa (160 bytes en total para `MAX_MAP_ROWS ×
+  MAX_MAP_COLS`, trivial) — hacen falta hasta 15 bits (3 líneas × 5
+  plantas), ya no caben en los 8 de antes. Bit `line*PLANTS_MAX_PER_LINE
+  + i`.
+- **Sin solape entre líneas**: `Plants_spawnForRoom` ahora genera las 3
+  líneas en secuencia, llevando la cuenta de qué celdas ya ocupó una
+  línea anterior (`occCol`/`occRow`, hasta 15 celdas, barrido lineal —
+  barato). El bucle que camina cada arista candidata trata una celda ya
+  ocupada exactamente igual que un muro real o la celda del hub: corta
+  ahí la línea (`!isOccupied(x,y,...)` añadido a la condición del
+  `while`, mismo sitio donde ya vive `!Maze_isWall(x,y)`) — así dos
+  líneas nunca pueden terminar compartiendo una celda, sin necesidad de
+  volver a comprobar solapes después de generar.
+- **`Plants_tryCollect`/`Plants_drawInRoom`**: ganan un bucle exterior
+  sobre las 3 líneas; por lo demás, misma lógica AABB/dibujo de antes,
+  por línea en vez de una sola vez.
+- **Verificación (mismo arnés host del §48, ampliado)**: 2400 salas (16
+  combinaciones de puertas × 150 semillas, con bloqueos de puerta
+  aleatorios en un tercio de los casos) — de las 2250 con grafo real
+  (las 150 restantes son el combo sin puertas, degenerado, sin grafo),
+  **las 3 líneas se colocaron siempre, en el 100% de las salas
+  probadas** (ninguna se quedó con 0, 1 o 2 líneas por falta de hueco).
+  0 plantas fuera de rango/sobre muro/sobre el hub, 0 líneas no rectas,
+  **0 solapes entre líneas**, 0 discrepancias de determinismo entre
+  visita y repetición (misma comprobación del §48, ahora sobre las 3
+  líneas a la vez), y reutilizando la simulación de barrido de colisión
+  del mismo arnés (spec §48, pregunta del usuario "¿has comprobado que
+  todas las plantas son recogibles?"): 6750 líneas comprobadas (2250
+  salas × 3), **0 huecos de colisión** — cada una de las 3 líneas, en
+  cada sala, se recoge de verdad al barrerla. `make clean && make` sin
+  errores ni warnings nuevos; arranque comprobado en BlastEm sin crash.
+- **No verificado interactivamente**: igual que el resto de esta spec —
+  pendiente confirmar jugando que se ven 3 grupos de `'*'` por
+  habitación (no 1), que ninguno se superpone visualmente con otro ni
+  con la letra del ítem, y que las 3 suman al contador del HUD.
