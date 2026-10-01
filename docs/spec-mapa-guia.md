@@ -3401,6 +3401,29 @@ del grafo. Se colocan en grupos de varias en línea."
   desaparecer ni duplicarse, y que el overlay de depuración de puntitos
   (`Maze_drawDebugGraph`, spec §11) ahora se ve en salas de 2+ puertas y
   revisitadas, donde antes de esta sesión no debía verse nada.
+- **Verificación adicional ("¿has comprobado que todas las plantas son
+  recogibles?", pregunta del usuario)**: lo ya verificado (§48 arriba)
+  solo probaba que cada planta cae sobre una celda de una arista real
+  del grafo — no que la propia detección de colisión del juego
+  (`Plants_tryCollect`, comprobada una vez por cada sub-paso de 1px en
+  `main.c`, igual que la letra) realmente la detecte al recorrer esa
+  arista. Hueco real: podía existir, en teoría, un salto de 1px que
+  dejara pasar una celda sin disparar el solape AABB. Se añadió
+  `checkSlideCollection` al mismo arnés host del §48 (compila el
+  `maze.c`/`plants.c` reales): tras generar la línea de una sala, barre
+  `playerX`/`playerY` en pasos de 1px a lo largo de todo el tramo de la
+  línea (más 20px de margen a cada lado, simulando una aproximación
+  real) llamando a `Plants_tryCollect` en cada paso — exactamente la
+  misma granularidad que el bucle de sub-pasos real — y comprueba que
+  las `curCount` plantas acaban con su bit puesto en `collectedMask`.
+  2250 salas con línea de planta (de las 2400 del arnés): **0 huecos de
+  colisión** — cada planta generada se recoge de verdad al barrer su
+  propia celda. Combinado con la verificación de alcanzabilidad del
+  grafo ya hecha, esto cierra el círculo: toda planta generada está
+  tanto en una celda alcanzable como realmente detectada por la
+  colisión del juego al cruzarla. Sin cambios de código de producción
+  en esta sesión — solo una extensión del arnés host, así que no hizo
+  falta recompilar el ROM.
 
 ## 49. Hi-hat cerrado de la 909 al recoger una planta
 
