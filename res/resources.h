@@ -3,10 +3,10 @@
 #ifndef _RES_RESOURCES_H_
 #define _RES_RESOURCES_H_
 
-extern const u8 kick0[4864];
-extern const u8 kick1[4864];
-extern const u8 kick2[4864];
-extern const u8 kick3[4864];
+extern const u8 kick0[5376];
+extern const u8 kick1[5376];
+extern const u8 kick2[5376];
+extern const u8 kick3[5376];
 extern const u8 hihat0[1536];
 extern const u8 hihat1[1536];
 extern const u8 hihat2[1536];
