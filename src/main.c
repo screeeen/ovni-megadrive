@@ -799,11 +799,11 @@ static void drawMenu(void)
     // free the extra vertical room the widened orbits need (menu.c).
     VDP_drawText("OVNI", 18, 3);
 
-    // Letter count shown alongside the grid size (spec §33) -- the
-    // preset's real difficulty is the combination of both, not the grid
-    // size alone, now that they vary independently.
-    len = sprintf(buf, "%d x %d - %d %s", sizePresets[sizePresetIndex].cols, sizePresets[sizePresetIndex].rows,
-                  letters, (letters == 1) ? "LETRA" : "LETRAS");
+    // Letter count (spec §33). The grid size (cols x rows) used to show
+    // here too, dropped per user request ("borra el NxN de habitaciones
+    // en el menu") -- sizePresets[].cols/rows are still what drives
+    // GuideMap_generate() et al, just no longer surfaced in this text.
+    len = sprintf(buf, "%d %s", letters, (letters == 1) ? "LETRA" : "LETRAS");
     VDP_drawText(buf, (40 - len) / 2, 25);
 
     // Recogidas/faltan del planeta seleccionado (spec §35, user request):

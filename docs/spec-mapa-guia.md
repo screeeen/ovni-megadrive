@@ -3825,3 +3825,17 @@ pulsar "empezar").
   sí podía haberlo, sala por sala, la primera vez que se visitaba cada
   una), y que el menú muestra el status de plantas de los 8 planetas
   desde el primer fotograma, no solo del que se ha jugado.
+
+## 53. Quitado el tamaño de rejilla (NxN) del texto del menú
+
+Petición del usuario: "borra el NxN de habitaciones en el menu". La fila
+25 de `drawMenu()` mostraba "`N x N - N LETRAS`" (ancho/alto de la
+rejilla del planeta seleccionado, spec §33); se quitó el "`N x N - `"
+dejando solo "`N LETRAS`"/"`N LETRA`". `sizePresets[].cols/rows` siguen
+exactamente igual por debajo (siguen fijando `mapCols`/`mapRows` para
+`GuideMap_generate()` etc.) — este cambio es solo de lo que se imprime
+en pantalla, nada estructural. `make clean && make` sin errores ni
+warnings nuevos. No se relanzó BlastEm para esta comprobación: el
+usuario ya tenía su propia partida abierta en ese momento, y lanzar otra
+instancia habría interferido — pendiente que lo vea él mismo recargando
+su sesión.
