@@ -3839,3 +3839,51 @@ warnings nuevos. No se relanzó BlastEm para esta comprobación: el
 usuario ya tenía su propia partida abierta en ese momento, y lanzar otra
 instancia habría interferido — pendiente que lo vea él mismo recargando
 su sesión.
+
+## 54. Bug real: el §52 generaba siempre los mismos 8 planetas en cada arranque
+
+El usuario preguntó, tras reportar una colisión invisible (sin
+confirmar aún, pendiente de más datos): "siempre se estan generando las
+mismas habitaciones o es una sensación mía? ... mi pregunta es si cada
+vez que el programa carga, estas generando habitaciones distintas y
+paths distintos aleatoriamente". No era sensación suya.
+
+**Causa real**: `random()` de SGDK (`tools.c`) arranca cada partida de
+hardware/emulador desde una semilla **fija** (`randbase = 0xC427`) y se
+queda ahí hasta que `JOY_update()` (disparada por la interrupción de
+VBlank, así que corre cada frame pase lo que pase en `main()`) detecta
+la **primera pulsación real de un botón** — en ese momento, y solo en
+ese momento, se re-siembra con `getTick()` (tiempo transcurrido desde
+el arranque, que varía según lo rápido que reaccione la persona jugando
+— la única fuente real de entropía que tiene esta consola sin reloj
+interno). `precomputeAllPlanets()` (spec §52) tira de `random()` para
+las 8 semillas de los planetas **justo después de `JOY_init()`**, antes
+de que el jugador haya tocado nada — así que, salvo la rarísima
+coincidencia de tener un botón físicamente pulsado en el instante exacto
+del arranque, siempre leía la secuencia SIN sembrar, idéntica en cada
+arranque. Antes del §52, esto no pasaba: `newGame()` tiraba su propia
+semilla nueva solo al pulsar "empezar", momento en el que el jugador ya
+había pulsado IZQUIERDA/DERECHA/A navegando el menú, re-sembrando el
+generador de forma implícita sin que nadie lo hubiera diseñado a
+propósito — el §52 rompió esa casualidad al mover el sorteo de semillas
+a un punto anterior a cualquier posible pulsación.
+
+**Arreglo**: una espera real de "pulsa un botón" (`"PULSA UN BOTON PARA
+EMPEZAR"`, bucle `while (JOY_readJoypad(JOY_1) == 0);`) insertada justo
+antes de `precomputeAllPlanets()` en `main()` — fuerza la primera
+pulsación real (y por tanto el re-sembrado con tiempo real) a ocurrir
+antes de que se dibuje ni una sola semilla de planeta. Mismo mecanismo
+que SGDK ya traía incorporado, solo había que garantizar que corriera
+en el momento correcto.
+
+**Verificación**: `make clean && make` sin errores ni warnings nuevos.
+Arranque comprobado en BlastEm: log limpio, proceso estable sin pulsar
+nada (exactamente el comportamiento esperado de un bucle de espera
+bloqueante, no un cuelgue). **No se pudo verificar la variación real
+entre arranques** desde esta sesión — confirmar la causa raíz vino de
+leer el código fuente de SGDK (`~/dev/sgdk/src/tools.c`/`joy.c`)
+directamente, no de observar el comportamiento en hardware/emulador
+real (misma limitación de esta sesión para medir tiempos/interactuar
+con BlastEm ya documentada en el §52). Pendiente que el usuario
+confirme jugando varios arranques seguidos que ahora sí varían los
+planetas entre sí.

@@ -1058,6 +1058,27 @@ int main(bool hardReset)
 
     JOY_init();
 
+    // BUG FIX (user report: "siempre se estan generando las mismas
+    // habitaciones" -- confirmed real, not a feeling). SGDK's own
+    // random() (tools.c) starts from a FIXED default seed every single
+    // boot and stays there until the first real button press, at which
+    // point JOY_update() (driven by the VBlank interrupt, so this keeps
+    // happening every frame regardless of what main() is doing)
+    // reseeds it from getTick() -- elapsed real time, which varies with
+    // human reaction speed. precomputeAllPlanets() draws all 8 planets'
+    // mapSeeds via random() -- before this fix, it did that immediately
+    // after JOY_init(), with no button ever pressed yet, so it always
+    // drew from the same unseeded sequence: every boot generated the
+    // IDENTICAL 8 maps. A real "press a button" wait right here forces
+    // that reseed to happen first, same as it always implicitly did
+    // before spec §52 (back when newGame()'s own random() call only
+    // ran after the player had already pressed LEFT/RIGHT/A navigating
+    // the menu).
+    VDP_drawText("PULSA UN BOTON PARA EMPEZAR", 6, 13);
+    while (JOY_readJoypad(JOY_1) == 0)
+        ;
+    VDP_clearPlane(BG_A, TRUE);
+
     // spec §52: every planet's rooms/plant totals, computed once here,
     // before the menu (or any sprite) is ever shown -- see its own doc
     // comment for why this replaces the lazier, scattered-pauses
