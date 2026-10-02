@@ -3712,3 +3712,116 @@ planeta?"
   primera vez que se ve un planeta con guardado se nota una pausa breve
   (el escaneo) y las siguientes no, y que un planeta nunca jugado no
   muestra esa fila en absoluto.
+  **Superado por el §52 justo abajo**: el usuario pidió mover todo este
+  cálculo de "la primera vez que se ve el planeta en el menú" a "antes
+  de que el menú aparezca siquiera" — la pausa que este párrafo describe
+  ya no existe donde se describe aquí; ver el §52 para dónde está ahora.
+
+## 52. Todo el precálculo (salas + plantas) antes de cargar el menú, no disperso
+
+Petición del usuario, tras el §51: "quiero eliminar esos parones, tanto
+en el calculo de paths como conteo de plantas al entrar salir de los
+planetas etc.. no podría calcularse todo antes de empezar el juego?
+antes de cargar el menu?" — se le preguntó el alcance exacto (ver nota
+de la pregunta abajo) y eligió explícitamente: **los 8 planetas
+completos, antes de que se muestre el menú**, aceptando que el arranque
+tarde lo que tarde con tal de que no vuelva a haber ningún parón después
+(ni al moverse entre salas, ni al mirar un planeta en el menú, ni al
+pulsar "empezar").
+
+- **Decisión previa, preguntada al usuario**: calcular esto de verdad
+  significa generar cada sala de cada planeta (incluida la búsqueda del
+  validador TUMBA), lo cual tiene un coste real de CPU que no puedo medir
+  en hardware real desde esta sesión. Se ofrecieron 3 alcances: solo el
+  planeta elegido al pulsar "empezar" (pausa única y controlada, coste
+  mínimo), los 8 planetas al arrancar (elegido), o un reparto en segundo
+  plano mientras el jugador está parado en el menú (cero pausas
+  visibles, pero bastante más ingeniería — repartir una tarea entre
+  frames en vez de una llamada bloqueante). El usuario escogió
+  explícitamente la opción de mayor coste de arranque a cambio de cero
+  parones después.
+- **`mapSeed` deja de depender de `hasSave`**: antes, un planeta nunca
+  jugado no tenía semilla hasta pulsar "empezar" (`random()` en ese
+  momento). Ahora `precomputeAllPlanets()` (`main.c`) le asigna una
+  semilla a los 8 planetas al arrancar, se hayan jugado o no. `hasSave`
+  no cambia de significado (spec §35: sigue siendo "el jugador ha
+  dejado este planeta a medias al menos una vez", solo decide si
+  `collectedCount`/`plantsCollected` se muestran como progreso real o
+  como 0) — solo `mapSeed` deja de estar atado a él.
+- **Una caché de intentos de sala POR PLANETA, no una compartida**:
+  antes, `maze.c` tenía un único array `attemptCache[MAZE_ROOM_CACHE_SLOTS]`
+  compartido por cualquier mapa que se estuviera generando en ese
+  momento — `newGame()` lo vaciaba sin más ("el layout va a cambiar")
+  porque, con el diseño anterior, SIEMPRE cambiaba. Ahora que los 8
+  planetas se generan una vez y para siempre al arrancar, vaciarlo
+  destruiría ese trabajo. Nuevo: `attemptCache[MAZE_MAP_SLOTS][MAZE_ROOM_CACHE_SLOTS]`
+  (`MAZE_MAP_SLOTS=8`, con un `_Static_assert` en `main.c` atándolo a
+  `SIZE_PRESET_COUNT`) — 648 bytes en total (81×8), trivial. Nuevas
+  `Maze_setActiveMapSlot(slot)` (elige en qué banco opera
+  `Maze_generateRoom`/`Maze_clearRoomCache`) y `Maze_clearRoomCache()`
+  redefinida para vaciar solo el banco activo, no todos.
+- **El verdadero cambio que elimina el parón de sala en sala**:
+  `scanPlanetPlantTotal()` (ya existía desde el §51, reutilizada tal
+  cual) genera de verdad cada sala de cada planeta al arrancar — eso
+  siempre fue cierto, lo nuevo es que ahora, en vez de tirar ese trabajo,
+  queda guardado en la caché de ESE planeta (`Maze_setActiveMapSlot`
+  antes de generar). `newGame()` ya no llama a `Maze_clearRoomCache()`
+  en absoluto — solo `Maze_setActiveMapSlot(sizePresetIndex)`, apuntando
+  al banco que `precomputeAllPlanets()` ya rellenó. Así, la primera vez
+  que el jugador entra de verdad a una sala durante la partida, no es
+  realmente "la primera vez" para `maze.c`: ya se generó y se cacheó al
+  arrancar, así que `generateRoomTombo` entra directo por la rama de
+  repetición (sin búsqueda, sin validador) — exactamente el mecanismo
+  de caché que ya existía (spec §5), solo que ahora se calienta antes de
+  jugar en vez de sala por sala mientras se juega.
+- **`drawMenu()` simplificado**: ya no comprueba
+  `hasSave && !plantsTotalKnown` ni escanea sobre la marcha — `plantsTotal`
+  está siempre listo desde el arranque, así que la fila "`C DE T PLANTAS`"
+  se dibuja siempre, para cualquier planeta (recogidas en 0 si `!hasSave`,
+  mismo convenio que ya usa la fila de letras).
+- **Pantalla de carga mínima**: `precomputeAllPlanets()` escribe
+  "CARGANDO..." y "PLANETA N DE 8" (actualizado en cada planeta) antes
+  de arrancar el bucle — sin barra de progreso real por sala (habría
+  que instrumentar `scanPlanetPlantTotal` para eso, fuera de alcance
+  aquí), solo para que no parezca que el juego se ha quedado colgado.
+- **Verificación (arnés host, no comiteado, vive en el scratchpad de la
+  sesión)**: la propiedad que de verdad importa de este rediseño —
+  generar el planeta B en su propio banco no debe tocar lo ya cacheado
+  del planeta A, y volver al banco A debe seguir reproduciendo
+  exactamente su propio layout — probada contra el `maze.c` real: 300
+  tríos (A, B, volver a A) con puertas/offsets/semillas aleatorios,
+  alternando `Maze_setActiveMapSlot(0)`/`Maze_setActiveMapSlot(1)`: **0
+  casos de contaminación cruzada** (el grid de A tras volver a su banco
+  es siempre, byte a byte, idéntico al de la primera vez). Una métrica
+  secundaria del mismo arnés (¿produjeron A y B grids distintos, como
+  cabría esperar de semillas distintas?) dio un puñado de falsos
+  positivos con semillas demasiado cercanas entre sí (A y B convergiendo
+  al mismo código de intento aceptado por pura coincidencia del espacio
+  de búsqueda, no por una fuga entre bancos) — confirmado separando más
+  las semillas, bajó de 4/300 a 1/300 sin tocar el código real; la
+  métrica que de verdad se estaba verificando (contaminación cruzada)
+  se mantuvo en 0 en ambos casos. `make clean && make` sin errores ni
+  warnings nuevos.
+  **Límite real encontrado al intentar medir el tiempo de arranque**: se
+  intentó lanzar BlastEm y capturar pantallas (`screencapture`,
+  `osascript` para traer la ventana al frente) para cronometrar cuánto
+  tarda en aparecer el menú — la ventana de BlastEm nunca aparece en las
+  capturas en este entorno (sigue mostrando el escritorio), y además se
+  descubrió que el proceso de BlastEm **se cierra solo a los ~6 segundos
+  sin que nadie lo mate** (apagado limpio, "Saved SRAM...", sin rastro de
+  excepción/crash del 68k) — consistente con que este entorno no tiene
+  una sesión de ventana real adjunta, no con un fallo del precálculo.
+  Arranques cortos (3s) repetidos sí confirman que el proceso sigue vivo
+  y sin errores en el log durante esa ventana, la misma comprobación que
+  ya se usa en el resto de esta spec. **No hay forma, desde esta sesión,
+  de medir cuánto tarda de verdad el arranque en hardware/emulador
+  real** — pendiente que el usuario lo cronometre él mismo; si resulta
+  demasiado largo, la opción de "solo el planeta elegido al pulsar
+  empezar" que rechazó esta vez sigue siendo la alternativa de menor
+  coste.
+- **No verificado interactivamente**: aparte del tiempo de arranque de
+  arriba, pendiente confirmar que, tras el precálculo, moverse entre
+  salas durante el juego ya no tiene ningún parón perceptible (antes
+  sí podía haberlo, sala por sala, la primera vez que se visitaba cada
+  una), y que el menú muestra el status de plantas de los 8 planetas
+  desde el primer fotograma, no solo del que se ha jugado.

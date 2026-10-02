@@ -1295,18 +1295,27 @@ static bool tomboTryOnce(u16 seed, s16 hubX, s16 hubY, u8 doorMask, const u8 doo
 #define TOMBO_CODE_COUNT (2 * TOMBO_STRICT_ATTEMPTS + TOMBO_FALLBACK_ATTEMPTS)
 
 // Per-room cache of accepted attempt codes, indexed by the caller's slot
-// (main.c: one per grid room, plus MAZE_INSERT_CACHE_SLOT). 0 = not known
-// yet, CACHE_NO_TOMBO = every attempt was rejected (carve fallback), else
-// code + 1. Cleared by Maze_clearRoomCache().
+// (main.c: one per grid room, plus MAZE_INSERT_CACHE_SLOT) within
+// whichever bank Maze_setActiveMapSlot() last selected (spec §52: one
+// bank per planet, kept for the whole session instead of one shared bank
+// wiped out every newGame()). 0 = not known yet, CACHE_NO_TOMBO = every
+// attempt was rejected (carve fallback), else code + 1. Cleared a whole
+// bank at a time by Maze_clearRoomCache().
 #define CACHE_NO_TOMBO 255
-static u8 attemptCache[MAZE_ROOM_CACHE_SLOTS];
+static u8 attemptCache[MAZE_MAP_SLOTS][MAZE_ROOM_CACHE_SLOTS];
+static u8 activeMapSlot;
+
+void Maze_setActiveMapSlot(u8 slot)
+{
+    activeMapSlot = slot;
+}
 
 void Maze_clearRoomCache(void)
 {
     u16 i;
 
     for (i = 0; i < MAZE_ROOM_CACHE_SLOTS; i++)
-        attemptCache[i] = 0;
+        attemptCache[activeMapSlot][i] = 0;
 }
 
 // Runs the attempt with this code. validate=FALSE replays a known-good one.
@@ -1349,7 +1358,7 @@ static bool tomboTryCode(u16 code, s16 hubX, s16 hubY, u8 doorMask, const u8 doo
 static bool generateRoomTombo(s16 hubX, s16 hubY, u8 doorMask, const u8 doorOff[4],
                                u16 roomSeed, bool useFixedWall, u8 fixedWallVariant, bool spawnAtHub, u8 cacheSlot)
 {
-    u8 *const cache = &attemptCache[cacheSlot];
+    u8 *const cache = &attemptCache[activeMapSlot][cacheSlot];
     bool ok = FALSE;
     u16 code;
 

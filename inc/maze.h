@@ -101,8 +101,31 @@ void Maze_restoreTextColor(void);
 #define MAZE_ROOM_CACHE_SLOTS  81
 #define MAZE_INSERT_CACHE_SLOT 80
 
-// Forgets every cached attempt. Call whenever the layout inputs change: a
-// new game or a resumed one (mapSeed, doors).
+// One whole cache bank (MAZE_ROOM_CACHE_SLOTS bytes) per planet (spec
+// §52, user request: "no podria calcularse todo antes de empezar el
+// juego? antes de cargar el menu?") -- main.c precomputes EVERY planet's
+// rooms (and plant totals) once at boot, before the menu ever shows, so
+// a bank has to survive for the rest of the session instead of being
+// thrown away the moment a different planet is selected. Must equal
+// main.c's SIZE_PRESET_COUNT/menu.h's MENU_PLANET_COUNT -- checked by a
+// _Static_assert in main.c (maze.c doesn't include menu.h/know about
+// presets, same reasoning ITEM_COUNT/MAX_MAP_COLS already document
+// elsewhere in this codebase for similar cross-module constants).
+#define MAZE_MAP_SLOTS 8
+
+// Selects which of the MAZE_MAP_SLOTS cache banks Maze_generateRoom's
+// cacheSlot parameter and Maze_clearRoomCache() operate on, until the
+// next call changes it. Call once before generating/scanning a
+// particular planet's rooms (main.c's boot-time precompute loop, and
+// newGame() picking the one the player is actually about to play).
+void Maze_setActiveMapSlot(u8 slot);
+
+// Forgets every cached attempt in the CURRENTLY ACTIVE bank (see
+// Maze_setActiveMapSlot) -- every other bank is untouched. Call only
+// when that bank's own layout inputs are about to change; normal play
+// never needs this any more (every bank is already correct from the
+// boot-time precompute pass, for the entire session -- a planet's
+// mapSeed never changes after that).
 void Maze_clearRoomCache(void);
 
 // Uploads the maze tileset to VRAM and sets its palette. Call once at boot.

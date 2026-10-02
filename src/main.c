@@ -256,14 +256,19 @@ static u8 sizePresetIndex = SIZE_PRESET_DEFAULT;
 
 // Per-planet saved progress (spec §35, user request: "cada planeta tenga
 // el recuento de sus letras obtenidas... si el player sale de un
-// planeta, esas letras se conservan"). Zero-initialized (hasSave=FALSE
-// for all) until the ship actually leaves a planet mid-run. mapSeed is
-// the piece that lets a resumed game regenerate the EXACT same map:
-// GuideMap_generate() pulls from the shared random() stream, which
-// (unlike each room's own layout, maze.c's Maze_generateRoom already
-// calls setRandomSeed(roomSeed) for that) was never itself reseeded from
-// mapSeed before -- newGame() below now does that explicitly on both a
-// fresh start and a resume, so replaying the same mapSeed reproduces the
+// planeta, esas letras se conservan"). hasSave=FALSE for all until the
+// ship actually leaves a planet mid-run -- still means exactly that
+// (spec §52 doesn't change it), used only to decide whether
+// collectedCount/plantsCollected reflect real progress or read as 0.
+// mapSeed, though, is no longer tied to hasSave (spec §52, user request:
+// "no podria calcularse todo antes de empezar el juego? antes de
+// cargar el menu?"): precomputeAllPlanets() now assigns every planet's
+// mapSeed once at boot, played or not, specifically so newGame() never
+// has to roll a fresh one on the spot. GuideMap_generate() pulls from
+// the shared random() stream, which (unlike each room's own layout,
+// maze.c's Maze_generateRoom already calls setRandomSeed(roomSeed) for
+// that) isn't itself reseeded from mapSeed automatically -- newGame()
+// does that explicitly, so replaying the same mapSeed reproduces the
 // same room tree/item placement/insertion link deterministically, same
 // idea as maze.c already relies on at the per-room level. collectedCount
 // is enough to restore item state too (Items_fastForward) since
@@ -272,16 +277,17 @@ static u8 sizePresetIndex = SIZE_PRESET_DEFAULT;
 // Plants_setCollected -- no ordering to replay, just the raw count).
 // plantsTotal/plantsTotalKnown (spec §51, user request: "pintar en el
 // menu un status de cuantas ha recogido el player en cada planeta",
-// which needs a denominator) cache the full-map plant count computed by
-// scanPlanetPlantTotal() -- unlike collectedCount/plantsCollected, this
-// isn't something the normal play loop produces for free: a planet's
-// total is NOT a fixed preset constant (sizePresets[].letters is,
-// plants are not), computing it means generating every room in the map
-// to see how many plants spec §48's slide-graph placement puts in each
-// one. Too expensive to redo every frame, so it's computed once -- the
-// first time drawMenu() shows a planet that already has a save (no
-// mapSeed committed yet for one that was never played, so nothing to
-// scan) -- and cached here for the rest of this boot.
+// which needs a denominator) cache the full-map plant count
+// scanPlanetPlantTotal() computes -- unlike collectedCount/
+// plantsCollected, this isn't something the normal play loop produces
+// for free: a planet's total is NOT a fixed preset constant
+// (sizePresets[].letters is, plants are not), computing it means
+// generating every room in the map to see how many plants spec §48's
+// slide-graph placement puts in each one. Too expensive to redo every
+// frame -- precomputeAllPlanets() computes it exactly once per planet,
+// for EVERY planet, at boot (spec §52 superseding spec §51's original
+// "the first time its menu entry is shown" timing, which still left a
+// pause the first time each planet was glanced at).
 typedef struct
 {
     bool hasSave;
@@ -440,32 +446,43 @@ static u8 doorOffsetFor(u8 col, u8 row, u8 dir)
 
 // One cache slot per grid room (maze.h) -- the room grid must fit in them.
 _Static_assert(MAX_MAP_COLS * MAX_MAP_ROWS <= MAZE_INSERT_CACHE_SLOT, "MAZE_ROOM_CACHE_SLOTS too small for the map grid");
+// One room-attempt-cache bank per planet (spec §52) -- maze.c doesn't
+// know about presets (same reasoning MAX_MAP_COLS/ITEM_COUNT already
+// document for similar cross-module constants elsewhere in this file).
+_Static_assert(MAZE_MAP_SLOTS == SIZE_PRESET_COUNT, "MAZE_MAP_SLOTS must equal SIZE_PRESET_COUNT");
 
-// Computes the full plant total for presetSave[presetIndex]'s saved map
-// (spec §51, user request: "contar todas las plantas de cada planeta")
-// -- generates every room in it and sums Plants_lastRoomCount() across
-// all of them. Locks are ignored on purpose (every door generated as if
-// already unlocked): a room's interior/plant line never actually depends
-// on lock state (only its border gets sealed, spec §16/§19, after the
-// interior -- and the slide graph -- are already built), but the
-// opposite isn't true: a SEALED door's threshold cells can truncate a
-// candidate plant line early (plants.c's own Maze_isWall recheck, spec
-// §48). Scanning with every door unlocked gives one stable total for
-// this map, independent of how far the player has actually progressed,
-// instead of a number that would keep changing as branches unlock.
+// Generates every room of presetSave[presetIndex]'s map (spec §52, user
+// request: "no podria calcularse todo antes de empezar el juego? antes
+// de cargar el menu?") and sums each one's Plants_lastRoomCount() (spec
+// §51). Locks are ignored on purpose (every door generated as if already
+// unlocked): a room's interior/plant line never actually depends on lock
+// state (only its border gets sealed, spec §16/§19, after the interior
+// -- and the slide graph -- are already built), but the opposite isn't
+// true: a SEALED door's threshold cells can truncate a candidate plant
+// line early (plants.c's own Maze_isWall recheck, spec §48). Scanning
+// with every door unlocked gives one stable total for this map,
+// independent of how far the player has actually progressed, instead of
+// a number that would keep changing as branches unlock.
 //
-// Expensive: one real tombo generation per room, same per-room cost
-// loadRoom() already pays during ordinary play, just for every room in
-// the map back-to-back instead of one at a time as the player wanders
-// in. Call this at most once per planet and cache the result (drawMenu()
-// does, into presetSave[].plantsTotal/plantsTotalKnown) -- never from
-// the main per-frame loop.
+// Also where every room's generation-attempt cache gets populated (spec
+// §52): Maze_setActiveMapSlot(presetIndex) first, so every
+// Maze_generateRoom() call below lands in THIS planet's own bank
+// (maze.h, one per planet so a later one doesn't wipe an earlier one's
+// work the way a single shared bank used to) -- the whole reason
+// newGame() no longer needs to (re)generate a room from scratch the
+// first time the player actually walks into it: this already did, and
+// left the winning attempt code cached.
+//
+// Expensive regardless (one real tombo generation per room) -- called
+// once per planet from precomputeAllPlanets(), at boot, before the menu
+// ever shows (never mid-game, never from the per-frame loop).
 //
 // Clobbers mapCols/mapRows/itemCount/mapSeed/guideMap/insertLink*/the
-// current room's own grid -- all harmless here since this only ever
-// runs from STATE_MENU, and newGame() unconditionally reinitializes
-// every one of them from scratch the moment the player actually starts
-// or resumes a planet, regardless of whatever this scan left them at.
+// current room's own grid -- all harmless here since newGame()
+// unconditionally reinitializes every one of them from scratch the
+// moment the player actually starts or resumes a planet, regardless of
+// whatever this scan left them at (its OWN cache bank survives that,
+// by design -- see Maze_setActiveMapSlot's own doc comment).
 static u16 scanPlanetPlantTotal(u8 presetIndex)
 {
     u16 total = 0;
@@ -477,7 +494,8 @@ static u16 scanPlanetPlantTotal(u8 presetIndex)
     mapSeed = presetSave[presetIndex].mapSeed; // roomSeedFor() reads this global directly
     setRandomSeed(mapSeed);
     GuideMap_generate();
-    Maze_clearRoomCache(); // this map's own door/offset layout may not match whatever was cached before
+    Maze_setActiveMapSlot(presetIndex);
+    Maze_clearRoomCache(); // fresh bank (boot time: always empty anyway) -- defensive, cheap
 
     for (row = 0; row < mapRows; row++)
     {
@@ -511,6 +529,43 @@ static u16 scanPlanetPlantTotal(u8 presetIndex)
     }
 
     return total;
+}
+
+// Boot-time precompute (spec §52, user request above): runs
+// scanPlanetPlantTotal() for EVERY planet before the menu is ever shown,
+// so every per-room TOMBO search AND every plant count happens once,
+// up front, behind a loading message -- not scattered across room
+// transitions and the first menu glance at each planet the way spec
+// §51's lazier version did. Assigns every planet's mapSeed here too
+// (previously only drawn the first time THAT planet was actually
+// played) -- harmless to do for one never chosen: nothing reads
+// presetSave[].mapSeed to decide whether a planet has real play
+// progress, hasSave still means exactly that (set only in
+// resetToMenu(), spec §35), unaffected by this.
+//
+// No progress bar beyond "which planet" -- a real per-room counter
+// would need plumbing scanPlanetPlantTotal() wasn't built with, and the
+// point of this screen is only "don't look frozen", not a precise ETA.
+static void precomputeAllPlanets(void)
+{
+    u8 i;
+
+    VDP_drawText("CARGANDO...", 14, 13);
+
+    for (i = 0; i < SIZE_PRESET_COUNT; i++)
+    {
+        char buf[24];
+        int len;
+
+        presetSave[i].mapSeed = random();
+        presetSave[i].plantsTotal = scanPlanetPlantTotal(i);
+        presetSave[i].plantsTotalKnown = TRUE;
+
+        len = sprintf(buf, "PLANETA %d DE %d", i + 1, SIZE_PRESET_COUNT);
+        VDP_drawText(buf, (40 - len) / 2, 15);
+    }
+
+    VDP_clearPlane(BG_A, TRUE); // wipe the loading text -- drawMenu() draws over a clean plane right after
 }
 
 static void loadRoom(u8 col, u8 row)
@@ -608,14 +663,18 @@ static void newGame(void)
     const PresetSave save = presetSave[sizePresetIndex];
 
     mapViewOpen = FALSE;
-    // Resume this planet's saved map if it has one (spec §35), otherwise
-    // draw a fresh seed from the ongoing global stream same as always.
-    mapSeed = save.hasSave ? save.mapSeed : random();
+    // Every planet's mapSeed is committed once at boot now (spec §52,
+    // precomputeAllPlanets()), whether or not it's ever actually played
+    // -- no more "fresh start draws a new seed" branch here, resuming
+    // and starting for the first time look identical from this point on.
+    mapSeed = save.mapSeed;
     // Reseed explicitly from mapSeed so GuideMap_generate()'s own
     // random() sequence becomes reproducible from mapSeed alone (see the
-    // presetSave doc comment above) -- needed for a resume to regenerate
-    // the identical map, and harmless on a fresh start (mapSeed was
-    // itself just drawn from the same stream one line up).
+    // presetSave doc comment above) -- reproduces the exact same map
+    // precomputeAllPlanets() already built and discarded for this
+    // planet (nothing from that pass is kept except its mapSeed, plant
+    // total, and room-attempt-cache bank -- see Maze_setActiveMapSlot
+    // right below).
     setRandomSeed(mapSeed);
 
     mapCols = sizePresets[sizePresetIndex].cols;
@@ -623,9 +682,12 @@ static void newGame(void)
     itemCount = sizePresets[sizePresetIndex].letters; // spec §33
 
     GuideMap_generate();
-    // Every room's layout is about to change (new or resumed map, possibly a
-    // different room-gen mode): drop the cached accepted attempts.
-    Maze_clearRoomCache();
+    // Switches to THIS planet's own room-attempt-cache bank (spec §52) --
+    // already fully populated by precomputeAllPlanets() at boot, so every
+    // room loadRoom() generates from here on replays instantly instead of
+    // searching from scratch. Deliberately NOT cleared: that cached work
+    // is exactly what eliminates the per-room pause this spec is about.
+    Maze_setActiveMapSlot(sizePresetIndex);
     tombMoving = FALSE;
     tombQueuedDir = DIR_NONE;
     Items_reset();
@@ -756,23 +818,17 @@ static void drawMenu(void)
     // cada planeta... pintar en el menu un status de cuantas ha recogido
     // el player"). Row 24 -- the one free row between menu.c's orbits
     // (rows 4-23) and this bottom text block (25-27), same kind of gap
-    // row 1's sound hint uses above the orbits. Only for a planet that's
-    // actually been played: an unplayed one has no committed mapSeed yet
-    // to scan (scanPlanetPlantTotal's own doc comment), so there is
-    // nothing to count -- VDP_clearPlane above already leaves this row
-    // blank in that case, nothing else to do.
-    if (presetSave[sizePresetIndex].hasSave)
-    {
-        if (!presetSave[sizePresetIndex].plantsTotalKnown)
-        {
-            presetSave[sizePresetIndex].plantsTotal = scanPlanetPlantTotal(sizePresetIndex);
-            presetSave[sizePresetIndex].plantsTotalKnown = TRUE;
-        }
-
-        len = sprintf(buf, "%d DE %d PLANTAS", presetSave[sizePresetIndex].plantsCollected,
-                      presetSave[sizePresetIndex].plantsTotal);
-        VDP_drawText(buf, (40 - len) / 2, 24);
-    }
+    // row 1's sound hint uses above the orbits. plantsTotal is always
+    // known by the time drawMenu() can run (spec §52:
+    // precomputeAllPlanets() fills it in for every planet at boot,
+    // before the menu is ever shown) -- no more per-planet first-glance
+    // scan here, and no more hasSave gate on the row itself; same
+    // "0 DE N" convention the letters row above already uses for an
+    // unplayed planet, via the same hasSave-gated `collected` local.
+    len = sprintf(buf, "%d DE %d PLANTAS",
+                  presetSave[sizePresetIndex].hasSave ? presetSave[sizePresetIndex].plantsCollected : 0,
+                  presetSave[sizePresetIndex].plantsTotal);
+    VDP_drawText(buf, (40 - len) / 2, 24);
 }
 
 // Hard reset combo (user request): A+B+C+UP together, from anywhere
@@ -1001,6 +1057,12 @@ int main(bool hardReset)
     enemySprite = SPR_addSprite(&enemyShip, 0, 0, TILE_ATTR(PAL2, TRUE, FALSE, FALSE));
 
     JOY_init();
+
+    // spec §52: every planet's rooms/plant totals, computed once here,
+    // before the menu (or any sprite) is ever shown -- see its own doc
+    // comment for why this replaces the lazier, scattered-pauses
+    // approach spec §51 started with.
+    precomputeAllPlanets();
 
     gameState = STATE_MENU;
     SPR_setVisibility(playerSprite, HIDDEN);
