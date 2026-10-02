@@ -2,6 +2,7 @@
 #define _PLANTS_H_
 
 #include <genesis.h>
+#include "guidemap.h" // MAX_MAP_COLS/MAX_MAP_ROWS, for Plants_saveMask/restoreMask's array type
 
 // Placeholder collectible plants (user request): "un tipo de planta que
 // quepa en 1 tile... cuando la nave pasa por ellas las recoge y suma un
@@ -59,9 +60,11 @@ bool Plants_tryCollect(u8 col, u8 row, s16 playerX, s16 playerY);
 // caller's current room).
 void Plants_drawInRoom(u8 col, u8 row);
 
-// Draws the running total ("PLANTAS: N") on BG_B row 1, to the right of
-// Items_drawHud's own letter tracker -- same plane/row/high-priority
-// trick. Call once after Plants_reset() and again every time
+// Draws the running total against this planet's real total ("PLANTAS:
+// n/TOTAL", user request) on BG_B row 1, to the right of Items_drawHud's
+// own letter tracker -- same plane/row/high-priority trick. Reads
+// Plants_setPlanetTotal()'s value for the denominator, so call that
+// first. Call once after Plants_reset() and again every time
 // Plants_tryCollect() returns TRUE.
 void Plants_drawHud(void);
 
@@ -72,10 +75,41 @@ void Plants_drawHud(void);
 u16 Plants_collectedCount(void);
 
 // Restores a saved running total instantly (spec §51, resuming a
-// planet) -- unlike Items_fastForward, there's no order/position to
-// replay, a plant pickup is just a counter, so this is a plain setter.
-// Call right after Plants_reset(), before any room loads.
+// planet) -- a plain setter, no order/position to replay the way
+// Items_fastForward has to. Call right after Plants_reset(), before any
+// room loads.
+//
+// BUG FIX (user report: "94 DE 88 PLANTAS" in the menu -- collected
+// exceeding the real total). This setter alone was never enough: it
+// restores the NUMBER but not which specific plants (which rooms) are
+// already gone, and Plants_reset() (which must run first, to re-init
+// `total` and every room's curCount/curCol/curRow) also wipes
+// collectedMask -- so a resumed planet's already-cleared rooms silently
+// came back with their plants still standing, and walking through them
+// again kept incrementing the restored total past the real cap. Must
+// always be paired with Plants_restoreMask() below, restoring the same
+// snapshot resetToMenu() took with Plants_saveMask() -- that's the part
+// that actually remembers which rooms are done.
 void Plants_setCollected(u16 count);
+
+// Snapshots/restores collectedMask (plants.c) whole -- the per-room
+// "which of this room's plants are already gone" bits Plants_reset()
+// clears and Plants_tryCollect() sets, which Plants_setCollected()'s
+// raw-count approach has no way to reconstruct on its own (see its own
+// updated doc comment). main.c's resetToMenu() calls Plants_saveMask()
+// into presetSave[].plantsMask alongside plantsCollected; newGame() calls
+// Plants_restoreMask() right after Plants_reset()+Plants_setCollected()
+// when resuming a planet that has one.
+void Plants_saveMask(u16 outMask[MAX_MAP_ROWS][MAX_MAP_COLS]);
+void Plants_restoreMask(const u16 inMask[MAX_MAP_ROWS][MAX_MAP_COLS]);
+
+// Sets the denominator Plants_drawHud() prints ("PLANTAS: n/TOTAL", user
+// request) -- presetSave[].plantsTotal, already known by the time
+// newGame() starts actual gameplay (scanPlanetPlantTotal() computed it,
+// at the latest, the first time this planet was ever entered this boot).
+// Call once per newGame(), any time after Plants_reset() (which doesn't
+// touch this -- it's a per-planet constant, not session state).
+void Plants_setPlanetTotal(u16 total);
 
 // Total plants in whichever room Plants_spawnForRoom last ran for,
 // summed across all PLANTS_LINES_PER_ROOM lines (spec §51: main.c's

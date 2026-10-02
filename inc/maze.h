@@ -214,6 +214,26 @@ void Maze_drawNoiseFrame(void);
 // Maze_draw() is called.
 void Maze_drawDebugGraph(void);
 
+// One line of dots/dashes along every navigable edge of the room's slide
+// graph -- every cell a slide actually crosses, not just the node
+// endpoints Maze_drawDebugGraph draws (user request: "pinte lineas en
+// todas las aristas navegables por la nave"). Toggled by its own combo
+// in main.c; Maze_draw() calls this (and Maze_drawDebugGraph) itself
+// whenever Maze_setDebugEdgesVisible(TRUE) is in effect, every time it
+// redraws the room -- no separate call needed from main.c.
+void Maze_setDebugEdgesVisible(bool on);
+bool Maze_debugEdgesVisible(void);
+void Maze_drawDebugEdges(void);
+
+// Debug panel backdrop (user request: the debug overlay's text was
+// unreadable where it sits over the maze). Paints a solid tile into BG_A
+// under the given text rows so main.c's debug text, drawn separately to
+// BG_B, has real contrast instead of the maze bleeding through every
+// glyph's own transparent pixels. Call once when the panel turns on, not
+// every frame -- the box itself never changes. Maze_draw() undoes it
+// (call that when the panel turns off).
+void Maze_drawDebugBackdrop(u8 firstRow, u8 rows);
+
 // tx/ty in maze-cell units. Out-of-range coordinates count as wall.
 bool Maze_isWall(s16 tx, s16 ty);
 

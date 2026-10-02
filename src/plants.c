@@ -27,6 +27,13 @@ static u8 curCount[PLANTS_LINES_PER_ROOM];
 static u16 collectedMask[MAX_MAP_ROWS][MAX_MAP_COLS];
 static u16 total;
 
+// This planet's real plant count (Plants_setPlanetTotal) -- the
+// denominator Plants_drawHud() prints, separate from `total` above
+// (confusingly also named "total", but that one is the COLLECTED count).
+// A per-planet constant, not session state, so Plants_reset() leaves it
+// alone.
+static u16 planetTotal;
+
 // Own tiny xorshift PRNG, seeded from roomSeed, instead of the shared
 // random() stream: Maze_generateRoom's accepted-attempt cache (maze.h)
 // can replay a cached layout WITHOUT repeating its original search, so
@@ -255,9 +262,9 @@ void Plants_drawInRoom(u8 col, u8 row)
 
 void Plants_drawHud(void)
 {
-    char buf[16];
+    char buf[20];
 
-    sprintf(buf, "PLANTAS:%3d", total);
+    sprintf(buf, "PLANTAS:%d/%d", total, planetTotal);
     VDP_setTextPriority(1); // draw above BG_A's low-priority maze tiles, same as Items_drawHud
     VDP_drawTextBG(BG_B, buf, 14, 1);
     VDP_setTextPriority(0);
@@ -271,6 +278,29 @@ u16 Plants_collectedCount(void)
 void Plants_setCollected(u16 count)
 {
     total = count;
+}
+
+void Plants_saveMask(u16 outMask[MAX_MAP_ROWS][MAX_MAP_COLS])
+{
+    u8 r, c;
+
+    for (r = 0; r < MAX_MAP_ROWS; r++)
+        for (c = 0; c < MAX_MAP_COLS; c++)
+            outMask[r][c] = collectedMask[r][c];
+}
+
+void Plants_restoreMask(const u16 inMask[MAX_MAP_ROWS][MAX_MAP_COLS])
+{
+    u8 r, c;
+
+    for (r = 0; r < MAX_MAP_ROWS; r++)
+        for (c = 0; c < MAX_MAP_COLS; c++)
+            collectedMask[r][c] = inMask[r][c];
+}
+
+void Plants_setPlanetTotal(u16 t)
+{
+    planetTotal = t;
 }
 
 u16 Plants_lastRoomCount(void)

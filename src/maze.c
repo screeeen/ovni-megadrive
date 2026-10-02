@@ -23,6 +23,10 @@
 #define BASE_TILE       TILE_USER_INDEX
 #define CELL_ROW_TILES  74 // (592px / 8px) tiles per 8px-tall row of the atlas
 
+// PAL0 index5 (see Maze_loadGraphics/Maze_drawDebugBackdrop): never used by
+// the dither art (only 0-4 are), free for the debug panel's solid box.
+#define DEBUG_BOX_PAL_INDEX 5
+
 #define PATH 0
 #define WALL_VARIANTS 9 // 9 dither patterns per hue
 
@@ -1618,6 +1622,10 @@ void Maze_loadGraphics(void)
     for (hue = 0; hue < MAZE_SECTION_COUNT; hue++)
         PAL_setColor(1 + hue, RGB24_TO_VDPCOLOR(hueColorRGB[hue]));
 
+    // index5: never touched by the dither art above (only 0-4 are), so
+    // free for Maze_drawDebugBackdrop's solid box -- see its own comment.
+    PAL_setColor(DEBUG_BOX_PAL_INDEX, RGB24_TO_VDPCOLOR(0x000000));
+
     VDP_loadTileSet(&mazeTiles, BASE_TILE, DMA);
 }
 
@@ -1661,6 +1669,15 @@ void Maze_restoreTextColor(void)
     VDP_setTextPalette(PAL0);
 }
 
+// Maze_drawDebugEdges/Graph are defined further down, next to the rest of
+// the debug-graph overlay -- forward-declared (and the flag they're
+// gated on defined) here so Maze_draw() below can call them itself
+// whenever Maze_setDebugEdgesVisible(TRUE) is active, instead of relying
+// on every one of Maze_draw()'s several call sites in main.c to remember.
+static bool debugEdgesVisible = FALSE;
+void Maze_drawDebugEdges(void);
+void Maze_drawDebugGraph(void);
+
 void Maze_draw(void)
 {
     // One 40x2-tile band per maze row, built in a buffer and written with a
@@ -1689,6 +1706,12 @@ void Maze_draw(void)
         }
 
         VDP_setTileMapDataRect(BG_A, band, 0, y * 2, MAZE_W * 2, 2, MAZE_W * 2, CPU);
+    }
+
+    if (debugEdgesVisible)
+    {
+        Maze_drawDebugEdges();
+        Maze_drawDebugGraph();
     }
 }
 
@@ -1769,6 +1792,45 @@ void Maze_drawNoiseFrame(void)
     }
 }
 
+// Debug panel backdrop (user request: "pinta el debug en un background
+// negro, se pisa con el fondo y los caracteres son ilegibles"). The panel
+// text is drawn on BG_B, a separate plane from the maze -- a BG_B font
+// glyph's own non-ink pixels are hardware-transparent (index0, same rule
+// walls/floor rely on elsewhere), so printing straight over BG_A just let
+// the maze show through every gap in every letter. Painting a solid tile
+// into BG_A underneath fixes it at the pixel level: BG_B's ink is opaque,
+// its gaps are transparent, so they reveal this solid box instead of the
+// maze. (Filling BG_B itself wouldn't work -- VDP_drawTextBG overwrites a
+// full tile per character, losing any box painted there first.) One
+// dedicated 1-tile block, right after the noise pool; loaded once, not
+// regenerated like the noise tiles are since it never changes.
+#define DEBUG_BOX_TILE_INDEX (NOISE_TILE_BASE + NOISE_TILE_COUNT)
+
+static bool debugBoxTileLoaded = FALSE;
+
+void Maze_drawDebugBackdrop(u8 firstRow, u8 rows)
+{
+    static u16 band[40];
+    u8 y;
+    u16 x;
+
+    if (!debugBoxTileLoaded)
+    {
+        // Every nibble (pixel) = DEBUG_BOX_PAL_INDEX (5): 0x5 repeated 8x.
+        static const u32 tileData[8] = { 0x55555555, 0x55555555, 0x55555555, 0x55555555,
+                                          0x55555555, 0x55555555, 0x55555555, 0x55555555 };
+
+        VDP_loadTileData(tileData, DEBUG_BOX_TILE_INDEX, 1, DMA);
+        debugBoxTileLoaded = TRUE;
+    }
+
+    for (x = 0; x < 40; x++)
+        band[x] = TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, DEBUG_BOX_TILE_INDEX);
+
+    for (y = firstRow; y < (firstRow + rows); y++)
+        VDP_setTileMapDataRect(BG_A, band, 0, y, 40, 1, 40, CPU);
+}
+
 // Debug overlay (user request: "pinta puntitos de todo el grafo de cada
 // habitacion para debugear") -- one small dot per node of the accepted
 // room's slide graph (every cell the ship can stop in). Reuses
@@ -1782,6 +1844,59 @@ void Maze_drawDebugGraph(void)
 
     for (i = 0; i < slideCount; i++)
         VDP_drawText(".", (u16) (slideNodeX[i] * 2), (u16) (slideNodeY[i] * 2));
+}
+
+// Toggled by its own debug combo (user request: "haz un modo debug nuevo,
+// inventa tu la combinacion para activarlo que pinte lineas en todas las
+// aristas navegables por la nave"). debugEdgesVisible itself is declared
+// up by Maze_draw() (needs to see it before this point in the file);
+// Maze_draw() calls both this and Maze_drawDebugGraph() above whenever
+// it's on, so nothing else has to remember to.
+void Maze_setDebugEdgesVisible(bool on)
+{
+    debugEdgesVisible = on;
+}
+
+bool Maze_debugEdgesVisible(void)
+{
+    return debugEdgesVisible;
+}
+
+// One line of dots along every navigable slide -- the FULL run of cells
+// between two slide-graph nodes (Maze_drawDebugGraph above only marks the
+// node endpoints, nothing in between). Walked once per node, E/S only
+// (positive directions): every edge is registered from both ends
+// (slideTo[node][dir] is set up that way by slideExpand), so N/W would
+// just redraw the same lines a second time. Reuses Maze_slideNodeCount/
+// Pos/Edge, the same read-only accessors plants.c's own placement already
+// trusts (spec §48) -- not a second way of walking the graph, the exact
+// same one.
+void Maze_drawDebugEdges(void)
+{
+    u16 i;
+
+    for (i = 0; i < slideCount; i++)
+    {
+        s16 target;
+
+        target = slideTo[i][1]; // E
+        if (target >= 0)
+        {
+            s16 x;
+
+            for (x = slideNodeX[i]; x <= slideNodeX[target]; x++)
+                VDP_drawText("-", (u16) (x * 2), (u16) (slideNodeY[i] * 2));
+        }
+
+        target = slideTo[i][2]; // S
+        if (target >= 0)
+        {
+            s16 y;
+
+            for (y = slideNodeY[i]; y <= slideNodeY[target]; y++)
+                VDP_drawText("|", (u16) (slideNodeX[i] * 2), (u16) (y * 2));
+        }
+    }
 }
 
 // Spec §48: plants.c's own read-only view of the same slide graph

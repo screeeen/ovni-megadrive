@@ -219,6 +219,51 @@ static u16 slideDistance;
 #define DEBUG_VIEW_COMBO (BUTTON_B | BUTTON_C | BUTTON_DOWN)
 static bool debugViewOn;
 
+// "RUTAS" debug mode (named per user request, so it has a name to refer
+// to it by) -- the slide-graph edges overlay: "haz un modo debug nuevo...
+// que pinte lineas en todas las aristas navegables por la nave". First
+// version used B+C+LEFT, same chord family as DEBUG_VIEW_COMBO/
+// DRUNK_TOGGLE_COMBO/RESET_COMBO -- but LEFT/UP/DOWN are all live
+// steering input during STATE_PLAYING, so that combo also nudged the
+// ship while toggling (user report: "que no interfiera en el
+// movimiento"). Fix: B+C alone, NO direction held at all -- the one
+// combo in this family that can never double as steering, precisely
+// because it doesn't use a direction. That makes it a literal subset of
+// all three of the others (B+C+UP/DOWN and A+B+C+UP all contain plain
+// B+C), so unlike them it can't be matched with a simple equality check:
+// DEBUG_EDGES_EXCLUDE below must also be confirmed clear, or pressing
+// e.g. DEBUG_VIEW_COMBO (B+C+DOWN) would fire this one too.
+// Actual drawing lives in maze.c (Maze_setDebugEdgesVisible/
+// Maze_drawDebugEdges) -- this combo just flips that flag and forces one
+// redraw so it's visible immediately.
+#define DEBUG_EDGES_COMBO (BUTTON_B | BUTTON_C)
+#define DEBUG_EDGES_EXCLUDE (BUTTON_A | BUTTON_UP | BUTTON_DOWN | BUTTON_LEFT | BUTTON_RIGHT | BUTTON_START)
+
+// "HITBOX" debug mode (named per the same "give it a name" request RUTAS
+// got) -- draws the two different collision shapes player.c/enemy.c
+// actually test, user request: "pinte los gizmos de las colisiones".
+// B+C+START: same B+C family as the other debug combos, but START (never
+// used anywhere else in this game, not even a pause menu) instead of a
+// direction -- same "no interferir en el movimiento" reasoning that moved
+// RUTAS off B+C+LEFT, just solved by picking a button that was never
+// steering input in the first place instead of dropping the direction
+// entirely (B+C alone was already claimed by RUTAS). B+C+START is a
+// strict SUPERSET of DEBUG_EDGES_COMBO (plain B+C), not a subset of
+// anything else, so it needs no exclude mask of its own -- but
+// DEBUG_EDGES_EXCLUDE above had to gain BUTTON_START, or holding this
+// combo would also fire RUTAS every time.
+#define DEBUG_HITBOX_COMBO (BUTTON_B | BUTTON_C | BUTTON_START)
+static bool hitboxDebugOn;
+
+// Tile positions (BG_B, 8px units) the gizmo drew last frame -- cleared
+// before drawing this frame's (player/enemy moved in between), instead of
+// a full-plane clear every frame. 2 entities (player + enemy) * (4 AABB
+// corners + 4 wall-probe corners) = 16, worst case.
+#define HITBOX_MAX_MARKS 16
+static u16 hitboxMarkX[HITBOX_MAX_MARKS];
+static u16 hitboxMarkY[HITBOX_MAX_MARKS];
+static u8 hitboxMarkCount;
+
 // White-noise easter egg (user request: "crea una pantalla que sea ruido
 // visual, white noise", folded into the map button per later requests:
 // "la A es como un dispositivo mapa. Cuando el player la coge, pulsando A
@@ -257,22 +302,18 @@ static u8 sizePresetIndex = SIZE_PRESET_DEFAULT;
 // Per-planet saved progress (spec §35, user request: "cada planeta tenga
 // el recuento de sus letras obtenidas... si el player sale de un
 // planeta, esas letras se conservan"). hasSave=FALSE for all until the
-// ship actually leaves a planet mid-run -- still means exactly that
-// (spec §52 doesn't change it), used only to decide whether
+// ship actually leaves a planet mid-run, used to decide whether
 // collectedCount/plantsCollected reflect real progress or read as 0.
-// mapSeed, though, is no longer tied to hasSave (spec §52, user request:
-// "no podria calcularse todo antes de empezar el juego? antes de
-// cargar el menu?"): precomputeAllPlanets() now assigns every planet's
-// mapSeed once at boot, played or not, specifically so newGame() never
-// has to roll a fresh one on the spot. GuideMap_generate() pulls from
-// the shared random() stream, which (unlike each room's own layout,
-// maze.c's Maze_generateRoom already calls setRandomSeed(roomSeed) for
-// that) isn't itself reseeded from mapSeed automatically -- newGame()
-// does that explicitly, so replaying the same mapSeed reproduces the
-// same room tree/item placement/insertion link deterministically, same
-// idea as maze.c already relies on at the per-room level. collectedCount
-// is enough to restore item state too (Items_fastForward) since
-// collection is always strictly in order (spec §13) -- never a subset.
+// mapSeed is the piece that lets a resumed game regenerate the EXACT
+// same map: GuideMap_generate() pulls from the shared random() stream,
+// which (unlike each room's own layout, maze.c's Maze_generateRoom
+// already calls setRandomSeed(roomSeed) for that) isn't itself reseeded
+// from mapSeed automatically -- newGame() does that explicitly, so
+// replaying the same mapSeed reproduces the same room tree/item
+// placement/insertion link deterministically, same idea as maze.c
+// already relies on at the per-room level. collectedCount is enough to
+// restore item state too (Items_fastForward) since collection is always
+// strictly in order (spec §13) -- never a subset.
 // plantsCollected mirrors collectedCount for plants (spec §51,
 // Plants_setCollected -- no ordering to replay, just the raw count).
 // plantsTotal/plantsTotalKnown (spec §51, user request: "pintar en el
@@ -283,17 +324,28 @@ static u8 sizePresetIndex = SIZE_PRESET_DEFAULT;
 // for free: a planet's total is NOT a fixed preset constant
 // (sizePresets[].letters is, plants are not), computing it means
 // generating every room in the map to see how many plants spec §48's
-// slide-graph placement puts in each one. Too expensive to redo every
-// frame -- precomputeAllPlanets() computes it exactly once per planet,
-// for EVERY planet, at boot (spec §52 superseding spec §51's original
-// "the first time its menu entry is shown" timing, which still left a
-// pause the first time each planet was glanced at).
+// slide-graph placement puts in each one. newGame() computes it exactly
+// once per planet, the first time it's actually entered each boot (spec
+// §55 -- tried computing all 8 up front at boot instead, spec §52, but
+// that needed random() seeded before the player had pressed anything,
+// which spec §54 found means it always draws the same "random" numbers;
+// reverted per user request, "prefiero que generes cada planeta al
+// entrar").
+// plantsMask (user report: "94 DE 88 PLANTAS" -- collected exceeding the
+// real total): plantsCollected alone can't resume correctly, since unlike
+// letters a plant has no enforced order, so a raw count can't say WHICH
+// ones are already gone -- see plants.c's Plants_setCollected doc comment
+// for the full story. This is the resumed snapshot of plants.c's own
+// collectedMask (Plants_saveMask/restoreMask), taken alongside
+// plantsCollected so a resumed planet remembers exactly which rooms are
+// already cleared instead of re-offering (and re-counting) their plants.
 typedef struct
 {
     bool hasSave;
     u16 mapSeed;
     u8 collectedCount;
     u16 plantsCollected;
+    u16 plantsMask[MAX_MAP_ROWS][MAX_MAP_COLS];
     u16 plantsTotal;
     bool plantsTotalKnown;
 } PresetSave;
@@ -451,38 +503,42 @@ _Static_assert(MAX_MAP_COLS * MAX_MAP_ROWS <= MAZE_INSERT_CACHE_SLOT, "MAZE_ROOM
 // document for similar cross-module constants elsewhere in this file).
 _Static_assert(MAZE_MAP_SLOTS == SIZE_PRESET_COUNT, "MAZE_MAP_SLOTS must equal SIZE_PRESET_COUNT");
 
-// Generates every room of presetSave[presetIndex]'s map (spec §52, user
-// request: "no podria calcularse todo antes de empezar el juego? antes
-// de cargar el menu?") and sums each one's Plants_lastRoomCount() (spec
-// §51). Locks are ignored on purpose (every door generated as if already
-// unlocked): a room's interior/plant line never actually depends on lock
-// state (only its border gets sealed, spec §16/§19, after the interior
-// -- and the slide graph -- are already built), but the opposite isn't
-// true: a SEALED door's threshold cells can truncate a candidate plant
-// line early (plants.c's own Maze_isWall recheck, spec §48). Scanning
-// with every door unlocked gives one stable total for this map,
-// independent of how far the player has actually progressed, instead of
-// a number that would keep changing as branches unlock.
+// Generates every room of presetSave[presetIndex]'s map (spec §51, user
+// request: "contar todas las plantas de cada planeta") and sums each
+// one's Plants_lastRoomCount(). Locks are ignored on purpose (every door
+// generated as if already unlocked): a room's interior/plant line never
+// actually depends on lock state (only its border gets sealed, spec
+// §16/§19, after the interior -- and the slide graph -- are already
+// built), but the opposite isn't true: a SEALED door's threshold cells
+// can truncate a candidate plant line early (plants.c's own Maze_isWall
+// recheck, spec §48). Scanning with every door unlocked gives one stable
+// total for this map, independent of how far the player has actually
+// progressed, instead of a number that would keep changing as branches
+// unlock.
 //
 // Also where every room's generation-attempt cache gets populated (spec
 // §52): Maze_setActiveMapSlot(presetIndex) first, so every
 // Maze_generateRoom() call below lands in THIS planet's own bank
-// (maze.h, one per planet so a later one doesn't wipe an earlier one's
-// work the way a single shared bank used to) -- the whole reason
-// newGame() no longer needs to (re)generate a room from scratch the
-// first time the player actually walks into it: this already did, and
-// left the winning attempt code cached.
+// (maze.h, one per planet so playing a different one in between doesn't
+// wipe this one's work the way a single shared bank used to) -- the
+// whole reason newGame() (spec §55: called from there now, once per
+// planet the first time it's actually entered -- user request: "prefiero
+// que generes cada planeta al entrar", reverting §52's "all 8 at boot"
+// after that turned out to need an awkward "press a button" workaround
+// for SGDK's random() seeding, spec §54) no longer needs to (re)generate
+// a room from scratch the first time the player actually walks into it
+// during the SAME visit: this already did, right before, and left the
+// winning attempt code cached.
 //
-// Expensive regardless (one real tombo generation per room) -- called
-// once per planet from precomputeAllPlanets(), at boot, before the menu
-// ever shows (never mid-game, never from the per-frame loop).
+// Expensive regardless (one real tombo generation per room) -- called at
+// most once per planet per boot (newGame() guards it with
+// plantsTotalKnown), never from the main per-frame loop.
 //
 // Clobbers mapCols/mapRows/itemCount/mapSeed/guideMap/insertLink*/the
-// current room's own grid -- all harmless here since newGame()
-// unconditionally reinitializes every one of them from scratch the
-// moment the player actually starts or resumes a planet, regardless of
-// whatever this scan left them at (its OWN cache bank survives that,
-// by design -- see Maze_setActiveMapSlot's own doc comment).
+// current room's own grid -- harmless since newGame() (the only caller)
+// immediately reinitializes every one of them itself for the actual game
+// right after this returns (its OWN cache bank survives that, by design
+// -- see Maze_setActiveMapSlot's own doc comment).
 static u16 scanPlanetPlantTotal(u8 presetIndex)
 {
     u16 total = 0;
@@ -531,42 +587,6 @@ static u16 scanPlanetPlantTotal(u8 presetIndex)
     return total;
 }
 
-// Boot-time precompute (spec §52, user request above): runs
-// scanPlanetPlantTotal() for EVERY planet before the menu is ever shown,
-// so every per-room TOMBO search AND every plant count happens once,
-// up front, behind a loading message -- not scattered across room
-// transitions and the first menu glance at each planet the way spec
-// §51's lazier version did. Assigns every planet's mapSeed here too
-// (previously only drawn the first time THAT planet was actually
-// played) -- harmless to do for one never chosen: nothing reads
-// presetSave[].mapSeed to decide whether a planet has real play
-// progress, hasSave still means exactly that (set only in
-// resetToMenu(), spec §35), unaffected by this.
-//
-// No progress bar beyond "which planet" -- a real per-room counter
-// would need plumbing scanPlanetPlantTotal() wasn't built with, and the
-// point of this screen is only "don't look frozen", not a precise ETA.
-static void precomputeAllPlanets(void)
-{
-    u8 i;
-
-    VDP_drawText("CARGANDO...", 14, 13);
-
-    for (i = 0; i < SIZE_PRESET_COUNT; i++)
-    {
-        char buf[24];
-        int len;
-
-        presetSave[i].mapSeed = random();
-        presetSave[i].plantsTotal = scanPlanetPlantTotal(i);
-        presetSave[i].plantsTotalKnown = TRUE;
-
-        len = sprintf(buf, "PLANETA %d DE %d", i + 1, SIZE_PRESET_COUNT);
-        VDP_drawText(buf, (40 - len) / 2, 15);
-    }
-
-    VDP_clearPlane(BG_A, TRUE); // wipe the loading text -- drawMenu() draws over a clean plane right after
-}
 
 static void loadRoom(u8 col, u8 row)
 {
@@ -663,18 +683,44 @@ static void newGame(void)
     const PresetSave save = presetSave[sizePresetIndex];
 
     mapViewOpen = FALSE;
-    // Every planet's mapSeed is committed once at boot now (spec §52,
-    // precomputeAllPlanets()), whether or not it's ever actually played
-    // -- no more "fresh start draws a new seed" branch here, resuming
-    // and starting for the first time look identical from this point on.
-    mapSeed = save.mapSeed;
+    // Resume this planet's saved map if it has one (spec §35), otherwise
+    // draw a fresh seed from the shared random() stream -- by this point
+    // the player has already pressed LEFT/RIGHT/A navigating the menu
+    // just to reach "empezar", so SGDK's random() (tools.c) is already
+    // properly reseeded from real elapsed time (spec §54's own finding),
+    // never the fixed default it starts at.
+    mapSeed = save.hasSave ? save.mapSeed : random();
+    presetSave[sizePresetIndex].mapSeed = mapSeed; // scanPlanetPlantTotal() below reads this
+
+    // One-time per planet per boot (spec §55, user request: "prefiero
+    // que generes cada planeta al entrar" -- reverting spec §52's "all 8
+    // at boot", which needed an awkward button-press workaround spec §54
+    // had to add just to get a varying seed). The FIRST time this
+    // specific planet is ever entered this session -- fresh start or a
+    // resume, same either way -- generate its whole map once, up front,
+    // behind a loading message: every room (populating its own
+    // Maze_setActiveMapSlot bank, spec §52, so loadRoom() replays them
+    // instantly instead of searching from scratch for the rest of this
+    // session) and its plant total (spec §51). Skipped on every later
+    // entry to the SAME planet this session -- the bank and the total are
+    // both already there.
+    if (!presetSave[sizePresetIndex].plantsTotalKnown)
+    {
+        VDP_drawText("CARGANDO...", 14, 13);
+        presetSave[sizePresetIndex].plantsTotal = scanPlanetPlantTotal(sizePresetIndex);
+        presetSave[sizePresetIndex].plantsTotalKnown = TRUE;
+        VDP_clearPlane(BG_A, TRUE);
+    }
+
     // Reseed explicitly from mapSeed so GuideMap_generate()'s own
     // random() sequence becomes reproducible from mapSeed alone (see the
-    // presetSave doc comment above) -- reproduces the exact same map
-    // precomputeAllPlanets() already built and discarded for this
-    // planet (nothing from that pass is kept except its mapSeed, plant
-    // total, and room-attempt-cache bank -- see Maze_setActiveMapSlot
-    // right below).
+    // presetSave doc comment above) -- needed for a resume to regenerate
+    // the identical map, and harmless on a fresh start (mapSeed was
+    // itself just drawn from the same stream one line up). Reproduces
+    // the exact same map the scan above just built and discarded for
+    // this planet (nothing from that pass is kept except its mapSeed,
+    // plant total, and room-attempt-cache bank -- see
+    // Maze_setActiveMapSlot right below).
     setRandomSeed(mapSeed);
 
     mapCols = sizePresets[sizePresetIndex].cols;
@@ -683,8 +729,9 @@ static void newGame(void)
 
     GuideMap_generate();
     // Switches to THIS planet's own room-attempt-cache bank (spec §52) --
-    // already fully populated by precomputeAllPlanets() at boot, so every
-    // room loadRoom() generates from here on replays instantly instead of
+    // already fully populated by the scan above (first entry) or an
+    // earlier one this session (later entries), so every room
+    // loadRoom() generates from here on replays instantly instead of
     // searching from scratch. Deliberately NOT cleared: that cached work
     // is exactly what eliminates the per-room pause this spec is about.
     Maze_setActiveMapSlot(sizePresetIndex);
@@ -692,10 +739,12 @@ static void newGame(void)
     tombQueuedDir = DIR_NONE;
     Items_reset();
     Plants_reset(); // spec §48 -- running counter, now also saved/restored per planet (spec §51)
+    Plants_setPlanetTotal(presetSave[sizePresetIndex].plantsTotal); // for Plants_drawHud's "n/TOTAL"
     if (save.hasSave)
     {
         Items_fastForward(save.collectedCount); // spec §35 -- restore prior progress on this planet
         Plants_setCollected(save.plantsCollected); // spec §51
+        Plants_restoreMask(save.plantsMask); // bug fix, see PresetSave's own doc comment
     }
     GuideMap_recomputeLocks(); // unlocks up through whichever letter is now due (spec §16)
 
@@ -818,17 +867,18 @@ static void drawMenu(void)
     // cada planeta... pintar en el menu un status de cuantas ha recogido
     // el player"). Row 24 -- the one free row between menu.c's orbits
     // (rows 4-23) and this bottom text block (25-27), same kind of gap
-    // row 1's sound hint uses above the orbits. plantsTotal is always
-    // known by the time drawMenu() can run (spec §52:
-    // precomputeAllPlanets() fills it in for every planet at boot,
-    // before the menu is ever shown) -- no more per-planet first-glance
-    // scan here, and no more hasSave gate on the row itself; same
-    // "0 DE N" convention the letters row above already uses for an
-    // unplayed planet, via the same hasSave-gated `collected` local.
-    len = sprintf(buf, "%d DE %d PLANTAS",
-                  presetSave[sizePresetIndex].hasSave ? presetSave[sizePresetIndex].plantsCollected : 0,
-                  presetSave[sizePresetIndex].plantsTotal);
-    VDP_drawText(buf, (40 - len) / 2, 24);
+    // row 1's sound hint uses above the orbits. plantsTotal is only known
+    // once this planet has actually been ENTERED at least once this
+    // session (spec §55: newGame() computes it then, not drawMenu() on
+    // first glance any more) -- nothing to show yet for one never
+    // started, so the row is skipped entirely rather than showing a
+    // misleading "0 DE 0".
+    if (presetSave[sizePresetIndex].plantsTotalKnown)
+    {
+        len = sprintf(buf, "%d DE %d PLANTAS", presetSave[sizePresetIndex].plantsCollected,
+                      presetSave[sizePresetIndex].plantsTotal);
+        VDP_drawText(buf, (40 - len) / 2, 24);
+    }
 }
 
 // Hard reset combo (user request): A+B+C+UP together, from anywhere
@@ -865,6 +915,7 @@ static void resetToMenu(void)
         presetSave[sizePresetIndex].mapSeed = mapSeed;
         presetSave[sizePresetIndex].collectedCount = Items_collectedCount();
         presetSave[sizePresetIndex].plantsCollected = Plants_collectedCount(); // spec §51
+        Plants_saveMask(presetSave[sizePresetIndex].plantsMask); // bug fix, see PresetSave's own doc comment
     }
 
     gameState = STATE_MENU;
@@ -931,6 +982,105 @@ static void updateShake(void)
     }
 }
 
+// HITBOX gizmo helpers (see DEBUG_HITBOX_COMBO's own doc comment above).
+// Draws onto BG_B (same trick as the HUD/debug panel: high priority, so
+// it overlays BG_A's maze without touching it) one glyph per tile, and
+// remembers each one so next frame's redraw can erase exactly those
+// cells first -- a full-plane clear every frame would also work but is
+// wasteful when the player/enemy only move a few pixels between frames.
+static void clearHitboxMarks(void)
+{
+    u8 i;
+
+    // One space glyph per marked tile, NOT VDP_clearTextLineBG -- that
+    // clears the WHOLE row, and a hitbox mark can legitimately land on
+    // row 0/1 (the FPS counter and Items_drawHud/Plants_drawHud's own
+    // row) whenever the player/enemy is near the top of the room, which
+    // would otherwise wipe those every time this redraws.
+    for (i = 0; i < hitboxMarkCount; i++)
+        VDP_drawTextBG(BG_B, " ", hitboxMarkX[i], hitboxMarkY[i]);
+    hitboxMarkCount = 0;
+}
+
+static void markHitboxTile(s16 px, s16 py, const char *glyph)
+{
+    const u16 tx = (u16) (px >> 3); // 8px-per-VDP-tile, same unit VDP_drawTextBG's x/y already are
+    const u16 ty = (u16) (py >> 3);
+
+    // Rows 0/1 are Items_drawHud/Plants_drawHud's own row and the FPS
+    // counter's -- same BG_B plane, drawn over the maze with the same
+    // high-priority trick, so a mark could otherwise land on and blank
+    // one of their characters whenever the ship is near the room's top
+    // edge. Skip those two rows rather than risk corrupting the HUD.
+    if (ty < 2)
+        return;
+
+    if (hitboxMarkCount < HITBOX_MAX_MARKS)
+    {
+        VDP_setTextPriority(1);
+        VDP_drawTextBG(BG_B, glyph, tx, ty);
+        VDP_setTextPriority(0);
+        hitboxMarkX[hitboxMarkCount] = tx;
+        hitboxMarkY[hitboxMarkCount] = ty;
+        hitboxMarkCount++;
+    }
+}
+
+// Both collision shapes player.c/enemy.c actually test for an entity at
+// pixel (x,y), top-left of its 16x16 box (Player.x/Enemy.x's own
+// convention):
+//   '+' -- the 4 corners of the full 16x16 pickup/overlap AABB
+//          (Items_tryCollect/Plants_tryCollect/Enemy_overlapsBox all use
+//          this exact box).
+//   'O'/'X' -- the 4 corners of the SMALLER 14x14 box (MAZE_TILE_PX - 2,
+//          player.c/enemy.c's own BOX -- not exported, so re-derived here
+//          by formula rather than shared) wall-sliding actually probes
+//          against Maze_isWall() -- 'X' if that exact corner currently
+//          reads as a wall (why a slide in that direction would be
+//          blocked right now), 'O' if open. This is the box that matters
+//          for "invisible wall" reports: it's 2px smaller than the AABB
+//          on every side specifically so the ship can graze a wall
+//          without the probe tripping on the next cell over.
+static void drawEntityHitbox(s16 x, s16 y)
+{
+    #define HITBOX_PROBE_BOX (MAZE_TILE_PX - 2) // mirrors player.c/enemy.c's own BOX
+
+    markHitboxTile(x, y, "+");
+    markHitboxTile((s16) (x + MAZE_TILE_PX - 1), y, "+");
+    markHitboxTile(x, (s16) (y + MAZE_TILE_PX - 1), "+");
+    markHitboxTile((s16) (x + MAZE_TILE_PX - 1), (s16) (y + MAZE_TILE_PX - 1), "+");
+
+    {
+        static const s16 dx[4] = { 0, HITBOX_PROBE_BOX, 0, HITBOX_PROBE_BOX };
+        static const s16 dy[4] = { 0, 0, HITBOX_PROBE_BOX, HITBOX_PROBE_BOX };
+        u8 i;
+
+        for (i = 0; i < 4; i++)
+        {
+            const s16 px = (s16) (x + dx[i]), py = (s16) (y + dy[i]);
+            const bool wall = Maze_isWall((s16) (px / MAZE_TILE_PX), (s16) (py / MAZE_TILE_PX));
+
+            markHitboxTile(px, py, wall ? "X" : "O");
+        }
+    }
+
+    #undef HITBOX_PROBE_BOX
+}
+
+// Call once per frame during STATE_PLAYING while hitboxDebugOn (no-op
+// otherwise -- see updateDebugCombo's own toggle, which clears any
+// leftover marks the moment it's turned off instead of waiting for this).
+static void drawCollisionGizmos(void)
+{
+    if (!hitboxDebugOn || (gameState != STATE_PLAYING))
+        return;
+
+    clearHitboxMarks();
+    drawEntityHitbox(player.x, player.y);
+    if (enemy.alive)
+        drawEntityHitbox(enemy.x, enemy.y);
+}
+
 // Toggled by the debug combo (Konami-style sequence, see debugCombo's own
 // doc comment) -- wipes every row the panel below prints to, so turning
 // the display off doesn't leave stale text sitting on BG_B.
@@ -940,6 +1090,22 @@ static void clearDebugView(void)
 
     for (row = DEBUG_VIEW_FIRST_ROW; row < (DEBUG_VIEW_FIRST_ROW + DEBUG_VIEW_ROWS); row++)
         VDP_clearTextLineBG(BG_B, row);
+    // Undoes Maze_drawDebugBackdrop's solid box on BG_A (repaints the real
+    // maze over the whole screen, which covers those rows too) -- only
+    // when BG_A actually holds the maze. In STATE_MENU, BG_A holds the
+    // menu instead (drawMenu()'s own VDP_drawText calls), and Maze_draw()
+    // would stomp it with whatever's left in maze.c's grid[][] from the
+    // last room visited; Maze_drawDebugBackdrop below never painted over
+    // the menu in the first place for the same reason, so there's nothing
+    // to undo there.
+    if (gameState != STATE_MENU)
+    {
+        Maze_draw();
+        // Same letter/plants wipe as DEBUG_EDGES_COMBO's own toggle (see
+        // its comment) -- Maze_draw() alone doesn't redraw either.
+        Items_drawInRoom(currentCol, currentRow);
+        Plants_drawInRoom(currentCol, currentRow);
+    }
 }
 
 // Call once per frame with this frame's joypad state, regardless of
@@ -950,8 +1116,49 @@ static void updateDebugCombo(u16 state, u16 prevState)
     if (((state & DEBUG_VIEW_COMBO) == DEBUG_VIEW_COMBO) && ((prevState & DEBUG_VIEW_COMBO) != DEBUG_VIEW_COMBO))
     {
         debugViewOn = !debugViewOn;
-        if (!debugViewOn)
+        if (debugViewOn)
+        {
+            // See clearDebugView()'s comment: BG_A holds the menu, not the
+            // maze, in STATE_MENU -- skip the backdrop there so the text
+            // still just overlays the menu (unreadable-over-menu wasn't
+            // the complaint; unreadable-over-the-moving-maze was).
+            if (gameState != STATE_MENU)
+                Maze_drawDebugBackdrop(DEBUG_VIEW_FIRST_ROW, DEBUG_VIEW_ROWS);
+        }
+        else
             clearDebugView();
+    }
+
+    // DEBUG_EDGES_COMBO (plain B+C) is a subset of DEBUG_VIEW_COMBO/
+    // DRUNK_TOGGLE_COMBO/RESET_COMBO above -- the exclude mask confirms
+    // no direction/A is ALSO held, so this only fires for B+C alone, not
+    // every time one of those other three chords also happens to include
+    // B+C.
+    if (((state & (DEBUG_EDGES_COMBO | DEBUG_EDGES_EXCLUDE)) == DEBUG_EDGES_COMBO) &&
+        ((prevState & (DEBUG_EDGES_COMBO | DEBUG_EDGES_EXCLUDE)) != DEBUG_EDGES_COMBO))
+    {
+        // Same STATE_MENU guard as the backdrop above: BG_A is the menu
+        // there, not the maze, and Maze_draw() is what actually paints
+        // (or erases, on the next toggle) the edges overlay.
+        if (gameState != STATE_MENU)
+        {
+            Maze_setDebugEdgesVisible(!Maze_debugEdgesVisible());
+            // Maze_draw() repaints every tile of BG_A from scratch (same
+            // "wipes the letter/plants" situation its other call sites
+            // already comment on) -- without these two, toggling RUTAS
+            // off blanked this room's letter and plants (user report:
+            // "al sacar este modo... se borran").
+            Maze_draw();
+            Items_drawInRoom(currentCol, currentRow);
+            Plants_drawInRoom(currentCol, currentRow);
+        }
+    }
+
+    if (((state & DEBUG_HITBOX_COMBO) == DEBUG_HITBOX_COMBO) && ((prevState & DEBUG_HITBOX_COMBO) != DEBUG_HITBOX_COMBO))
+    {
+        hitboxDebugOn = !hitboxDebugOn;
+        if (!hitboxDebugOn)
+            clearHitboxMarks(); // drawCollisionGizmos() (per-frame, STATE_PLAYING only) won't run again to do it itself
     }
 }
 
@@ -1057,33 +1264,6 @@ int main(bool hardReset)
     enemySprite = SPR_addSprite(&enemyShip, 0, 0, TILE_ATTR(PAL2, TRUE, FALSE, FALSE));
 
     JOY_init();
-
-    // BUG FIX (user report: "siempre se estan generando las mismas
-    // habitaciones" -- confirmed real, not a feeling). SGDK's own
-    // random() (tools.c) starts from a FIXED default seed every single
-    // boot and stays there until the first real button press, at which
-    // point JOY_update() (driven by the VBlank interrupt, so this keeps
-    // happening every frame regardless of what main() is doing)
-    // reseeds it from getTick() -- elapsed real time, which varies with
-    // human reaction speed. precomputeAllPlanets() draws all 8 planets'
-    // mapSeeds via random() -- before this fix, it did that immediately
-    // after JOY_init(), with no button ever pressed yet, so it always
-    // drew from the same unseeded sequence: every boot generated the
-    // IDENTICAL 8 maps. A real "press a button" wait right here forces
-    // that reseed to happen first, same as it always implicitly did
-    // before spec §52 (back when newGame()'s own random() call only
-    // ran after the player had already pressed LEFT/RIGHT/A navigating
-    // the menu).
-    VDP_drawText("PULSA UN BOTON PARA EMPEZAR", 6, 13);
-    while (JOY_readJoypad(JOY_1) == 0)
-        ;
-    VDP_clearPlane(BG_A, TRUE);
-
-    // spec §52: every planet's rooms/plant totals, computed once here,
-    // before the menu (or any sprite) is ever shown -- see its own doc
-    // comment for why this replaces the lazier, scattered-pauses
-    // approach spec §51 started with.
-    precomputeAllPlanets();
 
     gameState = STATE_MENU;
     SPR_setVisibility(playerSprite, HIDDEN);
@@ -1699,6 +1879,7 @@ int main(bool hardReset)
         }
 
         drawDebugView(); // no-op unless the debug combo turned it on
+        drawCollisionGizmos(); // no-op unless HITBOX is on and gameState is STATE_PLAYING
 
         prevState = state;
 

@@ -3887,3 +3887,55 @@ real (misma limitación de esta sesión para medir tiempos/interactuar
 con BlastEm ya documentada en el §52). Pendiente que el usuario
 confirme jugando varios arranques seguidos que ahora sí varían los
 planetas entre sí.
+
+## 55. Revertido el §52: cada planeta se genera al entrar, no los 8 al arrancar
+
+El arreglo del §54 (esperar una pulsación real antes de precalcular)
+añadía una pantalla "PULSA UN BOTON PARA EMPEZAR" que el usuario no
+había pedido — y que además, según reportó, no respondía. Feedback del
+usuario: "prefiero que generes cada planeta al entrar" — vuelve a la
+idea original del §51 (antes de que el propio usuario pidiera subir el
+alcance al §52), pero reutilizando toda la infraestructura ya construida
+por el §52 (bancos de caché por planeta, `scanPlanetPlantTotal`).
+
+- **`precomputeAllPlanets()` eliminada por completo** — ya no se recorren
+  los 8 planetas al arrancar. `main()` vuelve a su secuencia de arranque
+  original: `JOY_init()` → `STATE_MENU` → `drawMenu()`, sin ningún
+  bucle de espera ni pantalla de carga antes del menú.
+- **`mapSeed` vuelve a depender de `hasSave`**: `newGame()` recupera
+  `mapSeed = save.hasSave ? save.mapSeed : random();` — el sorteo de
+  semilla para un planeta nunca jugado vuelve a ocurrir al pulsar
+  "empezar", momento en el que el jugador YA ha pulsado
+  IZQUIERDA/DERECHA/A navegando el menú — así que el `random()` de
+  SGDK ya está sembrado con tiempo real (hallazgo del §54) sin
+  necesidad de ningún bucle de espera dedicado. Esto resuelve el bug
+  del §54 ("siempre las mismas 8 habitaciones") de raíz, sin ningún
+  truco extra: simplemente deja de correr `random()` antes de que el
+  jugador haya tocado nada.
+- **`scanPlanetPlantTotal()` ahora se llama desde `newGame()`**, no
+  desde un bucle de 8 planetas — una sola vez por planeta, la primera
+  vez que se entra de verdad a él en esta sesión (guardia:
+  `!presetSave[i].plantsTotalKnown`). Genera todas sus salas (dejando
+  su banco de caché de `Maze_setActiveMapSlot` ya caliente, spec §52 —
+  esa parte de la infraestructura se mantiene intacta) y cuenta sus
+  plantas, con un "CARGANDO..." mientras tanto — la pausa sigue
+  existiendo, pero ahora es una sola, la primera vez que juegas CADA
+  planeta en concreto, no las 8 de golpe al arrancar ni dispersa sala
+  por sala (el problema original que motivó todo esto). Entradas
+  posteriores al MISMO planeta en la misma sesión no vuelven a pagar
+  ese coste — el banco y el total ya están.
+- **`drawMenu()`**: la fila "`C DE T PLANTAS`" vuelve a ocultarse por
+  completo si `!plantsTotalKnown` (un planeta nunca entrado no tiene
+  total que mostrar) en vez de mostrar siempre "0 DE 0".
+- **Verificación**: `make clean && make` sin errores ni warnings nuevos.
+  Arranque comprobado en BlastEm: log limpio, proceso estable. No se
+  tocó `maze.c`/`plants.c` en este paso (solo la orquestación en
+  `main.c`), así que los arneses host del §48/§50/§52 siguen aplicando
+  sin cambios — no se re-ejecutaron porque no hay nada nuevo que
+  verificar en esa capa.
+- **No verificado interactivamente**: pendiente confirmar jugando que
+  el menú aparece al instante sin ninguna pantalla de carga al
+  arrancar, que la primera vez que entras a un planeta sí hay una
+  pausa breve (con "CARGANDO..."), que la segunda vez que entras al
+  MISMO planeta ya no la hay, y que planetas distintos en el mismo
+  arranque usan semillas distintas entre sí.
