@@ -2123,22 +2123,24 @@ static void updateRoomViewer(u16 state, u16 prevState)
 // --- C: the route sweep ----------------------------------------------
 // Runs the PLANTA search over every room of THIS planet (only this one:
 // another planet's map would mean overwriting guideMap, which is the
-// live game's own state) and reports the plants no route can EVER reach.
+// live game's own state) and reports the plants a room can fail to give
+// up -- the in-game regression test for maze.c's plant placement.
 //
-// Per room it takes each door in turn, rebuilds the room the way that
-// door's own arrival really leaves it (only that one open, every other
-// still sealed -- the state any fresh room is met in), and floods every
-// slide that stays inside the room from the cell the ship lands on. The
-// four floods are UNIONed: a plant crossed by none of them cannot be
-// collected however the player gets there, so that room can never clear,
-// so its doors never open -- a dead run.
+// Same criterion maze.c's computePlantSafe places against, so the two
+// agree by construction: per door, rebuild the room the way arriving
+// through it really leaves it (only that one open, the rest sealed --
+// the state a fresh room is always met in), let the ship in through both
+// halves of the doorway (it arrives still moving, so its first stop is
+// the end of the slide straight in) and flood every slide that stays in
+// the room. INTERSECT over the doors, not union: the room graph is a
+// tree, so before a room clears, the only door it can ever be entered by
+// is the one facing the start room, and neither this nor maze.c knows
+// which that is. A plant outside the intersection is one that, for some
+// entry, cannot be collected -- so that room may never clear, its doors
+// never open, and the branch behind it never be reachable.
 //
-// This is the sweep the door fix needs: maze.c guarantees plants sit on
-// cells the slide graph crosses, but that graph reads the border as a
-// wall, so it counts slides that in play never stop there at all -- they
-// carry the ship out through the doorway (plantPathSlideExits). Host-run
-// over 12000 generated rooms, ~4.9% of them hold at least one plant that
-// is unreachable once that is accounted for, and 0% when it isn't.
+// With the placement fixed this reports nothing; it is here to say so,
+// and to catch it if that ever stops being true.
 //
 // One (room, door) pair per frame: each flood is a full breadth-first
 // walk of the room, far too much to do a whole planet's worth of in one.
@@ -2150,9 +2152,12 @@ static u16 sweepCursor; // room index into the map grid, mapCols-major like intr
 static u8 sweepDoor;
 static u16 sweepRooms, sweepBadRooms, sweepBadPlants;
 static u8 sweepReportRow;
-// Union of every door's flood for the room being swept -- filled one door
-// per frame, read once the fourth is done.
-static bool sweepReached[MAZE_H][MAZE_W];
+// sweepDoorReach is one door's answer (its two lanes unioned, this frame);
+// sweepSafe is the running intersection over the doors done so far, which
+// is what the room is judged on once the fourth has had its turn.
+static bool sweepDoorReach[MAZE_H][MAZE_W];
+static bool sweepSafe[MAZE_H][MAZE_W];
+static bool sweepFirstDoor;
 
 static void enterSweep(void)
 {
@@ -2164,12 +2169,55 @@ static void enterSweep(void)
     sweepRooms = 0;
     sweepBadRooms = 0;
     sweepBadPlants = 0;
+    sweepFirstDoor = TRUE;
     sweepReportRow = SWEEP_FIRST_REPORT_ROW;
 
     VDP_clearPlane(BG_A, TRUE);
     VDP_clearPlane(BG_B, TRUE);
     VDP_drawText("BARRIDO DE RUTAS", 12, 2);
-    VDP_drawText("PLANTAS QUE NINGUNA PUERTA ALCANZA", 3, 3);
+    VDP_drawText("PLANTAS QUE ALGUNA ENTRADA NO ALCANZA", 2, 3);
+}
+
+// The ship arrives through door `dir`'s `lane` half still moving, so its
+// first resting place is wherever the slide straight in ends -- not the
+// threshold. Marks the cells that run crosses into sweepDoorReach and
+// hands back that first stop. FALSE when the arrival never stops at all
+// (straight in and straight out the far side).
+static bool sweepArrivalRest(const RoomBuild *rb, u8 dir, u8 lane, s16 *outX, s16 *outY)
+{
+    const u8 inward = (u8) ((dir + 2) & 3);
+    s16 x, y;
+
+    if (!rb->door[dir])
+        return FALSE;
+
+    switch (dir)
+    {
+        case DOOR_N: x = (s16) (rb->off[dir] + lane); y = 1;                break;
+        case DOOR_E: x = MAZE_W - 2;                  y = (s16) (rb->off[dir] + lane); break;
+        case DOOR_S: x = (s16) (rb->off[dir] + lane); y = MAZE_H - 2;       break;
+        default:     x = 1;                           y = (s16) (rb->off[dir] + lane); break;
+    }
+
+    if (Maze_isWall(x, y))
+        return FALSE;
+
+    sweepDoorReach[y][x] = TRUE;
+
+    for (;;)
+    {
+        const s16 nx = (s16) (x + ppDX[inward]), ny = (s16) (y + ppDY[inward]);
+
+        if (Maze_isWall(nx, ny))
+            break;
+        x = nx; y = ny;
+        sweepDoorReach[y][x] = TRUE;
+        if (plantPathSlideExits(x, y, inward))
+            return FALSE; // in one door and out the opposite one, never stopping
+    }
+
+    *outX = x; *outY = y;
+    return TRUE;
 }
 
 // One (room, door) pair. Called once per frame while the sweep runs.
@@ -2180,13 +2228,14 @@ static void sweepStep(void)
     const u8 row = (u8) (sweepCursor / mapCols);
     RoomBuild rb;
     char buf[40];
-    s16 sx, sy, x, y;
+    s16 x, y;
+    u8 lane;
 
     if (sweepCursor >= cellCount)
     {
         sprintf(buf, "FIN. SALAS:%d  SALAS CON FALLO:%d", sweepRooms, sweepBadRooms);
         VDP_drawText(buf, 2, 5);
-        sprintf(buf, "PLANTAS INALCANZABLES:%d", sweepBadPlants);
+        sprintf(buf, "PLANTAS SIN RUTA:%d", sweepBadPlants);
         VDP_drawText(buf, 2, 26);
         VDP_drawText("PULSA B PARA VOLVER", 2, 27);
         sweepDone = TRUE;
@@ -2197,45 +2246,67 @@ static void sweepStep(void)
     {
         sweepCursor++;
         sweepDoor = 0;
+        sweepFirstDoor = TRUE;
         return;
     }
-
-    if (sweepDoor == 0)
-        for (y = 0; y < MAZE_H; y++)
-            for (x = 0; x < MAZE_W; x++)
-                sweepReached[y][x] = FALSE;
 
     sprintf(buf, "SALA %02d,%02d  PUERTA %c  (%d/%d)", col, row, "NESO"[sweepDoor],
             sweepCursor + 1, cellCount);
     VDP_drawText(buf, 2, 5);
 
-    // Rebuilt every frame rather than only when the room changes: each
-    // door is audited against its OWN lock state anyway, and a generation
-    // replays from maze.c's accepted-attempt cache, so it's cheap.
+    // Rebuilt every frame: each door is audited against its own lock state
+    // anyway, and a generation replays from maze.c's accepted-attempt
+    // cache, so it's cheap.
     roomBuildFor(col, row, sweepDoor, &rb);
     buildRoomForInspection(col, row, sweepDoor);
+    loadPlantPathDoors(col, row);
 
-    if (roomEntryCell(&rb, sweepDoor, &sx, &sy))
+    for (y = 0; y < MAZE_H; y++)
+        for (x = 0; x < MAZE_W; x++)
+            sweepDoorReach[y][x] = FALSE;
+
+    // Both halves of the doorway: the ship can come in on either.
+    for (lane = 0; lane < 2; lane++)
     {
+        s16 sx, sy;
+
+        if (!sweepArrivalRest(&rb, sweepDoor, lane, &sx, &sy))
+            continue;
+
         plantPathFlood(col, row, sx, sy, TRUE);
         for (y = 0; y < MAZE_H; y++)
             for (x = 0; x < MAZE_W; x++)
                 if (ppCrossed[y][x])
-                    sweepReached[y][x] = TRUE;
+                    sweepDoorReach[y][x] = TRUE;
+    }
+
+    if (rb.door[sweepDoor])
+    {
+        // Intersection over the doors: a plant has to survive every one of
+        // them, since which door this room is really entered by is not
+        // something either this or maze.c can know (see the doc comment).
+        for (y = 0; y < MAZE_H; y++)
+            for (x = 0; x < MAZE_W; x++)
+                sweepSafe[y][x] = sweepFirstDoor ? sweepDoorReach[y][x]
+                                                 : (sweepSafe[y][x] && sweepDoorReach[y][x]);
+        sweepFirstDoor = FALSE;
     }
 
     sweepDoor++;
     if (sweepDoor < 4)
         return;
 
-    // Every door of this room has had its turn: whatever plant none of
-    // them crossed is one the room can never give up.
+    // Every door has had its turn.
     {
+        // sweepFirstDoor still set means not one door of this room ever
+        // produced an arrival -- nothing is reachable, so every plant in
+        // it counts.
+        const bool anyArrival = !sweepFirstDoor;
         u16 missing = 0;
 
         for (y = 0; y < MAZE_H; y++)
             for (x = 0; x < MAZE_W; x++)
-                if (Plants_uncollectedAt(col, row, x, y) && !sweepReached[y][x])
+                if (Plants_uncollectedAt(col, row, x, y) && (!anyArrival || !sweepSafe[y][x]))
                     missing++;
 
         if (missing > 0)
@@ -2252,6 +2323,7 @@ static void sweepStep(void)
     }
 
     sweepDoor = 0;
+    sweepFirstDoor = TRUE;
     sweepCursor++;
     sweepRooms++;
 }
