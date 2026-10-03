@@ -187,6 +187,12 @@ static u8 insertRoomDoorDir;
 static u8 menuDoorDir;
 static u8 menuDoorOffset;
 static bool mapViewOpen;
+// The map screen's own two debug tools (implemented far below, next to
+// the room viewer's own doc comment) -- up here with mapViewOpen because
+// they are the same kind of flag: whoever owns the screen, the game
+// itself is frozen, and resetToMenu/drawPlantPath both have to know.
+static bool roomViewerOn;
+static bool sweepOn;
 static u16 mapBlinkTimer;
 static u8 shakeFramesLeft;
 // BUG FIX (user report: "al golpear el muro se queda permanente"). A ship
@@ -1354,6 +1360,8 @@ static void resetToMenu(void)
 
     gameState = STATE_MENU;
     mapViewOpen = FALSE;
+    roomViewerOn = FALSE; // RESET_COMBO can fire from inside either map-screen tool
+    sweepOn = FALSE;
     inInsertRoom = FALSE; // harmless either way -- newGame() sets it back to TRUE when a new run starts
 
     SPR_setVisibility(playerSprite, HIDDEN);
@@ -1507,7 +1515,7 @@ static void drawEntityHitbox(s16 x, s16 y)
 // leftover marks the moment it's turned off instead of waiting for this).
 static void drawCollisionGizmos(void)
 {
-    if (!hitboxDebugOn || (gameState != STATE_PLAYING))
+    if (!hitboxDebugOn || (gameState != STATE_PLAYING) || roomViewerOn || sweepOn)
         return;
 
     clearHitboxMarks();
@@ -1538,9 +1546,54 @@ static u8 plantPathMarkCount;
 static s8 ppFromDir[MAZE_H][MAZE_W]; // which way the ship arrived here, -1 = not reached
 static u8 ppFromX[MAZE_H][MAZE_W], ppFromY[MAZE_H][MAZE_W];
 static u8 ppQX[MAZE_W * MAZE_H], ppQY[MAZE_W * MAZE_H];
+static bool ppCrossed[MAZE_H][MAZE_W]; // reachMode only: every cell some slide crosses
+
 
 static const s8 ppDX[4] = { 0, 1, 0, -1 }; // N,E,S,W -- maze.h's own order
 static const s8 ppDY[4] = { -1, 0, 1, 0 };
+
+// The ship does NOT stop against the border where a door is: reaching the
+// border cell at a live door's 2-cell span while moving that way is an
+// EXIT, the room changes under the player (user: "esta tomando el borde
+// de la pantalla como una colision, pero eso es una salida y rompe el
+// juego"). The search sees only the grid, where the cell beyond the
+// border is out of bounds and so reads as wall, which is exactly the
+// stop a slide into a door would wrongly look like. Same check
+// player.c's updateRoomStep makes, cell for cell -- including reading
+// cell.doorN/E/S/W rather than the grid: a door locked shut is already a
+// wall in the grid, so the slide never gets there to begin with.
+static bool ppDoor[4];
+static u8 ppOff[4];
+
+static void loadPlantPathDoors(u8 col, u8 row)
+{
+    const MapCell cell = guideMap[row][col];
+    const bool isLink = (col == insertLinkCol) && (row == insertLinkRow);
+    u8 d;
+
+    ppDoor[DOOR_N] = cell.doorN || (isLink && (insertLinkDir == DOOR_N));
+    ppDoor[DOOR_E] = cell.doorE || (isLink && (insertLinkDir == DOOR_E));
+    ppDoor[DOOR_S] = cell.doorS || (isLink && (insertLinkDir == DOOR_S));
+    ppDoor[DOOR_W] = cell.doorW || (isLink && (insertLinkDir == DOOR_W));
+    for (d = 0; d < 4; d++)
+        ppOff[d] = doorOffsetFor(col, row, d);
+}
+
+// (x,y) is where a slide in direction d came to a halt against the grid.
+// TRUE when that halt isn't one: the ship sails through the door there.
+static bool plantPathSlideExits(s16 x, s16 y, u8 d)
+{
+    if (!ppDoor[d])
+        return FALSE;
+
+    switch (d)
+    {
+        case DOOR_N: return (y == 0)          && ((x == ppOff[DOOR_N]) || (x == ppOff[DOOR_N] + 1));
+        case DOOR_E: return (x == MAZE_W - 1) && ((y == ppOff[DOOR_E]) || (y == ppOff[DOOR_E] + 1));
+        case DOOR_S: return (y == MAZE_H - 1) && ((x == ppOff[DOOR_S]) || (x == ppOff[DOOR_S] + 1));
+        default:     return (x == 0)          && ((y == ppOff[DOOR_W]) || (y == ppOff[DOOR_W] + 1));
+    }
+}
 
 static void clearPlantPathMarks(void)
 {
@@ -1555,7 +1608,7 @@ static void clearPlantPathMarks(void)
 // belong to the FPS counter and the plant/letter HUD.
 static void markPlantPathCell(s16 cx, s16 cy, u8 dir)
 {
-    static const char *const arrow[4] = { "^", ">", "v", "<" };
+    static const char *const arrow[5] = { "^", ">", "v", "<", "o" }; // 4 = the route's own start cell
     const u16 tx = (u16) (cx * 2);
     const u16 ty = (u16) (cy * 2);
 
@@ -1606,20 +1659,131 @@ static void markPlantPathChain(s16 x, s16 y, s16 startX, s16 startY)
 // then -- when it stopped somewhere new, or when something marked it dirty
 // (a plant taken, a room loaded, the mode just switched on). Standing
 // still on an unchanged route costs nothing.
+// The one slide-flood both PLANTA and the map screen's own sweep run,
+// starting from the cell (startX,startY) the ship is standing on (or,
+// for the sweep/viewer, the cell it would be standing on having just
+// come in through a door).
+//
+//   reachMode FALSE -- the PLANTA route: breadth-first over SLIDES (each
+//     step a full slide until a wall, the only move the ship has),
+//     stopping at the first one that CROSSES a plant still standing (a
+//     plant is collected by passing over it, not by stopping on it). The
+//     winning route is drawn cell by cell, each an arrow showing which
+//     way to push there. Returns TRUE when there was one.
+//   reachMode TRUE -- the sweep: draws nothing, never stops early, and
+//     marks in ppCrossed every cell any slide can cross. Always FALSE.
+//     Cells of a slide that ends OUT of the room still count as crossed (the
+//     ship does pass over them, collecting whatever is there, on its way
+//     out); it is only the far side of that doorway that isn't a place
+//     the search may carry on from.
+//
+// Searching the real grid with Maze_isWall rather than the slide graph:
+// the graph is seeded from the room's doors and still misses a couple of
+// resting cells per room, and this needs to start from wherever the ship
+// happens to be, which is frequently not one of them.
+static bool plantPathFlood(u8 roomCol, u8 roomRow, s16 startX, s16 startY, bool reachMode)
+{
+    s16 head = 0, tail = 0;
+    s16 x, y;
+
+    if (Maze_isWall(startX, startY))
+        return FALSE;
+
+    loadPlantPathDoors(roomCol, roomRow);
+
+    for (y = 0; y < MAZE_H; y++)
+        for (x = 0; x < MAZE_W; x++)
+        {
+            ppFromDir[y][x] = -1;
+            if (reachMode)
+                ppCrossed[y][x] = FALSE;
+        }
+
+    ppFromDir[startY][startX] = 4; // reached, but it is the start: no leg behind it
+    ppQX[tail] = (u8) startX; ppQY[tail] = (u8) startY; tail++;
+    if (reachMode)
+        ppCrossed[startY][startX] = TRUE;
+
+    while (head < tail)
+    {
+        const s16 cx = (s16) ppQX[head], cy = (s16) ppQY[head];
+        u8 d;
+
+        head++;
+        for (d = 0; d < 4; d++)
+        {
+            s16 wx = cx, wy = cy;
+            bool found = FALSE;
+
+            for (;;)
+            {
+                const s16 nx = (s16) (wx + ppDX[d]), ny = (s16) (wy + ppDY[d]);
+
+                if (Maze_isWall(nx, ny))
+                    break;
+                wx = nx; wy = ny;
+                if (reachMode)
+                    ppCrossed[wy][wx] = TRUE;
+                else if (Plants_uncollectedAt(roomCol, roomRow, wx, wy))
+                {
+                    found = TRUE;
+                    break;
+                }
+            }
+
+            if (found)
+            {
+                // Final leg first (it stops ON the plant, not at the wall),
+                // then everything that led here.
+                markPlantPathLeg(cx, cy, d, wx, wy);
+                markPlantPathChain(cx, cy, startX, startY);
+                return TRUE;
+            }
+
+            // The slide ends in a doorway: it doesn't end at all, the ship
+            // leaves the room. Not a move within this room, so neither a
+            // leg nor a place to carry on searching from.
+            if (plantPathSlideExits(wx, wy, d))
+                continue;
+
+            if (((wx != cx) || (wy != cy)) && (ppFromDir[wy][wx] < 0))
+            {
+                ppFromDir[wy][wx] = (s8) d;
+                ppFromX[wy][wx] = (u8) cx;
+                ppFromY[wy][wx] = (u8) cy;
+                ppQX[tail] = (u8) wx; ppQY[tail] = (u8) wy; tail++;
+            }
+        }
+    }
+
+    return FALSE;
+}
+
+// Call once per frame while the mode is on. Shows nothing at all while the
+// ship is sliding; the route appears once it stops, and is recomputed only
+// then -- when it stopped somewhere new, or when something marked it dirty
+// (a plant taken, a room loaded, the mode just switched on). Standing
+// still on an unchanged route costs nothing.
 static void drawPlantPath(void)
 {
     const s16 startX = (s16) (player.x / MAZE_TILE_PX);
     const s16 startY = (s16) (player.y / MAZE_TILE_PX);
-    s16 head = 0, tail = 0;
-    s16 x, y;
 
     if (!plantPathOn || (gameState != STATE_PLAYING))
         return;
 
+    // A map-screen tool is up: it owns the arrows (the room viewer draws
+    // its own route with them, from a door instead of from the ship), so
+    // this keeps its hands off entirely -- wiping them here would erase
+    // the viewer's route the very frame it drew it. Leaving the tool puts
+    // the live room back and marks the route dirty itself.
+    if (roomViewerOn || sweepOn)
+        return;
+
     // Map overlay open, or the insertion room: nothing to route to, and
-    // the arrows would sit on top of the map (they are high-priority BG_B,
-    // the overlay is BG_A). Wipe them and leave the route dirty so it
-    // comes back by itself once the view does.
+    // the arrows would sit on top of the map (they are high-priority
+    // BG_B, the overlay is BG_A). Wipe them and leave the route dirty so
+    // it comes back by itself once the view does.
     if (mapViewOpen || inInsertRoom)
     {
         clearPlantPathMarks();
@@ -1649,60 +1813,7 @@ static void drawPlantPath(void)
     plantPathLastY = startY;
 
     clearPlantPathMarks();
-
-    if (Maze_isWall(startX, startY))
-        return;
-
-    for (y = 0; y < MAZE_H; y++)
-        for (x = 0; x < MAZE_W; x++)
-            ppFromDir[y][x] = -1;
-
-    ppFromDir[startY][startX] = 4; // reached, but it is the start: no leg behind it
-    ppQX[tail] = (u8) startX; ppQY[tail] = (u8) startY; tail++;
-
-    while (head < tail)
-    {
-        const s16 cx = (s16) ppQX[head], cy = (s16) ppQY[head];
-        u8 d;
-
-        head++;
-        for (d = 0; d < 4; d++)
-        {
-            s16 wx = cx, wy = cy;
-            bool found = FALSE;
-
-            for (;;)
-            {
-                const s16 nx = (s16) (wx + ppDX[d]), ny = (s16) (wy + ppDY[d]);
-
-                if (Maze_isWall(nx, ny))
-                    break;
-                wx = nx; wy = ny;
-                if (Plants_uncollectedAt(currentCol, currentRow, wx, wy))
-                {
-                    found = TRUE;
-                    break;
-                }
-            }
-
-            if (found)
-            {
-                // Final leg first (it stops ON the plant, not at the wall),
-                // then everything that led here.
-                markPlantPathLeg(cx, cy, d, wx, wy);
-                markPlantPathChain(cx, cy, startX, startY);
-                return;
-            }
-
-            if (((wx != cx) || (wy != cy)) && (ppFromDir[wy][wx] < 0))
-            {
-                ppFromDir[wy][wx] = (s8) d;
-                ppFromX[wy][wx] = (u8) cx;
-                ppFromY[wy][wx] = (u8) cy;
-                ppQX[tail] = (u8) wx; ppQY[tail] = (u8) wy; tail++;
-            }
-        }
-    }
+    plantPathFlood(currentCol, currentRow, startX, startY, FALSE);
 }
 
 // One door's live state, read straight off the grid rather than off the
@@ -1755,6 +1866,409 @@ static char doorStateChar(u8 col, u8 row, u8 dir)
 // BG_B row 0, left of the FPS counter, same plane/high-priority trick the
 // rest of the HUD uses. Padded to a fixed width so a shorter line (the
 // insertion room's) can never leave characters of a longer one behind.
+// ---------------------------------------------------------------------
+// The map screen's two debug tools (user request: "en el mapa, hay debug
+// si pulsas B se ven todas las habitaciones", plus the route sweep on
+// C). They hang off the map overlay (held A) rather than the menu
+// because B and C are both free there -- in the menu C is already the
+// sound toggle. Neither tool can run in the insertion room: the map
+// itself doesn't open there (its own !inInsertRoom guard), and guideMap/
+// currentCol/currentRow mean nothing while it's up.
+// ---------------------------------------------------------------------
+
+// Everything Maze_generateRoom needs for one room, worked out exactly
+// the way loadRoom()/applyRoomDoorLocks() do -- but READ-ONLY: no door
+// latched open, no `visited` bit, no enemy. See ROOM_LOCKS_LIVE below
+// for what lockMode picks.
+typedef struct
+{
+    bool door[4];   // indexed by guidemap.h's DOOR_N/E/S/W, like everything else here
+    bool locked[4];
+    u8 off[4];
+    u16 seed;
+    u8 slot;
+} RoomBuild;
+
+// lockMode for roomBuildFor/buildRoomForInspection: the room's own live
+// lock state, or the one state that actually matters for an audit --
+// exactly one door open, which is how a fresh room is always met (the
+// one the ship came in by is latched open, every other one is still
+// sealed until the room clears).
+#define ROOM_LOCKS_LIVE 0xFF
+
+static void roomBuildFor(u8 col, u8 row, u8 lockMode, RoomBuild *out)
+{
+    const MapCell cell = guideMap[row][col];
+    const bool isLink = (col == insertLinkCol) && (row == insertLinkRow);
+    const bool cleared = roomFullyCleared(col, row);
+    bool orderLocked[4];
+    u8 d;
+
+    out->door[DOOR_N] = cell.doorN || (isLink && (insertLinkDir == DOOR_N));
+    out->door[DOOR_E] = cell.doorE || (isLink && (insertLinkDir == DOOR_E));
+    out->door[DOOR_S] = cell.doorS || (isLink && (insertLinkDir == DOOR_S));
+    out->door[DOOR_W] = cell.doorW || (isLink && (insertLinkDir == DOOR_W));
+
+    // Same short-circuit applyRoomDoorLocks relies on: an edge with no
+    // door in the tree never reads its (possibly out-of-range) neighbor.
+    orderLocked[DOOR_N] = cell.doorN && GuideMap_isRoomLocked(col, row - 1);
+    orderLocked[DOOR_E] = cell.doorE && GuideMap_isRoomLocked(col + 1, row);
+    orderLocked[DOOR_S] = cell.doorS && GuideMap_isRoomLocked(col, row + 1);
+    orderLocked[DOOR_W] = cell.doorW && GuideMap_isRoomLocked(col - 1, row);
+
+    for (d = 0; d < 4; d++)
+    {
+        const bool open = out->door[d] &&
+                          ((lockMode == ROOM_LOCKS_LIVE)
+                               ? (doorIsLatchedOpen(col, row, d) || (cleared && !orderLocked[d]))
+                               : (d == lockMode));
+
+        out->off[d] = doorOffsetFor(col, row, d);
+        out->locked[d] = !open;
+    }
+
+    out->seed = roomSeedFor(col, row);
+    out->slot = (u8) ((row * MAX_MAP_COLS) + col);
+}
+
+// Puts room (col,row) into maze.c's grid and plants.c's plant positions
+// through the exact same two passes loadRoom() uses (first with every
+// door sealed -- the grid plants are placed against -- then again with
+// whatever lock state lockMode asks for), so what comes out is identical
+// to what the player meets walking in. Nothing persistent is touched, so
+// putting the live room back afterwards is just another call for it.
+static void buildRoomForInspection(u8 col, u8 row, u8 lockMode)
+{
+    RoomBuild rb;
+
+    roomBuildFor(col, row, lockMode, &rb);
+    Maze_generateRoom(rb.door[DOOR_N], rb.door[DOOR_E], rb.door[DOOR_S], rb.door[DOOR_W],
+                       rb.door[DOOR_N], rb.door[DOOR_E], rb.door[DOOR_S], rb.door[DOOR_W],
+                       rb.off, rb.seed, rb.slot);
+    Plants_spawnForRoom(rb.seed);
+    Maze_generateRoom(rb.door[DOOR_N], rb.door[DOOR_E], rb.door[DOOR_S], rb.door[DOOR_W],
+                       rb.locked[DOOR_N], rb.locked[DOOR_E], rb.locked[DOOR_S], rb.locked[DOOR_W],
+                       rb.off, rb.seed, rb.slot);
+}
+
+// Where the ship first stands having come in through door `dir`: the cell
+// just inside that border, on the door's own 2-cell span (spec §30).
+// FALSE when the room has no door there, or both of the span's inner
+// cells read as wall.
+static bool roomEntryCell(const RoomBuild *rb, u8 dir, s16 *outX, s16 *outY)
+{
+    u8 i;
+
+    if (!rb->door[dir])
+        return FALSE;
+
+    for (i = 0; i < 2; i++)
+    {
+        const s16 along = (s16) (rb->off[dir] + i);
+        s16 x, y;
+
+        switch (dir)
+        {
+            case DOOR_N: x = along;          y = 1;              break;
+            case DOOR_E: x = MAZE_W - 2;     y = along;          break;
+            case DOOR_S: x = along;          y = MAZE_H - 2;     break;
+            default:     x = 1;              y = along;          break;
+        }
+
+        if (!Maze_isWall(x, y))
+        {
+            *outX = x; *outY = y;
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+// Both tools take the whole screen, so both leave it the same way: the
+// live room rebuilt and redrawn, the two HUD rows repainted, the ship
+// (and whatever is left of the enemy) visible again.
+static void restoreLiveRoomAfterDebugScreen(void)
+{
+    buildRoomForInspection(currentCol, currentRow, ROOM_LOCKS_LIVE);
+    Maze_draw();
+    Items_drawInRoom(currentCol, currentRow);
+    Plants_drawInRoom(currentCol, currentRow);
+
+    // The tools' own text is longer than what the HUDs write back, so the
+    // row goes entirely before they repaint it.
+    VDP_clearTextLineBG(BG_B, 1);
+    Items_drawHud();
+    Plants_drawHud();
+
+    clearPlantPathMarks(); // the viewer's own route, drawn with the same marks
+    PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR); // the map overlay left it white
+    SPR_setVisibility(playerSprite, VISIBLE);
+    SPR_setVisibility(mapShipSprite, HIDDEN);
+    SPR_setVisibility(enemySprite, Enemy_blinkVisible(&enemy) ? VISIBLE : HIDDEN);
+    plantPathDirty = TRUE; // whatever PLANTA had cached is from before all this
+}
+
+// Shared entry: the map overlay is up and B or C was just pressed. Shuts
+// the map down by hand (releasing A later must not repaint anything over
+// the tool) and clears the screen for whichever tool asked.
+static void beginDebugScreen(void)
+{
+    if (mapShowingNoise)
+        PSG_setEnvelope(3, PSG_ENVELOPE_MIN); // the static's own hiss, silenced the same way releasing A does
+
+    mapViewOpen = FALSE;
+    mapShowingNoise = FALSE;
+    SPR_setVisibility(playerSprite, HIDDEN);
+    SPR_setVisibility(mapShipSprite, HIDDEN);
+    SPR_setVisibility(enemySprite, HIDDEN);
+    PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR);
+    clearPlantPathMarks();
+}
+
+// --- B: the room viewer ----------------------------------------------
+// Walks the planet's rooms with the D-pad, drawing each one exactly as it
+// would be walked into -- the grid, its letter, its plants still standing
+// -- without the ship being there and without the visit counting for
+// anything. With PLANTA on it also draws that room's route, from the cell
+// the ship would stand on having just come in through one of its doors
+// (A cycles which, since there is no ship to start from here).
+static u8 rvCol, rvRow;
+static u8 rvEntryDir; // which door's arrival cell the PLANTA route starts from
+
+static void drawRoomViewer(void)
+{
+    RoomBuild rb;
+    char buf[40];
+    int len;
+    s16 sx, sy;
+
+    roomBuildFor(rvCol, rvRow, ROOM_LOCKS_LIVE, &rb);
+    buildRoomForInspection(rvCol, rvRow, ROOM_LOCKS_LIVE);
+    Maze_draw();
+    Items_drawInRoom(rvCol, rvRow);
+    Plants_drawInRoom(rvCol, rvRow);
+
+    clearPlantPathMarks();
+    if (plantPathOn && roomEntryCell(&rb, rvEntryDir, &sx, &sy))
+    {
+        // Same arrows the live overlay draws, just from a door's arrival
+        // cell instead of the ship's own. The start is marked too -- with
+        // no ship on screen there'd otherwise be no telling where the
+        // route begins.
+        plantPathFlood(rvCol, rvRow, sx, sy, FALSE);
+        markPlantPathCell(sx, sy, 4);
+    }
+
+    len = sprintf(buf, "VISOR %02d,%02d S:%04X %c%c%c%c E:%c B:SAL", rvCol, rvRow,
+                  roomSeedFor(rvCol, rvRow),
+                  doorStateChar(rvCol, rvRow, DOOR_N), doorStateChar(rvCol, rvRow, DOOR_E),
+                  doorStateChar(rvCol, rvRow, DOOR_S), doorStateChar(rvCol, rvRow, DOOR_W),
+                  "NESO"[rvEntryDir]);
+    while (len < 39)
+        buf[len++] = ' ';
+    buf[len] = 0;
+    VDP_setTextPriority(1);
+    VDP_drawTextBG(BG_B, buf, 0, 1);
+    VDP_setTextPriority(0);
+}
+
+static void enterRoomViewer(void)
+{
+    beginDebugScreen();
+    roomViewerOn = TRUE;
+    rvCol = currentCol;
+    rvRow = currentRow;
+    rvEntryDir = DOOR_N;
+    drawRoomViewer();
+}
+
+// D-pad steps one room along the grid (never off it, and never onto a
+// cell the map has no room in); A cycles which door the PLANTA route is
+// traced from; B puts the game back.
+static void updateRoomViewer(u16 state, u16 prevState)
+{
+    s16 nc = rvCol, nr = rvRow;
+
+    if ((state & BUTTON_B) && !(prevState & BUTTON_B))
+    {
+        roomViewerOn = FALSE;
+        restoreLiveRoomAfterDebugScreen();
+        return;
+    }
+
+    if ((state & BUTTON_A) && !(prevState & BUTTON_A))
+    {
+        rvEntryDir = (u8) ((rvEntryDir + 1) & 3);
+        drawRoomViewer();
+        return;
+    }
+
+    if ((state & BUTTON_UP) && !(prevState & BUTTON_UP)) nr--;
+    else if ((state & BUTTON_DOWN) && !(prevState & BUTTON_DOWN)) nr++;
+    else if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT)) nc--;
+    else if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT)) nc++;
+    else return;
+
+    if ((nc < 0) || (nr < 0) || (nc >= mapCols) || (nr >= mapRows))
+        return;
+    if (guideMap[nr][nc].type != CELL_ROOM)
+        return;
+
+    rvCol = (u8) nc;
+    rvRow = (u8) nr;
+    drawRoomViewer();
+}
+
+// --- C: the route sweep ----------------------------------------------
+// Runs the PLANTA search over every room of THIS planet (only this one:
+// another planet's map would mean overwriting guideMap, which is the
+// live game's own state) and reports the plants no route can EVER reach.
+//
+// Per room it takes each door in turn, rebuilds the room the way that
+// door's own arrival really leaves it (only that one open, every other
+// still sealed -- the state any fresh room is met in), and floods every
+// slide that stays inside the room from the cell the ship lands on. The
+// four floods are UNIONed: a plant crossed by none of them cannot be
+// collected however the player gets there, so that room can never clear,
+// so its doors never open -- a dead run.
+//
+// This is the sweep the door fix needs: maze.c guarantees plants sit on
+// cells the slide graph crosses, but that graph reads the border as a
+// wall, so it counts slides that in play never stop there at all -- they
+// carry the ship out through the doorway (plantPathSlideExits). Host-run
+// over 12000 generated rooms, ~4.9% of them hold at least one plant that
+// is unreachable once that is accounted for, and 0% when it isn't.
+//
+// One (room, door) pair per frame: each flood is a full breadth-first
+// walk of the room, far too much to do a whole planet's worth of in one.
+#define SWEEP_FIRST_REPORT_ROW 7
+#define SWEEP_LAST_REPORT_ROW 24
+
+static bool sweepDone;
+static u16 sweepCursor; // room index into the map grid, mapCols-major like introTick's
+static u8 sweepDoor;
+static u16 sweepRooms, sweepBadRooms, sweepBadPlants;
+static u8 sweepReportRow;
+// Union of every door's flood for the room being swept -- filled one door
+// per frame, read once the fourth is done.
+static bool sweepReached[MAZE_H][MAZE_W];
+
+static void enterSweep(void)
+{
+    beginDebugScreen();
+    sweepOn = TRUE;
+    sweepDone = FALSE;
+    sweepCursor = 0;
+    sweepDoor = 0;
+    sweepRooms = 0;
+    sweepBadRooms = 0;
+    sweepBadPlants = 0;
+    sweepReportRow = SWEEP_FIRST_REPORT_ROW;
+
+    VDP_clearPlane(BG_A, TRUE);
+    VDP_clearPlane(BG_B, TRUE);
+    VDP_drawText("BARRIDO DE RUTAS", 12, 2);
+    VDP_drawText("PLANTAS QUE NINGUNA PUERTA ALCANZA", 3, 3);
+}
+
+// One (room, door) pair. Called once per frame while the sweep runs.
+static void sweepStep(void)
+{
+    const u16 cellCount = (u16) (mapCols * mapRows);
+    const u8 col = (u8) (sweepCursor % mapCols);
+    const u8 row = (u8) (sweepCursor / mapCols);
+    RoomBuild rb;
+    char buf[40];
+    s16 sx, sy, x, y;
+
+    if (sweepCursor >= cellCount)
+    {
+        sprintf(buf, "FIN. SALAS:%d  SALAS CON FALLO:%d", sweepRooms, sweepBadRooms);
+        VDP_drawText(buf, 2, 5);
+        sprintf(buf, "PLANTAS INALCANZABLES:%d", sweepBadPlants);
+        VDP_drawText(buf, 2, 26);
+        VDP_drawText("PULSA B PARA VOLVER", 2, 27);
+        sweepDone = TRUE;
+        return;
+    }
+
+    if (guideMap[row][col].type != CELL_ROOM)
+    {
+        sweepCursor++;
+        sweepDoor = 0;
+        return;
+    }
+
+    if (sweepDoor == 0)
+        for (y = 0; y < MAZE_H; y++)
+            for (x = 0; x < MAZE_W; x++)
+                sweepReached[y][x] = FALSE;
+
+    sprintf(buf, "SALA %02d,%02d  PUERTA %c  (%d/%d)", col, row, "NESO"[sweepDoor],
+            sweepCursor + 1, cellCount);
+    VDP_drawText(buf, 2, 5);
+
+    // Rebuilt every frame rather than only when the room changes: each
+    // door is audited against its OWN lock state anyway, and a generation
+    // replays from maze.c's accepted-attempt cache, so it's cheap.
+    roomBuildFor(col, row, sweepDoor, &rb);
+    buildRoomForInspection(col, row, sweepDoor);
+
+    if (roomEntryCell(&rb, sweepDoor, &sx, &sy))
+    {
+        plantPathFlood(col, row, sx, sy, TRUE);
+        for (y = 0; y < MAZE_H; y++)
+            for (x = 0; x < MAZE_W; x++)
+                if (ppCrossed[y][x])
+                    sweepReached[y][x] = TRUE;
+    }
+
+    sweepDoor++;
+    if (sweepDoor < 4)
+        return;
+
+    // Every door of this room has had its turn: whatever plant none of
+    // them crossed is one the room can never give up.
+    {
+        u16 missing = 0;
+
+        for (y = 0; y < MAZE_H; y++)
+            for (x = 0; x < MAZE_W; x++)
+                if (Plants_uncollectedAt(col, row, x, y) && !sweepReached[y][x])
+                    missing++;
+
+        if (missing > 0)
+        {
+            sweepBadPlants = (u16) (sweepBadPlants + missing);
+            sweepBadRooms++;
+            if (sweepReportRow <= SWEEP_LAST_REPORT_ROW)
+            {
+                sprintf(buf, "R%02d,%02d: %d PLANTAS SIN RUTA", col, row, missing);
+                VDP_drawText(buf, 2, sweepReportRow);
+                sweepReportRow++;
+            }
+        }
+    }
+
+    sweepDoor = 0;
+    sweepCursor++;
+    sweepRooms++;
+}
+
+static void updateSweep(u16 state, u16 prevState)
+{
+    if ((state & BUTTON_B) && !(prevState & BUTTON_B))
+    {
+        sweepOn = FALSE;
+        restoreLiveRoomAfterDebugScreen();
+        return;
+    }
+
+    if (!sweepDone)
+        sweepStep();
+}
+
 static void drawRoomIdHud(void)
 {
     char buf[40];
@@ -2080,6 +2594,14 @@ int main(bool hardReset)
             if ((state & BUTTON_A) && !(prevState & BUTTON_A))
                 resetToMenu();
         }
+        // Both map-screen tools (only ever on during STATE_PLAYING) run
+        // INSTEAD of the game: the ship, the enemy and every collection
+        // check are frozen for as long as one owns the screen, the same
+        // way the map overlay already freezes them.
+        else if (roomViewerOn)
+            updateRoomViewer(state, prevState);
+        else if (sweepOn)
+            updateSweep(state, prevState);
         else // STATE_PLAYING
         {
             // moveSpeed is computed ONCE per frame here and read by BOTH
@@ -2203,7 +2725,35 @@ int main(bool hardReset)
                         }
                     }
 
-                    if (mapShowingNoise)
+                    // The map screen's own two debug tools (user request).
+                    // Free buttons here: with A held, the B+C (RUTAS) and
+                    // B+START (PLANTA) chords both exclude A, so a lone B
+                    // or C can't double as either of those. Each tool
+                    // takes the screen over and shuts the map down itself,
+                    // so releasing A afterwards doesn't paint over it.
+                    // Offered over the static too, not just over the real
+                    // map: a debug tool has no business waiting on the
+                    // player to find letter A first.
+                    if ((state & BUTTON_B) && !(prevState & BUTTON_B))
+                        enterRoomViewer();
+                    else if ((state & BUTTON_C) && !(prevState & BUTTON_C))
+                        enterSweep();
+                    // START: lift the fog (user request, "que el mapa
+                    // enseñe todas las habitaciones disponibles en el mapa
+                    // sin ocultarlas"). Only over the real overlay -- the
+                    // static is the screen for having no map device at
+                    // all, there is nothing drawn there to reveal. A lone
+                    // START is free here: the only chord that uses it,
+                    // B+C+START (HITBOX), needs B and C held too. The flag
+                    // lives in guidemap.c and stays put, so the map comes
+                    // back revealed next time A is held, until START
+                    // turns it off again.
+                    else if (!mapShowingNoise && (state & BUTTON_START) && !(prevState & BUTTON_START))
+                    {
+                        GuideMap_setRevealAll(!GuideMap_revealAll());
+                        GuideMap_drawOverlay();
+                    }
+                    else if (mapShowingNoise)
                         Maze_drawNoiseFrame(); // fresh static every frame it's held
                 }
                 else if (mapViewOpen) // A just released -- close whichever was open
@@ -2231,8 +2781,14 @@ int main(bool hardReset)
                 }
             }
 
-            if (mapViewOpen)
+            if (mapViewOpen || roomViewerOn || sweepOn)
             {
+                // Either map-screen tool freezes the game exactly like the
+                // overlay does -- and it is switched on from inside the
+                // block just above, mid-frame, so without naming them here
+                // the rest of THIS frame would still play a step of the
+                // game underneath the tool's own screen.
+                //
                 // Static (mapShowingNoise) already got a fresh
                 // Maze_drawNoiseFrame() call above, for as long as A stays
                 // held -- nothing more to do for it here. The real map's

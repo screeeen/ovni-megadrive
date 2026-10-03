@@ -751,6 +751,28 @@ void GuideMap_roomBoxPixelPos(u8 col, u8 row, u16 *outX, u16 *outY)
     *outY = ry * 8;
 }
 
+// See GuideMap_setRevealAll's own doc comment (guidemap.h). Read through
+// roomShown() below rather than tested directly, so every fog-of-war
+// gate in this function lifts together and none can be forgotten.
+static bool revealAll;
+
+void GuideMap_setRevealAll(bool on)
+{
+    revealAll = on;
+}
+
+bool GuideMap_revealAll(void)
+{
+    return revealAll;
+}
+
+// "This room is drawn at all": visited, or everything while the debug
+// reveal is on.
+static bool roomShown(u8 col, u8 row)
+{
+    return guideMap[row][col].visited || revealAll;
+}
+
 void GuideMap_drawOverlay(void)
 {
     s16 col, row;
@@ -770,8 +792,9 @@ void GuideMap_drawOverlay(void)
             if (cell.type != CELL_ROOM)
                 continue; // not a room at all -- nothing drawn here
 
-            if (!cell.visited)
-                continue; // fog of war (spec §17): never-visited rooms are
+            if (!roomShown((u8) col, (u8) row))
+                continue; // fog of war (spec §17), unless the debug reveal
+                          // is on: never-visited rooms are
                           // fully hidden -- box, corridors and letter alike
                           // -- not just shown differently. A locked room
                           // (spec §16) can never be visited either (the
@@ -796,9 +819,9 @@ void GuideMap_drawOverlay(void)
             // stub pointing into an unvisited neighbor would give away its
             // existence/position through the fog, which is exactly what's
             // being hidden now.
-            if (cell.doorE && (col + 1 < mapCols) && guideMap[row][col + 1].visited)
+            if (cell.doorE && (col + 1 < mapCols) && roomShown((u8) (col + 1), (u8) row))
                 putTile(MAP_TILE_CORRIDOR_H, PAL0, rx + ROOM_BOX_W, ry);
-            if (cell.doorS && (row + 1 < mapRows) && guideMap[row + 1][col].visited)
+            if (cell.doorS && (row + 1 < mapRows) && roomShown((u8) col, (u8) (row + 1)))
                 putTile(MAP_TILE_CORRIDOR_V, PAL0, rx + (ROOM_BOX_W / 2), ry + ROOM_BOX_H);
 
             // Item letter (spec §13/§17): also gated on cell.visited now
@@ -849,12 +872,22 @@ void GuideMap_drawOverlay(void)
 
             roomBoxOriginTiles(icol, irow, &rx, &ry);
 
-            putTile(MAP_TILE_CORNER_TL, PAL0, rx,     ry);
-            putTile(MAP_TILE_EDGE_T,    PAL0, rx + 1, ry);
-            putTile(MAP_TILE_CORNER_TR, PAL0, rx + 2, ry);
-            putTile(MAP_TILE_CORNER_BL, PAL0, rx,     ry + 1);
-            putTile(MAP_TILE_EDGE_B,    PAL0, rx + 1, ry + 1);
-            putTile(MAP_TILE_CORNER_BR, PAL0, rx + 2, ry + 1);
+            // The hollow "known but never walked into" box -- skipped
+            // while the reveal is on, where the main pass above has
+            // already drawn this same room solid like every other one
+            // and a hollow box on top would read as fog that isn't
+            // there any more. Its corridor stub and its letter below
+            // still draw either way: that's where a locked letter's
+            // yellow comes from.
+            if (!revealAll)
+            {
+                putTile(MAP_TILE_CORNER_TL, PAL0, rx,     ry);
+                putTile(MAP_TILE_EDGE_T,    PAL0, rx + 1, ry);
+                putTile(MAP_TILE_CORNER_TR, PAL0, rx + 2, ry);
+                putTile(MAP_TILE_CORNER_BL, PAL0, rx,     ry + 1);
+                putTile(MAP_TILE_EDGE_B,    PAL0, rx + 1, ry + 1);
+                putTile(MAP_TILE_CORNER_BR, PAL0, rx + 2, ry + 1);
+            }
 
             // The one corridor stub connecting this item's dead end back to
             // its (real, tree) parent -- user request: "muestra las

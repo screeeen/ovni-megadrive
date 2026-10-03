@@ -177,6 +177,16 @@ void GuideMap_loadGraphics(void);
 // of doubled up.
 void GuideMap_drawOverlay(void);
 
+// Debug (user request: "si el user pulsa START quiero que el mapa enseñe
+// todas las habitaciones disponibles en el mapa sin ocultarlas") -- draws
+// every room of the map, with its corridors and its letter, instead of
+// only the ones already walked into. Spec §17's fog of war is exactly
+// what this lifts, and nothing else: it changes no state, so turning it
+// back off hides the unvisited rooms again as if it had never been on.
+// main.c toggles it with START while the overlay is up and redraws.
+void GuideMap_setRevealAll(bool on);
+bool GuideMap_revealAll(void);
+
 // Pixel position (BG_A tile units x8) of (col,row)'s room box top-left on
 // the guide-map overlay (spec §22) -- main.c uses this to reposition the
 // ship sprite over the current room's box instead of hiding it while the
