@@ -10,8 +10,12 @@
 // colocan en grupos de varias en línea." A plant is one maze cell, drawn
 // as a plain text glyph -- explicitly a placeholder, no real art, same
 // "reuse VDP_drawText" shortcut items.c's own letters already use.
-// Unlike items.h's letters, there's no order/locking -- just a running
-// counter, and plants never gate anything.
+// Unlike items.h's letters, there's no COLLECTION order -- just a
+// running counter. They do gate something now, though (user request:
+// "las puertas se abren en cada habitación siempre que se hayan
+// recogido las plantas y la letra de la misma"): main.c's
+// Plants_allCollectedInRoom() below feeds into every room's own door
+// lock, alongside the letter.
 //
 // Placed in PLANTS_LINES_PER_ROOM (plants.c, 3 -- 1 original + 2 more,
 // user request: "añade dos hileras más de plantas") independent lines
@@ -118,5 +122,20 @@ void Plants_setPlanetTotal(u16 total);
 // the menu -- a planet's plant total isn't a fixed preset constant like
 // its letter count, so it has to be computed this way).
 u16 Plants_lastRoomCount(void);
+
+// TRUE if every plant THIS room has (across all PLANTS_LINES_PER_ROOM
+// lines) is already collected -- including the vacuous case of a room
+// with none at all. col/row select which room's collected-state to
+// check, same meaning as Plants_drawInRoom's own collectedMask lookup
+// (trusts curCol/curRow already reflect that room, from its last
+// Plants_spawnForRoom() call). Used by main.c's per-room door lock (user
+// request: "las puertas se abren en cada habitación siempre que se hayan
+// recogido las plantas y la letra de la misma").
+bool Plants_allCollectedInRoom(u8 col, u8 row);
+
+// TRUE if cell (x,y) of THIS room still holds an uncollected plant. Same
+// col/row meaning as Plants_drawInRoom. Used by main.c's "route to the
+// nearest plant" debug overlay.
+bool Plants_uncollectedAt(u8 roomCol, u8 roomRow, s16 x, s16 y);
 
 #endif

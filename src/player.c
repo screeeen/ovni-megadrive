@@ -42,24 +42,10 @@ void Player_spawnAtRoomCenter(Player *p)
     p->dir = DIR_DOWN;
 }
 
-void Player_rotateCCW(Player *p)
-{
-    p->dir = (p->dir + 1) & 3;
-}
-
-void Player_rotateCW(Player *p)
-{
-    p->dir = (p->dir + 3) & 3;
-}
-
-// bounceOnWall (spec §40): TRUE is "borracho" mode's original behavior
-// -- hitting a wall reverses p->dir so the ship keeps moving, bouncing
-// back the way it came. FALSE is "normal" mode -- hitting a wall just
-// leaves p->dir and position alone, so the ship sits still against it
-// until the player either steers away or the wall opens. DIR_NONE (only
-// possible in normal mode -- borracho always has a real direction)
-// matches no case below, so the ship simply doesn't move.
-static void movePlayer(Player *p, bool bounceOnWall)
+// Moves one px along p->dir, unless the next px is a wall -- then the ship
+// simply stays where it is (it stops against the wall until steered away
+// or the wall opens). DIR_NONE matches no case, so the ship doesn't move.
+static void movePlayer(Player *p)
 {
     switch (p->dir)
     {
@@ -68,7 +54,6 @@ static void movePlayer(Player *p, bool bounceOnWall)
             const s16 newY = p->y - 1;
 
             if (!collideUp(newY, p->x)) p->y = newY;
-            else if (bounceOnWall) p->dir = DIR_DOWN;
             break;
         }
         case DIR_DOWN:
@@ -76,7 +61,6 @@ static void movePlayer(Player *p, bool bounceOnWall)
             const s16 newY = p->y + 1;
 
             if (!collideDown(newY, p->x)) p->y = newY;
-            else if (bounceOnWall) p->dir = DIR_UP;
             break;
         }
         case DIR_LEFT:
@@ -84,7 +68,6 @@ static void movePlayer(Player *p, bool bounceOnWall)
             const s16 newX = p->x - 1;
 
             if (!collideLeft(newX, p->y)) p->x = newX;
-            else if (bounceOnWall) p->dir = DIR_RIGHT;
             break;
         }
         case DIR_RIGHT:
@@ -92,7 +75,6 @@ static void movePlayer(Player *p, bool bounceOnWall)
             const s16 newX = p->x + 1;
 
             if (!collideRight(newX, p->y)) p->x = newX;
-            else if (bounceOnWall) p->dir = DIR_LEFT;
             break;
         }
     }
@@ -115,7 +97,7 @@ static bool inDoorSpan(s16 px, s16 tile)
 // per visual frame WITHOUT changing any of the actual collision/exit
 // math -- each repetition is byte-for-byte the same check a speed-1 game
 // would have done on its own separate frame, just compressed into one.
-static u8 updateRoomStep(Player *p, bool drunkMode, bool doorN, bool doorE, bool doorS, bool doorW,
+static u8 updateRoomStep(Player *p, bool doorN, bool doorE, bool doorS, bool doorW,
                           u8 doorOffsetN, u8 doorOffsetE, u8 doorOffsetS, u8 doorOffsetW)
 {
     switch (p->dir)
@@ -136,11 +118,11 @@ static u8 updateRoomStep(Player *p, bool drunkMode, bool doorN, bool doorE, bool
             if (doorE && (p->x >= MAZE_TILE_PX * (MAZE_W - 1)) && inDoorSpan(p->y, doorOffsetE))
                 return EXIT_EAST;
             break;
-        default: // DIR_NONE (normal mode only) -- nothing held, can't exit
+        default: // DIR_NONE -- nothing held, can't exit
             break;
     }
 
-    movePlayer(p, drunkMode);
+    movePlayer(p);
 
     return EXIT_NONE;
 }
@@ -156,14 +138,14 @@ static u8 updateRoomStep(Player *p, bool drunkMode, bool doorN, bool doorE, bool
 // every intermediate pixel is still checked, one at a time, exactly as
 // it always was. Stops as soon as any sub-step returns an exit, so a
 // fast room still can't blow past a door mid-frame.
-u8 Player_updateRoom(Player *p, bool drunkMode, u8 speed, bool doorN, bool doorE, bool doorS, bool doorW,
+u8 Player_updateRoom(Player *p, u8 speed, bool doorN, bool doorE, bool doorS, bool doorW,
                       u8 doorOffsetN, u8 doorOffsetE, u8 doorOffsetS, u8 doorOffsetW)
 {
     u8 i;
 
     for (i = 0; i < speed; i++)
     {
-        const u8 exitDir = updateRoomStep(p, drunkMode, doorN, doorE, doorS, doorW,
+        const u8 exitDir = updateRoomStep(p, doorN, doorE, doorS, doorW,
                                            doorOffsetN, doorOffsetE, doorOffsetS, doorOffsetW);
 
         if (exitDir != EXIT_NONE)

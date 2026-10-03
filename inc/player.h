@@ -13,10 +13,8 @@
 #define DIR_LEFT    1
 #define DIR_DOWN    2
 #define DIR_RIGHT   3
-// CONTROL_TOMB only (spec §40/§44): no direction currently held (or held
-// direction consumed and not yet replaced), so the ship just sits still.
-// Never used in "borracho" mode -- that mode always has a real direction,
-// only ever changed by rotating.
+// No direction currently held (or held direction consumed and not yet
+// replaced), so the ship just sits still.
 #define DIR_NONE    4
 
 // Player_updateRoom()'s return value: which border (if any) the player
@@ -46,38 +44,22 @@ typedef struct
 // around as a plain utility in case some other spawn context wants it.
 void Player_spawnAtRoomCenter(Player *p);
 
-// Same "rotate 90 degrees" action bound to SPACE in the original js13k game
-// (counter-clockwise: UP -> LEFT -> DOWN -> RIGHT -> UP).
-void Player_rotateCCW(Player *p);
-
-// Opposite turn, not present in the original: clockwise (UP -> RIGHT -> DOWN -> LEFT -> UP).
-void Player_rotateCW(Player *p);
-
 // Advances the player through the CURRENT room (spec §7): doorN/E/S/W flag
-// which borders are open. Reaching an inactive border still bounces
-// (drunkMode) or just stops (!drunkMode) exactly like plain movement
-// would; reaching an active one, aligned with its 2-cell span, returns
+// which borders are open. Reaching an inactive border just stops the ship
+// in place; reaching an active one, aligned with its 2-cell span, returns
 // which border was crossed instead -- the caller (main.c) is responsible
 // for loading the next room and repositioning the player. doorOffsetN/S
 // give the maze COLUMN of the north/south door's span, doorOffsetE/W give
 // the maze ROW of the east/west door's span (spec §30: no longer always
 // MAZE_DOOR_COL/MAZE_DOOR_ROW) -- ignored where the matching doorX is FALSE.
-// drunkMode (spec §40): TRUE is CONTROL_DRUNK -- the ship moves on its own
-// every frame in whatever direction p->dir currently is, turning 90
-// degrees only via Player_rotateCW/CCW, and bounces (reverses direction)
-// off a wall instead of stopping. FALSE is CONTROL_TOMB -- main.c sets
-// p->dir directly from the D-pad (a fresh press sets it, it then keeps
-// sliding without needing to hold anything; DIR_NONE means no direction
-// has been pressed yet, so don't move at all), and bumping into a wall
-// just stops the ship in place instead of reversing.
-// speed (spec §42, user request: "que vaya más rápido en el modo
-// normal") is how many 1px sub-steps to take within this one call/frame
-// -- NOT a bigger single jump, which would risk tunneling through a
-// wall or overshooting the exact pixel a door-span/border check looks
-// for. 1 reproduces the original per-frame behavior exactly. Stops
-// early the instant any sub-step crosses a border, so a higher speed
-// can't blow past a door mid-frame either.
-u8 Player_updateRoom(Player *p, bool drunkMode, u8 speed, bool doorN, bool doorE, bool doorS, bool doorW,
+// main.c sets p->dir from the D-pad (a fresh press sets it, the ship then
+// keeps sliding without holding anything; DIR_NONE means no direction, so
+// don't move at all).
+// speed (spec §42) is how many 1px sub-steps to take within this one
+// call/frame -- NOT a bigger single jump, which would risk tunneling through
+// a wall or overshooting the exact pixel a door-span/border check looks
+// for. Stops early the instant any sub-step crosses a border.
+u8 Player_updateRoom(Player *p, u8 speed, bool doorN, bool doorE, bool doorS, bool doorW,
                       u8 doorOffsetN, u8 doorOffsetE, u8 doorOffsetS, u8 doorOffsetW);
 
 #endif

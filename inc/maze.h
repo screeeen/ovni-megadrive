@@ -22,44 +22,21 @@
 #define MAZE_DOOR_ROW ((MAZE_H / 2) & ~1)
 
 // mazeTiles occupies this many contiguous VRAM tiles starting at
-// TILE_USER_INDEX (see maze.c's BASE_TILE/CELL_ROW_TILES comment: 74
-// cols x 2 rows of 8x8 subtiles -- 37 logical 16x16 cells: floor, 9 wall
-// dither variants x 4 section hues (spec §18, cells 1-36) -- no separate
-// locked-door cell (spec §19: a sealed door now reuses an ordinary wall
-// cell from the room's own hue instead of a distinct shape). Anything
+// TILE_USER_INDEX (see maze.c's BASE_TILE/CELL_ROW_TILES comment: 20
+// cols x 2 rows of 8x8 subtiles -- 10 logical 16x16 cells: floor plus the
+// 9 wall dither variants. No separate locked-door cell (spec §19: a
+// sealed door reuses an ordinary wall cell, drawn through a different
+// palette). Anything
 // else built on TILE_USER_INDEX (e.g. guidemap.c's overlay tiles) must
 // start after this to avoid overlapping maze.c's tileset in VRAM.
-#define MAZE_TILE_COUNT 148
+#define MAZE_TILE_COUNT 40
 
-// Number of section hues (spec §18) -- a room has at most 4 doors, so at
-// most 4 branches ever grow directly out of the start room, which caps
-// how many distinct wall colors are ever needed at once.
-#define MAZE_SECTION_COUNT 4
-
-// One representative wall-dither subtile per section hue (variant 5's
-// top-left quarter of each hue's 9-cell block: absolute cell = hue*9 + 5,
-// see BASE_TILE/CELL_ROW_TILES in maze.c: subtile = TILE_USER_INDEX + 2*c
-// for absolute cell c). hue must be < MAZE_SECTION_COUNT. Other modules
-// can reuse this for a textured "duotono" look consistent with the
-// maze's own walls instead of introducing flat new art -- guidemap.c's
-// overlay always uses hue 0 (the original violet), regardless of
-// section, since the per-section coloring is a gameplay-view-only
-// feature (spec §18).
-#define MAZE_WALL_DITHER_TILE(hue) (TILE_USER_INDEX + (2 * (((hue) * 9) + 5)))
-
-// Item-letter coloring (user request: "los colores de las letras tienen
-// que tener el mismo color de su puerta") -- an exception to this file's
-// own MAZE_WALL_DITHER_TILE comment above ("guidemap.c's overlay always
-// uses hue 0... since per-section coloring is a gameplay-view-only
-// feature"): a letter now shows that hue too, so it visually matches the
-// room/door it lives behind, and yellow while that door is still locked
-// (matching maze.c's own locked-door wall tiles, menu.c's
-// LOCKED_DOOR_INK_INDEX). Call one of these two right before a
-// VDP_drawText/VDP_drawTextBG call that draws an item's letter, then
+// Item-letter coloring: a letter is drawn yellow while the door it lives
+// behind is still locked (matching maze.c's own locked-door wall tiles,
+// menu.c's LOCKED_DOOR_INK_INDEX). Call Maze_setTextColorLocked() right
+// before such a VDP_drawText/VDP_drawTextBG call, then
 // Maze_restoreTextColor() immediately after -- every OTHER text draw in
-// the game (HUD, FPS, control-mode label...) assumes the default (PAL0,
-// hue 0's violet) is restored in between.
-void Maze_setTextColorForHue(u8 hue);
+// the game (HUD, FPS...) assumes the default is restored in between.
 void Maze_setTextColorLocked(void);
 void Maze_restoreTextColor(void);
 
@@ -151,14 +128,9 @@ void Maze_loadGraphics(void);
 // direction whose doorX is FALSE are ignored. Caller must ensure both
 // rooms sharing a door pass the identical offset for it (guidemap.c's
 // GuideMap_doorOffset already guarantees this).
-// sectionHue (spec §18, 0..MAZE_SECTION_COUNT-1) picks which of the 4
-// wall-dither hue blocks every wall cell in this room is drawn from --
-// same dither shapes/density either way, just a different accent color,
-// so rooms in different branches of the map read as different "zones"
-// while playing.
 void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
                         bool lockedN, bool lockedE, bool lockedS, bool lockedW,
-                        const u8 doorOffsets[4], u8 sectionHue, u16 roomSeed, u8 cacheSlot);
+                        const u8 doorOffsets[4], u16 roomSeed, u8 cacheSlot);
 
 // Carves the special "insertion room" (spec §27): the very first room
 // the player ever sees, outside the normal room-tree grid entirely (its
@@ -233,6 +205,13 @@ void Maze_drawDebugEdges(void);
 // every frame -- the box itself never changes. Maze_draw() undoes it
 // (call that when the panel turns off).
 void Maze_drawDebugBackdrop(u8 firstRow, u8 rows);
+
+// TRUE if a plant placed on this cell can be collected no matter which
+// door the ship came in by -- the intersection of what is crossable from
+// every door of the room. The slide graph alone is not enough for that:
+// it is seeded from all doors at once, while the player only ever enters
+// through one, and a slide is directed. See maze.c's own doc comment.
+bool Maze_isPlantSafe(s16 tx, s16 ty);
 
 // tx/ty in maze-cell units. Out-of-range coordinates count as wall.
 bool Maze_isWall(s16 tx, s16 ty);

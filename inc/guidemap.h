@@ -131,14 +131,6 @@ bool GuideMap_hasDoor(u8 col, u8 row, u8 dir);
 // GuideMap_hasDoor(col,row,dir) is FALSE.
 u8 GuideMap_doorOffset(u8 col, u8 row, u8 dir);
 
-// Which branch (0..MAZE_SECTION_COUNT-1, maze.h) growing directly out of
-// the start room this room belongs to (spec §18) -- every room hanging
-// off the same direct child of the start shares one number, the start
-// room itself is section 0. main.c passes this into Maze_generateRoom's
-// sectionHue so each branch of the map reads as its own colored zone
-// while playing. Valid once GuideMap_generate() returns.
-u8 GuideMap_roomSection(u8 col, u8 row);
-
 // Recomputes which rooms are locked (spec §16, user request: "quiero que
 // las compuertas cerradas esten unicamente en la misma habitacion donde
 // esta la letra"): only a not-yet-due letter's own dead-end room

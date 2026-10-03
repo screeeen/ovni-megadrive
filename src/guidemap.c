@@ -29,11 +29,6 @@ static u8 dist[MAX_MAP_ROWS][MAX_MAP_COLS];
 // letter's own dead end.
 static bool roomLocked[MAX_MAP_ROWS][MAX_MAP_COLS];
 
-// roomSection[][] from the most recent computeSections() call, part of
-// GuideMap_generate() (spec §18) -- which of the (up to MAZE_SECTION_COUNT)
-// branches growing out of the start room this room belongs to.
-static u8 roomSection[MAX_MAP_ROWS][MAX_MAP_COLS];
-
 // TRUE for every room on the unique tree path between (startCol,startRow)
 // and item 0's room (letter A) -- scratch, live only during
 // selectInsertionLink()'s own call (spec §29bis).
@@ -519,59 +514,6 @@ static void selectItemRooms(void)
     }
 }
 
-// Flood-fills `section` over the subtree rooted at (col,row), excluding
-// the edge back to parentDir -- spec §18.
-static void floodSection(u8 col, u8 row, s8 parentDir, u8 section)
-{
-    u8 d;
-
-    roomSection[row][col] = section;
-
-    for (d = 0; d < 4; d++)
-    {
-        s16 ncol, nrow;
-
-        if (((s8) d) == parentDir) continue;
-        if (!GuideMap_hasDoor(col, row, d)) continue;
-
-        neighborInDir(col, row, d, &ncol, &nrow);
-        floodSection((u8) ncol, (u8) nrow, (s8) opposite(d), section);
-    }
-}
-
-// Assigns a section (spec §18) to every room: one per branch growing
-// directly out of the start room (N/E/S/W scan order), and everything
-// hanging off that branch inherits the same one. A room has at most 4
-// doors, so there are never more than MAZE_SECTION_COUNT branches to
-// number -- no cycling ever actually needed. The start room itself gets
-// section 0, same as whichever branch (if any) got that number too;
-// purely structural (depends only on final door topology, not on items
-// or locks), so this only needs to run once per generation, not on every
-// pickup like GuideMap_recomputeLocks().
-static void computeSections(void)
-{
-    u8 section = 0;
-    u8 d;
-
-    roomSection[startRow][startCol] = 0;
-
-    for (d = 0; d < 4; d++)
-    {
-        s16 ncol, nrow;
-
-        if (!GuideMap_hasDoor(startCol, startRow, d)) continue;
-
-        neighborInDir(startCol, startRow, d, &ncol, &nrow);
-        floodSection((u8) ncol, (u8) nrow, (s8) opposite(d), section);
-        if (section < (MAZE_SECTION_COUNT - 1)) section++;
-    }
-}
-
-u8 GuideMap_roomSection(u8 col, u8 row)
-{
-    return roomSection[row][col];
-}
-
 // Fills pathToAScratch[][] with every room on the unique tree path
 // between (startCol,startRow) and item 0's room (letter A) -- spec
 // §29bis. Since the room graph is a tree (spec §4), there's exactly one
@@ -727,7 +669,6 @@ void GuideMap_generate(void)
 
     carveTree();
     pruneLeaves();
-    computeSections();
     selectGoal();
     selectItemRooms();
     selectInsertionLink(); // needs itemCol[0]/itemRow[0] (spec §29bis)
@@ -876,13 +817,10 @@ void GuideMap_drawOverlay(void)
 
                     s[0] = letter;
                     s[1] = '\0';
-                    // Colored to match this room's own section hue (user
-                    // request) -- always the unlocked look: this pass only
-                    // ever runs for cell.visited rooms (the `continue`
-                    // above), which by construction can't be locked.
-                    Maze_setTextColorForHue(GuideMap_roomSection((u8) col, (u8) row));
+                    // Default colour -- this pass only ever runs for
+                    // cell.visited rooms (the `continue` above), which by
+                    // construction can't be locked.
                     VDP_drawText(s, rx + (ROOM_BOX_W / 2), ry);
-                    Maze_restoreTextColor();
                 }
             }
         }
@@ -947,13 +885,10 @@ void GuideMap_drawOverlay(void)
             s[1] = '\0';
             // Colored to match this item's own door (user request): yellow
             // while its room is still locked (same yellow maze.c's own
-            // locked-door wall tiles use), that room's section hue once
-            // it's reachable -- this is the one letter-drawing pass that
+            // locked-door wall tiles use) -- this is the one letter-drawing pass that
             // actually covers locked, never-visited item rooms too.
             if (GuideMap_isRoomLocked(icol, irow))
                 Maze_setTextColorLocked();
-            else
-                Maze_setTextColorForHue(GuideMap_roomSection(icol, irow));
             VDP_drawText(s, rx + (ROOM_BOX_W / 2), ry);
             Maze_restoreTextColor();
         }

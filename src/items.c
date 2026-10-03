@@ -117,14 +117,10 @@ void Items_drawInRoom(u8 col, u8 row)
 
         s[0] = letter;
         s[1] = '\0';
-        // Colored to match this room's own section hue (user request: "los
-        // colores de las letras tienen que tener el mismo color de su
-        // puerta") -- always the unlocked look here, never
-        // Maze_setTextColorLocked(): the player is physically standing in
-        // this room, so by construction it can't currently be locked.
-        Maze_setTextColorForHue(GuideMap_roomSection(col, row));
+        // Default text colour: the player is physically standing in this
+        // room, so by construction its door can't currently be locked --
+        // never the Maze_setTextColorLocked() look.
         VDP_drawText(s, MAZE_DOOR_COL * 2, MAZE_DOOR_ROW * 2); // maze cells are 2x2 VDP tiles (maze.h)
-        Maze_restoreTextColor();
     }
 }
 

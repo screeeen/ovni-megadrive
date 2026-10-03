@@ -1,17 +1,17 @@
 #include "maze.h"
 #include "resources.h"
 
-// mazeTiles.png is a 592x16 source image: 37 logical 16x16 cells in a row
-// -- cell 0 = floor; cells 1-36 = the dither wall variants from ovni's
+// mazeTiles.png is a 160x16 source image: 10 logical 16x16 cells in a row
+// -- cell 0 = floor; cells 1-9 = the dither wall variants from ovni's
 // image_edit.png (matching the original's random getRandomValue() 2-10
-// look), repeated once per section hue (spec §18): hue h's 9 variants
-// live at cells h*9+1 .. h*9+9, same dither shapes every time, just the
-// accent color swapped (violet/teal/orange/pink) -- only the background
-// color (0x252525) and hue accent are used across all of them, keeping
-// every hue a strict duotone. There used to be a 38th "locked door" cell
+// look). Strict duotone: palette index 0 is the background (0x252525),
+// index 1 the one wall colour. The art used to carry three more copies of
+// those 9 shapes in other accent colours, from when a room picked one of
+// 4; they were cropped out once every room went to a single colour. There
+// used to be an 11th "locked door" cell
 // (an hourglass/X shape, spec §16) but it was removed (spec §19, user
 // feedback): a sealed door now renders as an ordinary wall cell from the
-// room's own hue block -- randomWallVariant() picks it the same as any
+// wall block -- randomWallVariant() picks it the same as any
 // other wall cell, no separate value or art needed, so a locked door
 // looks exactly like the rest of that room's walls. Rescomp slices it
 // into 8x8 VDP tiles in raster order (TILESET ... NONE NONE ROW keeps
@@ -21,21 +21,21 @@
 // so for a cell value c, its four subtiles are at BASE+2c, BASE+2c+1 (top)
 // and BASE+74+2c, BASE+75+2c (bottom).
 #define BASE_TILE       TILE_USER_INDEX
-#define CELL_ROW_TILES  74 // (592px / 8px) tiles per 8px-tall row of the atlas
+#define CELL_ROW_TILES  20 // (160px / 8px) tiles per 8px-tall row of the atlas
 
 // PAL0 index5 (see Maze_loadGraphics/Maze_drawDebugBackdrop): never used by
 // the dither art (only 0-4 are), free for the debug panel's solid box.
 #define DEBUG_BOX_PAL_INDEX 5
 
 #define PATH 0
-#define WALL_VARIANTS 9 // 9 dither patterns per hue
+#define WALL_VARIANTS 9 // 9 dither patterns
 
 static u8 grid[MAZE_H][MAZE_W];
 
 // Which cells are a currently-SEALED door (user request: "marca las
 // puertas cerradas de color amarillo") -- Maze_draw() below reads this to
 // pick PAL3 (yellow, see menu.h's LOCKED_DOOR_INK_INDEX) instead of the
-// room's own hue for just those cells, same dither shape either way (no
+// a different palette for just those cells, same dither shape either way (no
 // new tile art needed -- see randomWallVariant()'s own doc comment on
 // spec §19: a sealed door still uses an ordinary wall variant, this only
 // changes which palette renders it). Reset at the top of every
@@ -54,14 +54,9 @@ static void clearLockedDoorCells(void)
             lockedDoorCell[y][x] = FALSE;
 }
 
-// Offset into the current hue's 9-cell block (spec §18): 0, 9, 18 or 27,
-// set once at the top of Maze_generateRoom() and read by every
-// randomWallVariant() call for the rest of that room's generation.
-static u8 wallHueBase;
-
 static u8 randomWallVariant(void)
 {
-    return wallHueBase + 1 + (random() % WALL_VARIANTS);
+    return 1 + (random() % WALL_VARIANTS);
 }
 
 // The room's own hub doubles as the player's spawn point in the very
@@ -407,35 +402,166 @@ static void slideEntryCell(u8 dir, u8 offset, s16 *x, s16 *y)
 // happen for a genuinely accepted attempt (tomboValidate already
 // required every active door's entry to be open), but this has no one to
 // report a failure to, so it degrades instead of crashing.
+// Cells a plant may be placed on: the ones the ship can cross starting
+// from EVERY door of the room, not just from some of them.
+//
+// The slide graph is seeded from all the room's doors at once, so its
+// reachable set is the UNION over entries. The player never gets that
+// union: an uncleared room has exactly one door open (the one just walked
+// through), and because a slide is directed, entering by door A can reach
+// cells entering by door B never will. A plant on one of those is a dead
+// end -- it cannot be collected, so the room cannot be cleared, so the
+// other doors never open: a softlock. Measured at ~2600 such plants over
+// 4500 generated rooms before this existed.
+//
+// The intersection over every door is the conservative answer that holds
+// whichever door the player actually came in by. Computed lazily (most
+// Maze_generateRoom calls -- the door-lock reapply pass, the menu's plant
+// scan -- never ask for it) and only once per generated room.
+static bool plantSafeCell[MAZE_H][MAZE_W];
+static bool crossScratch[MAZE_H][MAZE_W];
+static bool restScratch[MAZE_H][MAZE_W];
+static s16 bfsQX[MAZE_W * MAZE_H], bfsQY[MAZE_W * MAZE_H];
+static bool plantSafeDirty = TRUE;
+static u8 plantSafeDoorMask;
+static u8 plantSafeDoorOff[4];
+
+// One slide-BFS from a single entry cell: marks every cell the ship can
+// CROSS from there (not just where it can stop -- a plant is collected by
+// passing over it).
+static void crossedFromEntry(s16 sx, s16 sy)
+{
+    s16 head = 0, tail = 0;
+
+    if (Maze_isWall(sx, sy) || restScratch[sy][sx])
+        return;
+
+    restScratch[sy][sx] = TRUE;
+    crossScratch[sy][sx] = TRUE;
+    bfsQX[tail] = sx; bfsQY[tail] = sy; tail++;
+
+    while (head < tail)
+    {
+        const s16 x = bfsQX[head], y = bfsQY[head];
+        u8 d;
+
+        head++;
+        for (d = 0; d < 4; d++)
+        {
+            s16 cx = x, cy = y;
+
+            for (;;)
+            {
+                const s16 nx = (s16) (cx + tomboDX[d]), ny = (s16) (cy + tomboDY[d]);
+
+                if (Maze_isWall(nx, ny))
+                    break;
+                cx = nx; cy = ny;
+                crossScratch[cy][cx] = TRUE;
+            }
+
+            if (((cx != x) || (cy != y)) && !restScratch[cy][cx])
+            {
+                restScratch[cy][cx] = TRUE;
+                bfsQX[tail] = cx; bfsQY[tail] = cy; tail++;
+            }
+        }
+    }
+}
+
+static void computePlantSafe(void)
+{
+    u8 e, lane;
+    s16 x, y;
+    bool first = TRUE;
+
+    for (y = 0; y < MAZE_H; y++)
+        for (x = 0; x < MAZE_W; x++)
+            plantSafeCell[y][x] = FALSE;
+
+    for (e = 0; e < 4; e++)
+    {
+        if (!(plantSafeDoorMask & (1 << e)))
+            continue;
+
+        for (y = 0; y < MAZE_H; y++)
+            for (x = 0; x < MAZE_W; x++)
+                crossScratch[y][x] = restScratch[y][x] = FALSE;
+
+        // Both halves of the 2-cell-wide door: the ship can come in on
+        // either, same reasoning tomboRebuildGraph's own seeding has.
+        for (lane = 0; lane < 2; lane++)
+        {
+            s16 ix, iy;
+
+            slideEntryCell(e, (u8) (plantSafeDoorOff[e] + lane), &ix, &iy);
+            crossedFromEntry(ix, iy);
+        }
+
+        for (y = 0; y < MAZE_H; y++)
+            for (x = 0; x < MAZE_W; x++)
+                plantSafeCell[y][x] = first ? crossScratch[y][x]
+                                            : (plantSafeCell[y][x] && crossScratch[y][x]);
+        first = FALSE;
+    }
+
+    plantSafeDirty = FALSE;
+}
+
+bool Maze_isPlantSafe(s16 tx, s16 ty)
+{
+    if ((tx < 0) || (ty < 0) || (tx >= MAZE_W) || (ty >= MAZE_H))
+        return FALSE;
+
+    if (plantSafeDirty)
+        computePlantSafe();
+
+    return plantSafeCell[ty][tx];
+}
+
 static void tomboRebuildGraph(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, bool spawnAtHub)
 {
     u8 e;
 
     slideGraphReset();
 
+    // BOTH cells of every door, not just the first. A door is 2 cells
+    // wide and the ship can come in aligned with either half; because a
+    // slide is DIRECTED, the half this used to skip leads to resting
+    // cells the other half can never reach. Seeding only lane 0 left
+    // those out of the graph entirely -- measured at ~8 real resting
+    // cells per room with no node at all, which is what made plants land
+    // where the ship could not follow and left the RUTAS overlay missing
+    // paths the ship can genuinely cross (user report). slideEntryCell
+    // takes the span offset, so lane 1 is just offset + 1.
     for (e = 0; e < 4; e++)
     {
-        s16 ix, iy, ex, ey;
-        bool hubHit;
-        s16 r;
+        u8 lane;
 
         if (!(doorMask & (1 << e)))
             continue;
 
-        slideEntryCell(e, doorOff[e], &ix, &iy);
-        if (Maze_isWall(ix, iy))
-            continue;
-
-        hubHit = (ix == hubX) && (iy == hubY);
-        r = slideRun(ix, iy, tomboOpposite(e), hubX, hubY, &hubHit, &ex, &ey);
-        if (r == SLIDE_EXIT)
-            continue;
-        if (r == SLIDE_NO_MOVE)
+        for (lane = 0; lane < 2; lane++)
         {
-            ex = ix; ey = iy;
-        }
+            s16 ix, iy, ex, ey;
+            bool hubHit;
+            s16 r;
 
-        slideNode(ex, ey, hubX, hubY);
+            slideEntryCell(e, (u8) (doorOff[e] + lane), &ix, &iy);
+            if (Maze_isWall(ix, iy))
+                continue;
+
+            hubHit = (ix == hubX) && (iy == hubY);
+            r = slideRun(ix, iy, tomboOpposite(e), hubX, hubY, &hubHit, &ex, &ey);
+            if (r == SLIDE_EXIT)
+                continue;
+            if (r == SLIDE_NO_MOVE)
+            {
+                ex = ix; ey = iy;
+            }
+
+            slideNode(ex, ey, hubX, hubY);
+        }
     }
 
     if (spawnAtHub && !Maze_isWall(hubX, hubY))
@@ -1397,14 +1523,48 @@ static bool generateRoomTombo(s16 hubX, s16 hubY, u8 doorMask, const u8 doorOff[
     return ok;
 }
 
+// One door = 2 cells wide. Closed, it is walled with exactly those 2
+// border cells (ra,ca)/(rb,cb) -- the "dos bloques" the player sees, and
+// the only cells whose PAINTED state ever changes. The 2 threshold cells
+// right behind them (rc,cc)/(rd,cd) are carved open UNCONDITIONALLY,
+// locked or not.
+//
+// That unconditional carve is what makes "open" mean passable. Nothing
+// else in this file guarantees the threshold is PATH: tombo's interior
+// search is free to leave it walled like any other interior cell, and
+// connectAnchorToBorder above only closes the gap ONE CELL FURTHER IN
+// (MAZE_H-3/MAZE_W-3 for S/E). An earlier version left the threshold to
+// chance and only touched the border row, which is exactly how a door
+// could read as open at the border and still be blocked one step behind
+// it (user report: "aparecen abiertas pero no se puede pasar"), with no
+// later unlock able to fix it since nothing ever wrote that cell again.
+//
+// Carving it always is also what keeps the locked case honest: a closed
+// door is 2 painted blocks with open floor behind them, never an
+// unpainted cell that happens to block (user requirement: "en ningun
+// caso una salida cerrada aparece sin tile pintado").
+static void sealDoorCells(bool locked, s16 ra, s16 ca, s16 rb, s16 cb, s16 rc, s16 cc, s16 rd, s16 cd)
+{
+    grid[ra][ca] = locked ? randomWallVariant() : PATH;
+    grid[rb][cb] = locked ? randomWallVariant() : PATH;
+    grid[rc][cc] = PATH;
+    grid[rd][cd] = PATH;
+
+    if (locked)
+    {
+        lockedDoorCell[ra][ca] = TRUE;
+        lockedDoorCell[rb][cb] = TRUE;
+    }
+}
+
 void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
                         bool lockedN, bool lockedE, bool lockedS, bool lockedW,
-                        const u8 doorOffsets[4], u8 sectionHue, u16 roomSeed, u8 cacheSlot)
+                        const u8 doorOffsets[4], u16 roomSeed, u8 cacheSlot)
 {
     s16 x, y;
     s16 anchorX[4], anchorY[4]; // indexed by MAZE_DIR_N/E/S/W
-
-    wallHueBase = sectionHue * WALL_VARIANTS; // spec §18: every wall cell in this room comes from that hue's block
+    u8 doorMask;
+    bool tomboOk;
 
     anchorForDoor(MAZE_DIR_N, doorOffsets[MAZE_DIR_N], &anchorX[MAZE_DIR_N], &anchorY[MAZE_DIR_N]);
     anchorForDoor(MAZE_DIR_E, doorOffsets[MAZE_DIR_E], &anchorX[MAZE_DIR_E], &anchorY[MAZE_DIR_E]);
@@ -1425,9 +1585,11 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
     // every legal offset combination) to always accept some attempt, so
     // the trivial fallback below is a safety net that's never actually
     // been observed to trigger, not a real second algorithm.
-    if (!generateRoomTombo(ROOM_SEED_COL, ROOM_SEED_ROW,
-                            (u8) ((doorN ? 1 : 0) | (doorE ? 2 : 0) | (doorS ? 4 : 0) | (doorW ? 8 : 0)),
-                            doorOffsets, roomSeed, FALSE, 0, FALSE, cacheSlot))
+    doorMask = (u8) ((doorN ? 1 : 0) | (doorE ? 2 : 0) | (doorS ? 4 : 0) | (doorW ? 8 : 0));
+    tomboOk = generateRoomTombo(ROOM_SEED_COL, ROOM_SEED_ROW, doorMask,
+                                            doorOffsets, roomSeed, FALSE, 0, FALSE, cacheSlot);
+
+    if (!tomboOk)
     {
         for (y = 1; y < (MAZE_H - 1); y++)
             for (x = 1; x < (MAZE_W - 1); x++)
@@ -1459,45 +1621,62 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
     // A sealed door (spec §16) is punched with independent
     // randomWallVariant() calls per cell instead of PATH -- same as any
     // other wall cell in this room (spec §19), so it blends in with the
-    // room's own hue and dither noise instead of standing out as its own
+    // room's own dither noise instead of standing out as its own
     // fixed-color shape. Position along the border is doorOffsets[dir]
-    // now (spec §30), not always the room's own center column/row.
+    // now (spec §30), not always the room's own center column/row. 2
+    // cells deep (border + inner threshold) each -- see sealDoorCells'
+    // own doc comment for why both cells are load-bearing, not just the
+    // outer one.
     clearLockedDoorCells();
     if (doorN)
     {
         const s16 c = anchorX[MAZE_DIR_N];
-        grid[0][c] = lockedN ? randomWallVariant() : PATH; grid[0][c + 1] = lockedN ? randomWallVariant() : PATH;
-        grid[1][c] = lockedN ? randomWallVariant() : PATH; grid[1][c + 1] = lockedN ? randomWallVariant() : PATH;
-        if (lockedN) { lockedDoorCell[0][c] = TRUE; lockedDoorCell[0][c + 1] = TRUE; lockedDoorCell[1][c] = TRUE; lockedDoorCell[1][c + 1] = TRUE; }
+        sealDoorCells(lockedN, 0, c, 0, c + 1, 1, c, 1, c + 1);
     }
     if (doorS)
     {
         const s16 c = anchorX[MAZE_DIR_S];
-        grid[MAZE_H - 1][c] = lockedS ? randomWallVariant() : PATH; grid[MAZE_H - 1][c + 1] = lockedS ? randomWallVariant() : PATH;
-        grid[MAZE_H - 2][c] = lockedS ? randomWallVariant() : PATH; grid[MAZE_H - 2][c + 1] = lockedS ? randomWallVariant() : PATH;
-        if (lockedS) { lockedDoorCell[MAZE_H - 1][c] = TRUE; lockedDoorCell[MAZE_H - 1][c + 1] = TRUE; lockedDoorCell[MAZE_H - 2][c] = TRUE; lockedDoorCell[MAZE_H - 2][c + 1] = TRUE; }
+        sealDoorCells(lockedS, MAZE_H - 1, c, MAZE_H - 1, c + 1, MAZE_H - 2, c, MAZE_H - 2, c + 1);
     }
     if (doorE)
     {
         const s16 r = anchorY[MAZE_DIR_E];
-        grid[r][MAZE_W - 1] = lockedE ? randomWallVariant() : PATH; grid[r + 1][MAZE_W - 1] = lockedE ? randomWallVariant() : PATH;
-        grid[r][MAZE_W - 2] = lockedE ? randomWallVariant() : PATH; grid[r + 1][MAZE_W - 2] = lockedE ? randomWallVariant() : PATH;
-        if (lockedE) { lockedDoorCell[r][MAZE_W - 1] = TRUE; lockedDoorCell[r + 1][MAZE_W - 1] = TRUE; lockedDoorCell[r][MAZE_W - 2] = TRUE; lockedDoorCell[r + 1][MAZE_W - 2] = TRUE; }
+        sealDoorCells(lockedE, r, MAZE_W - 1, r + 1, MAZE_W - 1, r, MAZE_W - 2, r + 1, MAZE_W - 2);
     }
     if (doorW)
     {
         const s16 r = anchorY[MAZE_DIR_W];
-        grid[r][0] = lockedW ? randomWallVariant() : PATH; grid[r + 1][0] = lockedW ? randomWallVariant() : PATH;
-        grid[r][1] = lockedW ? randomWallVariant() : PATH; grid[r + 1][1] = lockedW ? randomWallVariant() : PATH;
-        if (lockedW) { lockedDoorCell[r][0] = TRUE; lockedDoorCell[r + 1][0] = TRUE; lockedDoorCell[r][1] = TRUE; lockedDoorCell[r + 1][1] = TRUE; }
+        sealDoorCells(lockedW, r, 0, r + 1, 0, r, 1, r + 1, 1);
     }
+
+    // The graph tombo built during its search describes the grid as it was
+    // DURING the search -- before connectAnchorToBorder, before the border
+    // ring was filled in, and before sealDoorCells punched the door
+    // thresholds. Every one of those edits adds or removes open cells, so
+    // slides stop in different places than the search assumed: measured on
+    // generated rooms, the stale graph was missing ~8 real resting cells
+    // per room. Rebuilding here, against the grid the player actually
+    // plays on, is what makes Maze_slideNodeCount/Pos/Edge (plants.c's
+    // placement, the RUTAS overlay) describe reality instead.
+    //
+    // Only when tombo actually produced a layout: the trivial fallback
+    // deliberately has NO graph (slideCount 0), which is how plants.c
+    // tells "no guarantee here, place nothing".
+    if (tomboOk)
+        tomboRebuildGraph(doorMask, doorOffsets, ROOM_SEED_COL, ROOM_SEED_ROW, FALSE);
+
+    // Maze_isPlantSafe's inputs changed; it recomputes on the next query.
+    plantSafeDirty = TRUE;
+    plantSafeDoorMask = doorMask;
+    plantSafeDoorOff[0] = doorOffsets[0]; plantSafeDoorOff[1] = doorOffsets[1];
+    plantSafeDoorOff[2] = doorOffsets[2]; plantSafeDoorOff[3] = doorOffsets[3];
 }
 
 // Fixed dither cell used throughout the insertion room (spec §27) -- any
 // single nonzero value works exactly as far as carveLPath is concerned (it
 // only ever distinguishes PATH=0 from "not yet carved"), so this just picks
 // one deliberately instead of the usual randomWallVariant() mix, giving the
-// room a uniform, deliberately distinct look. Never re-hued per section
+// room a uniform, deliberately distinct look. Never re-coloured
 // (spec §18 doesn't apply -- this room lives outside the grid/tree
 // entirely, so wallHueBase is left untouched here).
 #define INSERT_WALL_VARIANT 1
@@ -1599,17 +1778,14 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
     punchBorderDoor(menuDoorDir, menuAnchorX, menuAnchorY);
 }
 
-// The 4 section-hue colors (spec §18), single source of truth -- shared by
-// Maze_loadGraphics below (the walls' own palette) and
-// Maze_setTextColorForHue (user request: "los colores de las letras tienen
-// que tener el mismo color de su puerta" -- an item's letter now matches
-// the hue of the room/door it lives behind).
-static const u32 hueColorRGB[MAZE_SECTION_COUNT] = { 0x987DFA, 0x4AECC4, 0xFFA53E, 0xE85D75 };
+// The one wall colour every room uses. Rooms used to each pick one of 4
+// hues by map branch (spec §18); removed per user request ("usa el mismo
+// color para todas las habitaciones, no cambies de color el tileset"), so
+// the dither art now always renders through this single palette entry.
+#define WALL_COLOR_RGB 0x987DFA
 
 void Maze_loadGraphics(void)
 {
-    u8 hue;
-
     // index0/1: exact colors from ovni's src/image_edit.png (dither wall
     // art) -- hue 0, unchanged, also what the guide map overlay always
     // uses (spec §18). index2-4: the 3 extra section hues, new palette
@@ -1619,8 +1795,7 @@ void Maze_loadGraphics(void)
     // out/release/res/resources.s after rebuilding, same as the index0
     // gotcha noted in guidemap.c.
     PAL_setColor(0, RGB24_TO_VDPCOLOR(0x252525));
-    for (hue = 0; hue < MAZE_SECTION_COUNT; hue++)
-        PAL_setColor(1 + hue, RGB24_TO_VDPCOLOR(hueColorRGB[hue]));
+    PAL_setColor(1, RGB24_TO_VDPCOLOR(WALL_COLOR_RGB));
 
     // index5: never touched by the dither art above (only 0-4 are), so
     // free for Maze_drawDebugBackdrop's solid box -- see its own comment.
@@ -1629,25 +1804,12 @@ void Maze_loadGraphics(void)
     VDP_loadTileSet(&mazeTiles, BASE_TILE, DMA);
 }
 
-// Absolute CRAM index of PAL0's index1 -- the shared default every OTHER
-// text draw in the game (HUD, FPS counter, control-mode label, map status)
-// assumes is always hue 0's violet. Maze_setTextColorForHue/
-// Maze_restoreTextColor borrow it only for the brief window around a
-// single letter draw, mirroring the same "set, draw, restore" shape
-// VDP_setTextPriority is already used with everywhere in this codebase.
-#define HUE_TEXT_INK_INDEX ((PAL0 * 16) + 1)
-
-// Call right before drawing an item's letter with VDP_drawText/
-// VDP_drawTextBG so it comes out in that room's own section-hue color
-// (matching its walls/door) instead of the default violet. Follow with
-// Maze_restoreTextColor() immediately after the draw -- every other text
-// draw in the game relies on the default being restored.
-void Maze_setTextColorForHue(u8 hue)
-{
-    VDP_setTextPalette(PAL0);
-    if (hue != 0) // hue 0 IS the default already -- skip the pointless round-trip
-        PAL_setColor(HUE_TEXT_INK_INDEX, RGB24_TO_VDPCOLOR(hueColorRGB[hue]));
-}
+// Absolute CRAM index of PAL0's index1 -- the shared default every text
+// draw in the game (HUD, FPS counter, map status, item letters) uses.
+// Maze_setTextColorLocked/Maze_restoreTextColor borrow it only for the
+// brief window around a single letter draw, mirroring the same "set,
+// draw, restore" shape VDP_setTextPriority is already used with.
+#define WALL_TEXT_INK_INDEX ((PAL0 * 16) + 1)
 
 // Call right before drawing an item's letter that's still behind a LOCKED
 // door -- PAL3's index1 is already yellow throughout gameplay (menu.c's
@@ -1659,13 +1821,11 @@ void Maze_setTextColorLocked(void)
     VDP_setTextPalette(PAL3);
 }
 
-// Undoes either of the two above: back to PAL0 as the selected text
-// palette, and PAL0's index1 back to hue 0's own violet (a no-op value-wise
-// if Maze_setTextColorForHue(0) was the one actually used, but always
-// correct either way).
+// Undoes Maze_setTextColorLocked: back to PAL0 as the selected text
+// palette, with its index1 at the game's one wall/text colour.
 void Maze_restoreTextColor(void)
 {
-    PAL_setColor(HUE_TEXT_INK_INDEX, RGB24_TO_VDPCOLOR(hueColorRGB[0]));
+    PAL_setColor(WALL_TEXT_INK_INDEX, RGB24_TO_VDPCOLOR(WALL_COLOR_RGB));
     VDP_setTextPalette(PAL0);
 }
 
@@ -1874,27 +2034,41 @@ bool Maze_debugEdgesVisible(void)
 void Maze_drawDebugEdges(void)
 {
     u16 i;
+    u8 d;
 
+    // All 4 directions, not just E/S. An earlier version walked only E and
+    // S from each node, on the assumption that an edge is always stored
+    // from both ends -- it is not: a slide is DIRECTED (node n can slide to
+    // t without t being able to slide back to n, since what stops a slide
+    // depends on which way you came). Measured on generated rooms, that
+    // assumption hid about 30% of the real edges -- paths the ship can
+    // genuinely cross that the overlay never painted (user report).
     for (i = 0; i < slideCount; i++)
     {
-        s16 target;
-
-        target = slideTo[i][1]; // E
-        if (target >= 0)
+        for (d = 0; d < 4; d++)
         {
-            s16 x;
+            const s16 t = slideTo[i][d];
+            s16 a, b;
 
-            for (x = slideNodeX[i]; x <= slideNodeX[target]; x++)
-                VDP_drawText("-", (u16) (x * 2), (u16) (slideNodeY[i] * 2));
-        }
+            if (t < 0)
+                continue;
 
-        target = slideTo[i][2]; // S
-        if (target >= 0)
-        {
-            s16 y;
+            if ((d == 1) || (d == 3)) // E/W: same row, x runs either way
+            {
+                const s16 lo = (slideNodeX[i] < slideNodeX[t]) ? slideNodeX[i] : slideNodeX[t];
+                const s16 hi = (slideNodeX[i] < slideNodeX[t]) ? slideNodeX[t] : slideNodeX[i];
 
-            for (y = slideNodeY[i]; y <= slideNodeY[target]; y++)
-                VDP_drawText("|", (u16) (slideNodeX[i] * 2), (u16) (y * 2));
+                for (a = lo; a <= hi; a++)
+                    VDP_drawText("-", (u16) (a * 2), (u16) (slideNodeY[i] * 2));
+            }
+            else // N/S: same column
+            {
+                const s16 lo = (slideNodeY[i] < slideNodeY[t]) ? slideNodeY[i] : slideNodeY[t];
+                const s16 hi = (slideNodeY[i] < slideNodeY[t]) ? slideNodeY[t] : slideNodeY[i];
+
+                for (b = lo; b <= hi; b++)
+                    VDP_drawText("|", (u16) (slideNodeX[i] * 2), (u16) (b * 2));
+            }
         }
     }
 }

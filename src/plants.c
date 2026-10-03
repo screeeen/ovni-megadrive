@@ -170,7 +170,13 @@ void Plants_spawnForRoom(u16 roomSeed)
             // PLANTS_LINES_PER_ROOM lines never overlap each other.
             x = (s16) (srcX + dirDX[dir]);
             y = (s16) (srcY + dirDY[dir]);
-            while ((pathLen < PLANTS_MAX_EDGE_LEN) && !Maze_isWall(x, y) && !isOccupied(x, y, occCol, occRow, occCount))
+            // Maze_isPlantSafe (maze.h): the cell must be crossable from
+            // EVERY door, not just reachable on the graph -- the graph is
+            // the union over all entries and the player only gets one, so
+            // without this a line can land where the ship can never follow
+            // and the room can never be cleared.
+            while ((pathLen < PLANTS_MAX_EDGE_LEN) && !Maze_isWall(x, y) &&
+                   Maze_isPlantSafe(x, y) && !isOccupied(x, y, occCol, occRow, occCount))
             {
                 px[pathLen] = x;
                 py[pathLen] = y;
@@ -312,4 +318,41 @@ u16 Plants_lastRoomCount(void)
         sum += curCount[line];
 
     return sum;
+}
+
+bool Plants_uncollectedAt(u8 roomCol, u8 roomRow, s16 x, s16 y)
+{
+    u8 line, i;
+
+    for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
+    {
+        for (i = 0; i < curCount[line]; i++)
+        {
+            const u8 bit = (u8) ((line * PLANTS_MAX_PER_LINE) + i);
+
+            if ((curCol[line][i] == x) && (curRow[line][i] == y) &&
+                !(collectedMask[roomRow][roomCol] & (u16) (1u << bit)))
+                return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+bool Plants_allCollectedInRoom(u8 col, u8 row)
+{
+    u8 line, i;
+
+    for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
+    {
+        for (i = 0; i < curCount[line]; i++)
+        {
+            const u8 bit = (u8) ((line * PLANTS_MAX_PER_LINE) + i);
+
+            if (!(collectedMask[row][col] & (u16) (1u << bit)))
+                return FALSE;
+        }
+    }
+
+    return TRUE;
 }

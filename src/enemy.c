@@ -21,20 +21,54 @@ static bool doorTrajectory[MAZE_H][MAZE_W];
 
 static bool wallAt(s16 px, s16 py)
 {
+    return Maze_isWall(toTile(px), toTile(py));
+}
+
+// A door trajectory cell is probed with the FULL 16px box (TRAJ), not the
+// 14px BOX walls use. BOX samples 2px short of the box's real edge, which
+// against a wall only means the enemy ends up resting 1px inside it --
+// invisible and harmless. Against a trajectory it is NOT harmless: the
+// ship entering the room sits on those cells with its own full 16x16 box
+// (Enemy_overlapsBox), so an enemy resting 1px into the neighbouring cell
+// still overlaps it and still kills. Probing the full box makes the enemy
+// stop on the cell boundary instead, leaving the trajectory completely
+// untouched (user requirement: "un enemigo no puede ... colisionar con la
+// trayectoria de la nave entrando en una habitacion").
+#define TRAJ (MAZE_TILE_PX - 1)
+
+static bool trajectoryAt(s16 px, s16 py)
+{
     const s16 tx = toTile(px), ty = toTile(py);
 
-    if (Maze_isWall(tx, ty))
-        return TRUE;
+    if ((tx < 0) || (ty < 0) || (tx >= MAZE_W) || (ty >= MAZE_H))
+        return FALSE; // outside the room is the border wall's problem, not this one
 
-    // Maze_isWall already returned FALSE, so (tx,ty) is guaranteed in
-    // range -- safe to index doorTrajectory without a separate bounds check.
     return doorTrajectory[ty][tx];
 }
 
-static bool collideUp(s16 newY, s16 x)    { return wallAt(x, newY) || wallAt(x + BOX, newY); }
-static bool collideDown(s16 newY, s16 x)  { return wallAt(x, newY + BOX) || wallAt(x + BOX, newY + BOX); }
-static bool collideLeft(s16 newX, s16 y)  { return wallAt(newX, y) || wallAt(newX, y + BOX); }
-static bool collideRight(s16 newX, s16 y) { return wallAt(newX + BOX, y) || wallAt(newX + BOX, y + BOX); }
+static bool collideUp(s16 newY, s16 x)
+{
+    return wallAt(x, newY) || wallAt(x + BOX, newY) ||
+           trajectoryAt(x, newY) || trajectoryAt(x + TRAJ, newY);
+}
+
+static bool collideDown(s16 newY, s16 x)
+{
+    return wallAt(x, newY + BOX) || wallAt(x + BOX, newY + BOX) ||
+           trajectoryAt(x, newY + TRAJ) || trajectoryAt(x + TRAJ, newY + TRAJ);
+}
+
+static bool collideLeft(s16 newX, s16 y)
+{
+    return wallAt(newX, y) || wallAt(newX, y + BOX) ||
+           trajectoryAt(newX, y) || trajectoryAt(newX, y + TRAJ);
+}
+
+static bool collideRight(s16 newX, s16 y)
+{
+    return wallAt(newX + BOX, y) || wallAt(newX + BOX, y + BOX) ||
+           trajectoryAt(newX + TRAJ, y) || trajectoryAt(newX + TRAJ, y + TRAJ);
+}
 
 // Scans one of the room's 4 border-adjacent lanes (lane 0/1: the row just
 // inside the top/bottom wall, horizontal patrol; lane 2/3: the column just
@@ -124,6 +158,36 @@ void Enemy_spawnForRoom(Enemy *e, u16 roomSeed, bool doorN, bool doorE, bool doo
 
     for (i = 0; (i < 4) && !found; i++)
         found = findOpenInLane((u8) ((firstLane + i) & 3), roomSeed, &tx, &ty);
+
+    // Last resort before giving up on a lane patrol: any interior cell at
+    // all that is open and off every door trajectory. The old fallback was
+    // the room's own hub, which is NOT safe here -- a door's inward walk
+    // very often runs straight through it, and spawning there would park
+    // the enemy right on the ship's entry path.
+    if (!found)
+    {
+        for (y = 1; (y < MAZE_H - 1) && !found; y++)
+        {
+            for (x = 1; (x < MAZE_W - 1) && !found; x++)
+            {
+                if (!Maze_isWall(x, y) && !doorTrajectory[y][x])
+                {
+                    tx = x;
+                    ty = y;
+                    found = TRUE;
+                }
+            }
+        }
+    }
+
+    // Nowhere legal left: this room simply gets no enemy. Better than one
+    // standing on a door trajectory (same requirement as TRAJ above).
+    if (!found)
+    {
+        e->alive = FALSE;
+        e->deathTimer = 0;
+        return;
+    }
 
     e->x = (s16) (tx * MAZE_TILE_PX);
     e->y = (s16) (ty * MAZE_TILE_PX);
