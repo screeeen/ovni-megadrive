@@ -9,17 +9,19 @@
 #include "sfx.h"
 #include "plants.h"
 
-// STATE_WIN (spec §34): reached by walking back out through the
-// insertion link once every letter is collected -- a static screen
-// waiting for BUTTON_A, same "hold the state until confirmed" idea as
-// STATE_MENU already uses. STATE_GAMEOVER (user request: "un enemigo por
-// habitacion... si te mata sale una pantalla game over") is the same
-// pattern for the opposite outcome -- reached by touching a DANGEROUS
-// enemy, BUTTON_A sends the player back to the menu exactly like
-// STATE_WIN does. Deliberately left OUT of resetToMenu()'s own
-// progress-save check below: dying does not preserve this attempt's
-// collected letters, unlike leaving mid-run or winning.
-typedef enum { STATE_MENU, STATE_PLAYING, STATE_WIN, STATE_GAMEOVER } GameState;
+// STATE_GAMEOVER (user request: "un enemigo por habitacion... si te mata
+// sale una pantalla game over") -- a static screen waiting for BUTTON_A,
+// same "hold the state until confirmed" idea as STATE_MENU already uses,
+// reached by touching a DANGEROUS enemy. Deliberately left OUT of
+// resetToMenu()'s own progress-save check below: dying does not preserve
+// this attempt's collected letters, unlike leaving mid-run.
+//
+// There used to be a STATE_WIN here too (spec §34, the "FASE COMPLETADA"
+// screen reached by walking back out through the insertion link with
+// every letter collected) -- removed per user request ("elimina la
+// pantalla de fase completada, simplemente vuelve al menu"): completing
+// the phase now goes straight to resetToMenu(), same as leaving mid-run.
+typedef enum { STATE_MENU, STATE_PLAYING, STATE_GAMEOVER } GameState;
 
 // Control scheme (spec §40-44). Cut back down to 2 (user request: "borra
 // toda la logica de esquemas de movimiento de la nave excepto borracho y
@@ -166,6 +168,7 @@ static u8 currentCol, currentRow;
 // §27), before currentCol/currentRow are ever set -- gates every place
 // that would otherwise read a stale/meaningless (currentCol,currentRow).
 static bool inInsertRoom;
+
 // Which border the insertion room's mission door sits on this game
 // (spec §29quat: derived once per newGame() as the OPPOSITE side of
 // insertLinkDir -- N<->S, E<->W -- so leaving the insertion room and
@@ -468,8 +471,9 @@ static void drawInsertRoomArrow(void)
 // the link at any time regardless of progress (unchanged, always could);
 // this just makes it visible, right where that choice is made, that
 // there's still something left uncollected. Never shown once the phase
-// is actually complete -- that case shows the full victory screen
-// instead (see the STATE_WIN transition below), it never lingers here.
+// is actually complete -- that case goes straight back to the menu
+// instead (see the exitDirForDoorDir(menuDoorDir) branch below), it
+// never lingers here.
 #define INSERT_STATUS_ROW 2
 static void drawInsertRoomStatus(bool show)
 {
@@ -531,14 +535,18 @@ _Static_assert(MAZE_MAP_SLOTS == SIZE_PRESET_COUNT, "MAZE_MAP_SLOTS must equal S
 // winning attempt code cached.
 //
 // Expensive regardless (one real tombo generation per room) -- called at
-// most once per planet per boot (newGame() guards it with
-// plantsTotalKnown), never from the main per-frame loop.
+// most once per planet per boot (ensurePlantsTotalKnown() below guards it
+// with plantsTotalKnown), never from the main per-frame loop.
 //
 // Clobbers mapCols/mapRows/itemCount/mapSeed/guideMap/insertLink*/the
-// current room's own grid -- harmless since newGame() (the only caller)
-// immediately reinitializes every one of them itself for the actual game
-// right after this returns (its OWN cache bank survives that, by design
-// -- see Maze_setActiveMapSlot's own doc comment).
+// current room's own grid -- harmless since ensurePlantsTotalKnown() (the
+// only caller) immediately reinitializes every one of them itself for
+// the actual game right after this returns, whenever it's the one
+// actually starting a run (its OWN cache bank survives that, by design
+// -- see Maze_setActiveMapSlot's own doc comment); calling it from the
+// menu (without starting a run at all) just leaves those globals
+// clobbered until a real newGame() reinitializes them later -- harmless
+// too, nothing reads them while gameState is STATE_MENU.
 static u16 scanPlanetPlantTotal(u8 presetIndex)
 {
     u16 total = 0;
@@ -587,6 +595,43 @@ static u16 scanPlanetPlantTotal(u8 presetIndex)
     return total;
 }
 
+// Ensures presetSave[presetIndex] has a decided mapSeed and a known plant
+// total, computing/committing them right now if it doesn't yet have both
+// (user request: "en el menu, enseña el total de plantas tambien cuando
+// la nave no ha entrado... quiero 0 de X plantas" -- letters already show
+// this on sight, a fixed preset constant (sizePresets[].letters), but a
+// planet's plant total isn't (spec §51): it depends on the actual
+// generated map, so showing it before ever playing means DECIDING that
+// planet's map right here instead of waiting for "empezar"). Marks
+// hasSave TRUE so newGame() later reuses this exact mapSeed instead of
+// drawing a different one -- keeps the menu's preview and the real game
+// consistent instead of showing one total and playing a map with another.
+//
+// Safe to call random() here even for a never-played preset: spec §54's
+// finding only blocks doing this before ANY real button press at all --
+// both callers (LEFT/RIGHT menu navigation, and newGame() itself) only
+// ever run after the player has already pressed something real.
+//
+// Expensive the first time for a given preset (one real tombo generation
+// per room, scanPlanetPlantTotal() above) -- behind a loading message,
+// a no-op on every call after the first for the same preset
+// (plantsTotalKnown itself is the guard).
+static void ensurePlantsTotalKnown(u8 presetIndex)
+{
+    if (presetSave[presetIndex].plantsTotalKnown)
+        return;
+
+    if (!presetSave[presetIndex].hasSave)
+    {
+        presetSave[presetIndex].mapSeed = random();
+        presetSave[presetIndex].hasSave = TRUE;
+    }
+
+    VDP_drawText("CARGANDO...", 14, 13);
+    presetSave[presetIndex].plantsTotal = scanPlanetPlantTotal(presetIndex);
+    presetSave[presetIndex].plantsTotalKnown = TRUE;
+    VDP_clearPlane(BG_A, TRUE);
+}
 
 static void loadRoom(u8 col, u8 row)
 {
@@ -680,47 +725,30 @@ static void enterRoomFrom(u8 exitDir)
 
 static void newGame(void)
 {
-    const PresetSave save = presetSave[sizePresetIndex];
+    PresetSave save;
 
     mapViewOpen = FALSE;
-    // Resume this planet's saved map if it has one (spec §35), otherwise
-    // draw a fresh seed from the shared random() stream -- by this point
-    // the player has already pressed LEFT/RIGHT/A navigating the menu
-    // just to reach "empezar", so SGDK's random() (tools.c) is already
-    // properly reseeded from real elapsed time (spec §54's own finding),
-    // never the fixed default it starts at.
-    mapSeed = save.hasSave ? save.mapSeed : random();
-    presetSave[sizePresetIndex].mapSeed = mapSeed; // scanPlanetPlantTotal() below reads this
 
-    // One-time per planet per boot (spec §55, user request: "prefiero
-    // que generes cada planeta al entrar" -- reverting spec §52's "all 8
-    // at boot", which needed an awkward button-press workaround spec §54
-    // had to add just to get a varying seed). The FIRST time this
-    // specific planet is ever entered this session -- fresh start or a
-    // resume, same either way -- generate its whole map once, up front,
-    // behind a loading message: every room (populating its own
-    // Maze_setActiveMapSlot bank, spec §52, so loadRoom() replays them
-    // instantly instead of searching from scratch for the rest of this
-    // session) and its plant total (spec §51). Skipped on every later
-    // entry to the SAME planet this session -- the bank and the total are
-    // both already there.
-    if (!presetSave[sizePresetIndex].plantsTotalKnown)
-    {
-        VDP_drawText("CARGANDO...", 14, 13);
-        presetSave[sizePresetIndex].plantsTotal = scanPlanetPlantTotal(sizePresetIndex);
-        presetSave[sizePresetIndex].plantsTotalKnown = TRUE;
-        VDP_clearPlane(BG_A, TRUE);
-    }
+    // Decides (if not already decided -- e.g. by browsing this planet in
+    // the menu first, user request: "en el menu, enseña el total de
+    // plantas tambien cuando la nave no ha entrado") this planet's
+    // mapSeed and plant total, and commits hasSave=TRUE either way -- see
+    // ensurePlantsTotalKnown()'s own doc comment. By this point the
+    // player has already pressed LEFT/RIGHT/A navigating the menu just to
+    // reach "empezar", so SGDK's random() (tools.c) is already properly
+    // reseeded from real elapsed time (spec §54's own finding), never the
+    // fixed default it starts at -- safe even when this specific preset's
+    // own seed hasn't been decided until right now.
+    ensurePlantsTotalKnown(sizePresetIndex);
+    save = presetSave[sizePresetIndex]; // read AFTER -- hasSave/mapSeed/plantsTotal are always decided by now
+
+    mapSeed = save.mapSeed;
 
     // Reseed explicitly from mapSeed so GuideMap_generate()'s own
     // random() sequence becomes reproducible from mapSeed alone (see the
-    // presetSave doc comment above) -- needed for a resume to regenerate
-    // the identical map, and harmless on a fresh start (mapSeed was
-    // itself just drawn from the same stream one line up). Reproduces
-    // the exact same map the scan above just built and discarded for
-    // this planet (nothing from that pass is kept except its mapSeed,
-    // plant total, and room-attempt-cache bank -- see
-    // Maze_setActiveMapSlot right below).
+    // presetSave doc comment above) -- needed for a resume (or a planet
+    // whose seed ensurePlantsTotalKnown() just decided above) to
+    // regenerate the identical map every time.
     setRandomSeed(mapSeed);
 
     mapCols = sizePresets[sizePresetIndex].cols;
@@ -729,23 +757,25 @@ static void newGame(void)
 
     GuideMap_generate();
     // Switches to THIS planet's own room-attempt-cache bank (spec §52) --
-    // already fully populated by the scan above (first entry) or an
-    // earlier one this session (later entries), so every room
-    // loadRoom() generates from here on replays instantly instead of
-    // searching from scratch. Deliberately NOT cleared: that cached work
-    // is exactly what eliminates the per-room pause this spec is about.
+    // already fully populated by ensurePlantsTotalKnown()'s scan above
+    // (first entry, or an earlier menu browse) or an earlier real entry
+    // this session, so every room loadRoom() generates from here on
+    // replays instantly instead of searching from scratch. Deliberately
+    // NOT cleared: that cached work is exactly what eliminates the
+    // per-room pause this spec is about.
     Maze_setActiveMapSlot(sizePresetIndex);
     tombMoving = FALSE;
     tombQueuedDir = DIR_NONE;
     Items_reset();
     Plants_reset(); // spec §48 -- running counter, now also saved/restored per planet (spec §51)
     Plants_setPlanetTotal(presetSave[sizePresetIndex].plantsTotal); // for Plants_drawHud's "n/TOTAL"
-    if (save.hasSave)
-    {
-        Items_fastForward(save.collectedCount); // spec §35 -- restore prior progress on this planet
-        Plants_setCollected(save.plantsCollected); // spec §51
-        Plants_restoreMask(save.plantsMask); // bug fix, see PresetSave's own doc comment
-    }
+    // save.hasSave is unconditionally TRUE here now (ensurePlantsTotalKnown()
+    // above guarantees it) -- for a genuinely fresh run this just restores
+    // all-zero state, identical to what Items_reset()/Plants_reset() already
+    // left, so there's no separate "fresh start" branch to skip it in anymore.
+    Items_fastForward(save.collectedCount); // spec §35 -- restore prior progress on this planet
+    Plants_setCollected(save.plantsCollected); // spec §51
+    Plants_restoreMask(save.plantsMask); // bug fix, see PresetSave's own doc comment
     GuideMap_recomputeLocks(); // unlocks up through whichever letter is now due (spec §16)
 
     // The player's actual physical starting point is the special
@@ -848,37 +878,38 @@ static void drawMenu(void)
     // free the extra vertical room the widened orbits need (menu.c).
     VDP_drawText("OVNI", 18, 3);
 
-    // Letter count (spec §33). The grid size (cols x rows) used to show
-    // here too, dropped per user request ("borra el NxN de habitaciones
-    // en el menu") -- sizePresets[].cols/rows are still what drives
-    // GuideMap_generate() et al, just no longer surfaced in this text.
-    len = sprintf(buf, "%d %s", letters, (letters == 1) ? "LETRA" : "LETRAS");
-    VDP_drawText(buf, (40 - len) / 2, 25);
-
-    // Recogidas/faltan del planeta seleccionado (spec §35, user request):
-    // progress is per-planet and survives leaving mid-run (see
-    // presetSave), so this reflects that saved state, not the live game.
-    len = sprintf(buf, "%d DE %d RECOGIDAS", collected, letters);
-    VDP_drawText(buf, (40 - len) / 2, 26);
-
-    VDP_drawText("PULSA A PARA EMPEZAR", 10, 27);
-
+    // 3-line status block (user request: "n de total plantas \n n de
+    // total letras \n pulsa a empezar") -- plants, then letters, same
+    // "collected DE total X" wording for both, then the prompt.
+    //
     // Plant status (spec §51, user request: "contar todas las plantas de
     // cada planeta... pintar en el menu un status de cuantas ha recogido
-    // el player"). Row 24 -- the one free row between menu.c's orbits
-    // (rows 4-23) and this bottom text block (25-27), same kind of gap
-    // row 1's sound hint uses above the orbits. plantsTotal is only known
-    // once this planet has actually been ENTERED at least once this
-    // session (spec §55: newGame() computes it then, not drawMenu() on
-    // first glance any more) -- nothing to show yet for one never
-    // started, so the row is skipped entirely rather than showing a
-    // misleading "0 DE 0".
+    // el player"). plantsTotalKnown is set by ensurePlantsTotalKnown(),
+    // called both from here (LEFT/RIGHT navigation, just below) and from
+    // newGame() -- so by the time this planet has ever actually been the
+    // SELECTED one in the menu, not just played, this is already known
+    // (user request: "enseña el total de plantas tambien cuando la nave
+    // no ha entrado"). Still guarded rather than assumed unconditionally
+    // true: the very first preset shown at cold boot, before any
+    // LEFT/RIGHT/A has been pressed at all, hasn't had the chance yet
+    // (spec §54's random()-before-any-button-press trap) -- skipped
+    // entirely then rather than showing a misleading "0 DE 0".
     if (presetSave[sizePresetIndex].plantsTotalKnown)
     {
         len = sprintf(buf, "%d DE %d PLANTAS", presetSave[sizePresetIndex].plantsCollected,
                       presetSave[sizePresetIndex].plantsTotal);
-        VDP_drawText(buf, (40 - len) / 2, 24);
+        VDP_drawText(buf, (40 - len) / 2, 25);
     }
+
+    // Letters (spec §33/§35): collected/faltan del planeta seleccionado --
+    // progress is per-planet and survives leaving mid-run (see
+    // presetSave), so this reflects that saved state, not the live game.
+    // Replaces the old 2-line "N LETRAS" + "N DE N RECOGIDAS" pair with
+    // one line matching the plants line's own "collected DE total" shape.
+    len = sprintf(buf, "%d DE %d LETRAS", collected, letters);
+    VDP_drawText(buf, (40 - len) / 2, 26);
+
+    VDP_drawText("PULSA A PARA EMPEZAR", 10, 27);
 }
 
 // Hard reset combo (user request): A+B+C+UP together, from anywhere
@@ -903,13 +934,14 @@ static void resetToMenu(void)
     // §38: a finished planet used to clear its save entirely, which
     // showed as "0 DE N" in the menu right after completing it --
     // user-reported bug, should read as fully complete instead). Only
-    // when actually leaving a real game (mid-run via the reset combo,
-    // or just won), never when the combo is pressed while already at
-    // the menu (mapSeed/items.c's collected state would be stale
-    // leftovers from whatever was last played, not "this" run).
-    // collectedCount naturally equals itemCount when the run was won,
-    // which is exactly what should show in the menu.
-    if ((previousState == STATE_PLAYING) || (previousState == STATE_WIN))
+    // when actually leaving a real game (mid-run via the reset combo, or
+    // just won -- completing the phase calls this directly from
+    // STATE_PLAYING now, no separate win state in between), never when
+    // the combo is pressed while already at the menu (mapSeed/items.c's
+    // collected state would be stale leftovers from whatever was last
+    // played, not "this" run). collectedCount naturally equals itemCount
+    // when the run was won, which is exactly what should show in the menu.
+    if (previousState == STATE_PLAYING)
     {
         presetSave[sizePresetIndex].hasSave = TRUE;
         presetSave[sizePresetIndex].mapSeed = mapSeed;
@@ -1306,11 +1338,13 @@ int main(bool hardReset)
             if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
             {
                 sizePresetIndex = (sizePresetIndex + SIZE_PRESET_COUNT - 1) % SIZE_PRESET_COUNT;
+                ensurePlantsTotalKnown(sizePresetIndex); // user request: show the plant total even before entering
                 drawMenu();
             }
             if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
             {
                 sizePresetIndex = (sizePresetIndex + 1) % SIZE_PRESET_COUNT;
+                ensurePlantsTotalKnown(sizePresetIndex); // user request: show the plant total even before entering
                 drawMenu();
             }
             if ((state & BUTTON_A) && !(prevState & BUTTON_A))
@@ -1329,11 +1363,6 @@ int main(bool hardReset)
                 Sfx_setEnabled(!Sfx_isEnabled());
                 drawMenu();
             }
-        }
-        else if (gameState == STATE_WIN) // spec §34
-        {
-            if ((state & BUTTON_A) && !(prevState & BUTTON_A))
-                resetToMenu();
         }
         else if (gameState == STATE_GAMEOVER) // user request, see its own enum doc comment
         {
@@ -1613,35 +1642,18 @@ int main(bool hardReset)
                 }
                 else if (exitDir == exitDirForDoorDir(menuDoorDir))
                 {
-                    // Walked out through the menu-exit door (spec §36).
-                    // This is now where completing the phase is actually
-                    // decided (spec §39, user request: "para completar la
-                    // fase, tiene que salir de la habitación de inserción/
-                    // extracción con todas las letras recogidas") -- not
-                    // merely arriving back at the insertion room from the
-                    // grid (see the isInsertLinkRoom branch above, which
-                    // no longer checks this at all).
-                    if (Items_allCollected())
-                    {
-                        // Phase complete: victory screen, wait for
-                        // BUTTON_A (STATE_WIN, handled in the main
-                        // dispatch below) to head back to the menu.
-                        gameState = STATE_WIN;
-
-                        SPR_setVisibility(playerSprite, HIDDEN);
-                        drawInsertRoomStatus(FALSE);
-
-                        VDP_clearPlane(BG_A, TRUE);
-                        VDP_drawText("FASE COMPLETADA", 12, 12);
-                        VDP_drawText("PULSA A PARA VOLVER AL MENU", 6, 15);
-                    }
-                    else
-                    {
-                        // Not done yet: straight back to the menu as
-                        // before -- resetToMenu() saves progress (spec
-                        // §35).
-                        resetToMenu();
-                    }
+                    // Walked out through the menu-exit door (spec §36),
+                    // whether every letter is collected (phase complete)
+                    // or not -- straight back to the menu either way.
+                    // resetToMenu() saves progress (spec §35);
+                    // collectedCount naturally equals itemCount when the
+                    // run was won, which is exactly what should show
+                    // there (its own doc comment). Used to show a "FASE
+                    // COMPLETADA" screen first and wait for BUTTON_A when
+                    // Items_allCollected() -- removed per user request
+                    // ("elimina la pantalla de fase completada, simplemente
+                    // vuelve al menu").
+                    resetToMenu();
                 }
 
                 SPR_setPosition(playerSprite, player.x, player.y);
@@ -1787,9 +1799,8 @@ int main(bool hardReset)
 
                 if (playerDied)
                 {
-                    // STATE_GAMEOVER (user request): same "hold the state
-                    // until BUTTON_A" pattern as STATE_WIN, just the
-                    // opposite outcome -- see its own enum doc comment for
+                    // STATE_GAMEOVER (user request): "hold the state
+                    // until BUTTON_A" -- see its own enum doc comment for
                     // why resetToMenu() below won't save this attempt's
                     // progress.
                     gameState = STATE_GAMEOVER;
