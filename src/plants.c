@@ -370,6 +370,18 @@ u16 Plants_lastRoomCount(void)
     return sum;
 }
 
+bool Plants_cellOccupied(s16 x, s16 y)
+{
+    u8 line, i;
+
+    for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
+        for (i = 0; i < curCount[line]; i++)
+            if ((curCol[line][i] == x) && (curRow[line][i] == y))
+                return TRUE;
+
+    return FALSE;
+}
+
 bool Plants_uncollectedAt(u8 roomCol, u8 roomRow, s16 x, s16 y)
 {
     u8 line, i;

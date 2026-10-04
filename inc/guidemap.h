@@ -207,4 +207,11 @@ bool GuideMap_revealAll(void);
 // centering offset the caller applies).
 void GuideMap_roomBoxPixelPos(u8 col, u8 row, u16 *outX, u16 *outY);
 
+// The same, for the insertion/extraction room's own box -- which has no
+// (col,row) of its own, since it sits outside the grid. main.c needs it to
+// put the blinking ship marker on the right box when the map is opened
+// from in there (user request: "desde la sala de insercion el mapa... tiene
+// que estar disponible").
+void GuideMap_insertRoomBoxPixelPos(u16 *outX, u16 *outY);
+
 #endif

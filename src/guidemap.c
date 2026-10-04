@@ -756,6 +756,52 @@ static void roomBoxOriginTiles(u8 col, u8 row, u16 *outRx, u16 *outRy)
     *outRy = offsetY + (row * ROOM_STRIDE_H);
 }
 
+// Same, for the insertion/extraction room, which lives just outside the
+// grid on insertLinkDir's side of (insertLinkCol,insertLinkRow) -- the
+// same spatial relationship its real door has (maze.c/main.c). Clamped
+// fully on-screen: exact adjacency isn't always possible for the biggest
+// presets (10x8 leaves almost no margin around the grid itself), so it
+// degrades to "as close as fits" rather than landing off-plane. Shared by
+// the overlay's own drawing and by GuideMap_insertRoomBoxPixelPos below.
+static void insertRoomBoxOriginTiles(u16 *outRx, u16 *outRy)
+{
+    s16 insCol = insertLinkCol, insRow = insertLinkRow;
+    s16 rx, ry;
+
+    switch (insertLinkDir)
+    {
+        case DOOR_N: insRow--; break;
+        case DOOR_S: insRow++; break;
+        case DOOR_E: insCol++; break;
+        default:     insCol--; break; // DOOR_W
+    }
+
+    {
+        const s16 totalW = (mapCols * ROOM_STRIDE_W) - 1;
+        const s16 totalH = (mapRows * ROOM_STRIDE_H) - 1;
+
+        rx = ((TEXT_COLS - totalW) / 2) + (insCol * ROOM_STRIDE_W);
+        ry = ((TEXT_ROWS - totalH) / 2) + (insRow * ROOM_STRIDE_H);
+    }
+
+    if (rx < 0) rx = 0;
+    if (rx > (TEXT_COLS - ROOM_BOX_W)) rx = TEXT_COLS - ROOM_BOX_W;
+    if (ry < 0) ry = 0;
+    if (ry > (TEXT_ROWS - ROOM_BOX_H)) ry = TEXT_ROWS - ROOM_BOX_H;
+
+    *outRx = (u16) rx;
+    *outRy = (u16) ry;
+}
+
+void GuideMap_insertRoomBoxPixelPos(u16 *outX, u16 *outY)
+{
+    u16 rx, ry;
+
+    insertRoomBoxOriginTiles(&rx, &ry);
+    *outX = rx * 8;
+    *outY = ry * 8;
+}
+
 // Pixel position of (col,row)'s room box top-left on the guide-map
 // overlay (spec §22) -- main.c uses this to place the ship sprite over
 // the current room instead of drawing new map art for it. BG_A tiles are
@@ -954,36 +1000,13 @@ void GuideMap_drawOverlay(void)
     // as any other visited room -- it's not a special/locked place, just
     // physically outside the room tree.
     {
-        s16 insCol = insertLinkCol, insRow = insertLinkRow;
+        u16 urx, ury;
         s16 rx, ry;
         u16 linkRx, linkRy;
 
-        switch (insertLinkDir)
-        {
-            case DOOR_N: insRow--; break;
-            case DOOR_S: insRow++; break;
-            case DOOR_E: insCol++; break;
-            default:     insCol--; break; // DOOR_W
-        }
-
-        {
-            const s16 totalW = (mapCols * ROOM_STRIDE_W) - 1;
-            const s16 totalH = (mapRows * ROOM_STRIDE_H) - 1;
-            const s16 offsetX = (TEXT_COLS - totalW) / 2;
-            const s16 offsetY = (TEXT_ROWS - totalH) / 2;
-
-            rx = offsetX + (insCol * ROOM_STRIDE_W);
-            ry = offsetY + (insRow * ROOM_STRIDE_H);
-        }
-
-        // Clamp fully on-screen: exact adjacency to the grid isn't
-        // always possible for the biggest presets (10x8 leaves almost
-        // no margin around the grid itself) -- degrades to "as close as
-        // fits" instead of drawing off-plane.
-        if (rx < 0) rx = 0;
-        if (rx > (TEXT_COLS - ROOM_BOX_W)) rx = TEXT_COLS - ROOM_BOX_W;
-        if (ry < 0) ry = 0;
-        if (ry > (TEXT_ROWS - ROOM_BOX_H)) ry = TEXT_ROWS - ROOM_BOX_H;
+        insertRoomBoxOriginTiles(&urx, &ury);
+        rx = (s16) urx;
+        ry = (s16) ury;
 
         {
             s16 x, y;
@@ -992,6 +1015,14 @@ void GuideMap_drawOverlay(void)
                 for (x = 0; x < ROOM_BOX_W; x++)
                     putTile(MAP_TILE_FILL, PAL0, (u16) (rx + x), (u16) (ry + y));
         }
+
+        // Marked with an S (user request: "indica en el mapa la sala de
+        // insercción con start") -- drawn exactly where an item room shows
+        // its own letter, the middle column of its box, so the two read as
+        // the same kind of label. The whole word doesn't fit: a room box
+        // is 3 tiles wide and the single tile of gap on each side is where
+        // this room's own corridor stub goes.
+        VDP_drawText("S", (u16) (rx + (ROOM_BOX_W / 2)), (u16) ry);
 
         // Corridor stub from the periphery room's own side, toward the
         // insertion room -- same single-tile-gap convention the main

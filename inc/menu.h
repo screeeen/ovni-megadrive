@@ -28,6 +28,13 @@
 // read as round at this size. Call once at boot.
 void Menu_loadGraphics(void);
 
+// Stamps the big 16x16-per-letter OVNI into BG_A's top right corner (user
+// request: the sound-toggle line is gone and the title took its place,
+// right-aligned and larger than the 8x8 font can be). Call after clearing
+// BG_A, every time the menu is redrawn -- the tiles themselves are
+// uploaded once by Menu_loadGraphics.
+void Menu_drawTitle(void);
+
 // Shows/hides the planet sprites, the cursor arrow and the sun (spec
 // §31, §32septies) -- call with TRUE when entering the menu, FALSE when
 // leaving it (both ways: starting a game, or the reset combo bringing
@@ -36,6 +43,12 @@ void Menu_loadGraphics(void);
 // SUN_INK_INDEX in menu.c -- and, the same way, PAL2's slot between
 // yellow and enemyShip's own violet (spec §45, for completed planets --
 // see Menu_update below).
+// Hides the menu's own sprites WITHOUT touching any palette -- see
+// Menu_hideSprites' own comment in menu.c for why that separation
+// exists. Menu_setVisible(FALSE) still does both, for callers that
+// aren't in the middle of a fade.
+void Menu_hideSprites(void);
+
 void Menu_setVisible(bool visible);
 
 // Advances each planet's orbit position by one frame and repositions its

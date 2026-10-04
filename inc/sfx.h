@@ -20,9 +20,10 @@
 // Menu_loadGraphics()/Maze_loadGraphics().
 void Sfx_loadDriver(void);
 
-// TRUE/FALSE -- starts FALSE (user request: "por defecto apagado").
-// Toggled from the menu (main.c); persists across games/resets for the
-// rest of this power-on session, same lifetime as controlMode.
+// TRUE/FALSE -- starts TRUE (user request: "sonido es ON por defecto";
+// it used to start off). Still toggled with C from the menu (main.c),
+// just no longer announced there -- see drawMenu. Persists across
+// games/resets for the rest of this power-on session.
 void Sfx_setEnabled(bool enabled);
 bool Sfx_isEnabled(void);
 

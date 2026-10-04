@@ -1,6 +1,8 @@
 #include "menu.h"
 #include "resources.h"
 #include "player.h"
+#include "maze.h"     // MAZE_TILE_COUNT / MAZE_SCRATCH_TILE_COUNT, for the title tiles
+#include "guidemap.h" // GUIDEMAP_TILE_COUNT, same
 
 // 320x224 screen. Sun sits left of dead-center vertically so the
 // biggest orbit's top edge (with room for the cursor arrow above
@@ -146,8 +148,152 @@ static Sprite *planetSprites[MENU_PLANET_COUNT];
 static Sprite *cursorSprite;
 static Sprite *sunSprite;
 
+// The big OVNI (user request: "solo OVNI en su lugar, alineado a la
+// derecha y si puedes hacer la fuente mas grande para esa palabra pues
+// mas grande"). SGDK's own font is 8x8 and can't be scaled, so these four
+// letters are drawn here at 16x16 and turned into tiles at boot -- kept
+// as the picture itself rather than as hex so they can be read, and
+// edited, as what they are.
+#define TITLE_LETTERS 4
+#define TITLE_TILES   (TITLE_LETTERS * 4) // 2x2 tiles each
+// Straight after everything maze.c and guidemap.c claim, the same way
+// guidemap.c stacks onto maze.c's.
+#define TITLE_TILE_BASE (TILE_USER_INDEX + MAZE_TILE_COUNT + GUIDEMAP_TILE_COUNT + MAZE_SCRATCH_TILE_COUNT)
+// Top left (user request, correcting an earlier "a la derecha"), one tile
+// in from the edge.
+#define TITLE_X 1
+#define TITLE_Y 1
+
+static const char *const titleArt[TITLE_LETTERS][16] = {
+    { // O
+        "................",
+        "...##########...",
+        "..############..",
+        "..###......###..",
+        "..###......###..",
+        "..###......###..",
+        "..###......###..",
+        "..###......###..",
+        "..###......###..",
+        "..###......###..",
+        "..###......###..",
+        "..############..",
+        "...##########...",
+        "................",
+        "................",
+        "................",
+    },
+    { // V
+        "................",
+        "###..........###",
+        ".###........###.",
+        ".###........###.",
+        "..###......###..",
+        "..###......###..",
+        "...###....###...",
+        "...###....###...",
+        "....###..###....",
+        "....###..###....",
+        ".....######.....",
+        ".....######.....",
+        "......####......",
+        ".......##.......",
+        "................",
+        "................",
+    },
+    { // N
+        "................",
+        "###..........###",
+        "####.........###",
+        "#####........###",
+        "######.......###",
+        "###.###......###",
+        "###..###.....###",
+        "###...###....###",
+        "###....###...###",
+        "###.....###..###",
+        "###......###.###",
+        "###.......######",
+        "###........#####",
+        "###.........####",
+        "###..........###",
+        "................",
+    },
+    { // I
+        "................",
+        "...##########...",
+        "...##########...",
+        "......####......",
+        "......####......",
+        "......####......",
+        "......####......",
+        "......####......",
+        "......####......",
+        "......####......",
+        "......####......",
+        "...##########...",
+        "...##########...",
+        "................",
+        "................",
+        "................",
+    },
+};
+
+// Turns titleArt into real 4bpp tiles. Ink is colour index 15, the one
+// SGDK's font uses too, so the word reads in exactly the same white as
+// the rest of the menu's text with no palette of its own.
+static void loadTitleTiles(void)
+{
+    u32 tile[8];
+    u8 letter, quad, row, col;
+
+    for (letter = 0; letter < TITLE_LETTERS; letter++)
+    {
+        for (quad = 0; quad < 4; quad++) // 0=TL 1=TR 2=BL 3=BR
+        {
+            const u8 ox = (u8) ((quad & 1) * 8);
+            const u8 oy = (u8) ((quad >> 1) * 8);
+
+            for (row = 0; row < 8; row++)
+            {
+                u32 bits = 0;
+
+                for (col = 0; col < 8; col++)
+                    bits = (bits << 4) | ((titleArt[letter][oy + row][ox + col] == '#') ? 0xFu : 0x0u);
+
+                tile[row] = bits;
+            }
+
+            VDP_loadTileData(tile, (u16) (TITLE_TILE_BASE + (letter * 4) + quad), 1, CPU);
+        }
+    }
+}
+
+static void titlePutTile(u16 tileIndex, u16 x, u16 y)
+{
+    VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, tileIndex), x, y);
+}
+
+void Menu_drawTitle(void)
+{
+    u8 letter;
+
+    for (letter = 0; letter < TITLE_LETTERS; letter++)
+    {
+        const u16 tx = (u16) (TITLE_X + (letter * 2));
+        const u16 base = (u16) (TITLE_TILE_BASE + (letter * 4));
+
+        titlePutTile((u16) (base + 0), tx,             TITLE_Y);
+        titlePutTile((u16) (base + 1), (u16) (tx + 1), TITLE_Y);
+        titlePutTile((u16) (base + 2), tx,             (u16) (TITLE_Y + 1));
+        titlePutTile((u16) (base + 3), (u16) (tx + 1), (u16) (TITLE_Y + 1));
+    }
+}
+
 void Menu_loadGraphics(void)
 {
+    loadTitleTiles();
+
     // PAL3 is otherwise unused by the rest of the game (PAL0=maze/text,
     // PAL1=playerShip/mapShip, PAL2=enemyShip) -- dedicated here so the
     // menu's planet/cursor sprites don't disturb any in-game palette.
@@ -175,6 +321,25 @@ void Menu_loadGraphics(void)
                                TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
 
     Menu_setVisible(FALSE);
+}
+
+// Just the sprites, none of the palette hand-over below. Pulled out
+// because the ORDER of those two matters across a fade: this screen's
+// sprites draw their ink from palette slots that Menu_setVisible hands
+// over to gameplay (PAL1's index1 to the ship's violet, PAL3's to the
+// locked-door yellow). Hand them over while the planets are still in the
+// sprite table and they light up in those colours over a screen that is
+// otherwise flat -- which is exactly the "planetas superpuestos" the
+// player saw when a run started. main.c hides them, pushes the sprite
+// table, and only then lets the palettes change.
+void Menu_hideSprites(void)
+{
+    u8 i;
+
+    for (i = 0; i < MENU_PLANET_COUNT; i++)
+        SPR_setVisibility(planetSprites[i], HIDDEN);
+    SPR_setVisibility(cursorSprite, HIDDEN);
+    SPR_setVisibility(sunSprite, HIDDEN);
 }
 
 void Menu_setVisible(bool visible)

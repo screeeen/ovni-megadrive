@@ -1,6 +1,7 @@
 #include "enemy.h"
 #include "maze.h"
 #include "player.h"
+#include "plants.h" // Plants_cellOccupied -- see pickLaneRunClear below
 
 // Same probe span as player.c's own BOX -- samples both edges of the 16px
 // box without landing exactly on the next cell boundary.
@@ -80,6 +81,29 @@ static bool collideRight(s16 newX, s16 y)
 // obstacle happened to land on every single cell of it, effectively
 // impossible at that density) just means this lane doesn't work, and the
 // caller tries another.
+// TRUE when the straight run this cell sits on -- every cell the enemy
+// would sweep patrolling it, from wall to wall along its own axis -- has
+// a plant on it anywhere (user request: "un enemigo y una hilera de
+// plantas no deben compartir la misma arista"). The enemy bounces between
+// the two walls bounding its lane, so sharing a single cell with a line
+// means sharing the whole run with it, sooner or later.
+static bool laneRunHasPlant(s16 tx, s16 ty, bool horiz)
+{
+    const s16 dx = horiz ? 1 : 0;
+    const s16 dy = horiz ? 0 : 1;
+    s16 x, y;
+
+    for (x = tx, y = ty; !Maze_isWall(x, y); x += dx, y += dy)
+        if (Plants_cellOccupied(x, y))
+            return TRUE;
+
+    for (x = (s16) (tx - dx), y = (s16) (ty - dy); !Maze_isWall(x, y); x -= dx, y -= dy)
+        if (Plants_cellOccupied(x, y))
+            return TRUE;
+
+    return FALSE;
+}
+
 static bool findOpenInLane(u8 lane, u16 seed, s16 *outX, s16 *outY)
 {
     const bool horiz = (lane < 2);
@@ -95,7 +119,7 @@ static bool findOpenInLane(u8 lane, u16 seed, s16 *outX, s16 *outY)
         const s16 tx = horiz ? v : fixed;
         const s16 ty = horiz ? fixed : v;
 
-        if (!Maze_isWall(tx, ty) && !doorTrajectory[ty][tx])
+        if (!Maze_isWall(tx, ty) && !doorTrajectory[ty][tx] && !laneRunHasPlant(tx, ty, horiz))
         {
             *outX = tx;
             *outY = ty;
@@ -170,7 +194,9 @@ void Enemy_spawnForRoom(Enemy *e, u16 roomSeed, bool doorN, bool doorE, bool doo
         {
             for (x = 1; (x < MAZE_W - 1) && !found; x++)
             {
-                if (!Maze_isWall(x, y) && !doorTrajectory[y][x])
+                if (!Maze_isWall(x, y) && !doorTrajectory[y][x] &&
+                    !laneRunHasPlant((s16) x, (s16) y, TRUE) &&
+                    !laneRunHasPlant((s16) x, (s16) y, FALSE))
                 {
                     tx = x;
                     ty = y;
@@ -201,8 +227,14 @@ void Enemy_spawnForRoom(Enemy *e, u16 roomSeed, bool doorN, bool doorE, bool doo
     else
         e->dir = (roomSeed & 4) ? DIR_UP : DIR_DOWN;
 
-    e->state = ENEMY_DANGEROUS;
-    e->stateTimer = 0;
+    // Where in the vulnerability cycle this enemy starts is the ONE thing
+    // here drawn from the shared random() stream rather than from roomSeed
+    // (user request: it must not be the same every time the ship walks
+    // in). Everything else above stays seed-deterministic on purpose --
+    // the enemy has to be in the same place on every visit, just not
+    // always caught at the same point of its blink.
+    e->state = (random() & 1) ? ENEMY_VULNERABLE : ENEMY_DANGEROUS;
+    e->stateTimer = (u16) (random() % ENEMY_STATE_FRAMES);
     e->alive = TRUE;
     e->deathTimer = 0;
 }

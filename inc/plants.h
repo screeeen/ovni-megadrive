@@ -153,6 +153,15 @@ bool Plants_allCollectedInRoom(u8 col, u8 row);
 void Plants_cacheCurrentRoom(u8 col, u8 row);
 bool Plants_loadCachedRoom(u8 col, u8 row);
 
+// TRUE if cell (x,y) of THIS room is part of any of its plant lines, no
+// matter whether that plant has been collected already. Unlike
+// Plants_uncollectedAt below, this is about the LAYOUT, not the state:
+// enemy.c uses it to keep an enemy's patrol off a line of plants (user
+// request: "un enemigo y una hilera de plantas no deben compartir la
+// misma arista"), and a patrol that moved as the player collected would
+// be worse than one that never shared the run in the first place.
+bool Plants_cellOccupied(s16 x, s16 y);
+
 // TRUE if cell (x,y) of THIS room still holds an uncollected plant. Same
 // col/row meaning as Plants_drawInRoom. Used by main.c's "route to the
 // nearest plant" debug overlay.

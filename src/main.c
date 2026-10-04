@@ -312,6 +312,28 @@ static u8 hitboxMarkCount;
 // block below to know which of the two mapViewOpen actually means right
 // now.
 static bool mapShowingNoise;
+// What the static says (user request: "pinta un mensaje en la pantalla
+// del noise de no hay senal de mapa"). No tilde and no enye: SGDK's own
+// font is plain ASCII. BG_B, high priority, so the noise repainting all
+// of BG_A every frame leaves it alone -- and cleared by hand on the way
+// out, since nothing else ever writes that row.
+// The "everything on this planet is collected, take it back" hint -- see
+// drawReturnToInsertHint(), far below, for how it pulses. Declared up
+// here because resetToMenu() has to wipe it on the way out.
+#define RETURN_MSG_TEXT      "BACK TO SPACE"
+#define RETURN_MSG_LEN       13
+#define RETURN_MSG_ROW       3
+#define RETURN_MSG_INK_INDEX ((PAL2 * 16) + 15)
+#define RETURN_MSG_HOLD      6                       // frames per step of the ramp
+#define RETURN_MSG_PULSE     (16 * RETURN_MSG_HOLD)  // 8 steps up, 8 down: ~1.6s
+#define RETURN_MSG_PERIOD    600                     // one pulse every 10s at 60fps
+static u16 returnMsgPhase;
+static bool returnMsgShown;
+
+#define NO_MAP_SIGNAL_TEXT "- SIN SENAL DE MAPA -"
+#define NO_MAP_SIGNAL_LEN  21
+#define NO_MAP_SIGNAL_ROW  13
+#define NO_MAP_SIGNAL_BOX_X ((40 - (NO_MAP_SIGNAL_LEN + 2)) / 2)
 
 // Rows on BG_B the debug panel prints to (user request: "toda la
 // informacion que consideres necesaria... en tiempo real") -- left-
@@ -629,9 +651,9 @@ _Static_assert(MAZE_MAP_SLOTS == SIZE_PRESET_COUNT, "MAZE_MAP_SLOTS must equal S
 // left would open at once. Going to look at it in the menu is enough to
 // map it (that's what the cartography screen is for), so this never
 // deadlocks.
-static bool planetUnlockProgress(u16 *outPercent)
+static bool planetUnlockProgress(u16 *outPercent, u16 *outMissing)
 {
-    u16 got = 0, total = 0;
+    u16 got = 0, total = 0, needed;
     u8 i;
 
     for (i = 0; i < unlockedPlanets; i++)
@@ -645,6 +667,13 @@ static bool planetUnlockProgress(u16 *outPercent)
 
     *outPercent = total ? (u16) (((u32) got * 100) / total) : 0;
 
+    // How many more plants-or-letters that percentage is short by, which
+    // is what the menu tells the player when they look at a planet they
+    // can't enter yet (user request) -- a count of things to go and pick
+    // up says more than a percentage does.
+    needed = (u16) (((u32) total * PLANET_UNLOCK_PERCENT + 99) / 100);
+    *outMissing = (needed > got) ? (u16) (needed - got) : 0;
+
     return TRUE;
 }
 
@@ -654,13 +683,15 @@ static bool planetUnlockProgress(u16 *outPercent)
 // menu and looked at it. Cheap enough to call every menu frame.
 static void updatePlanetUnlocks(void)
 {
-    u16 percent;
-
     if (unlockedPlanets >= SIZE_PRESET_COUNT)
         return;
 
-    if (planetUnlockProgress(&percent) && (percent >= PLANET_UNLOCK_PERCENT))
-        unlockedPlanets++;
+    {
+        u16 percent, missing;
+
+        if (planetUnlockProgress(&percent, &missing) && (percent >= PLANET_UNLOCK_PERCENT))
+            unlockedPlanets++;
+    }
 }
 
 static u16 scanPlanetPlantTotal(u8 presetIndex)
@@ -843,16 +874,24 @@ static void introSetUpPlanet(u8 presetIndex)
 // up planet 0 for introTick() to start chewing through.
 static void introFloodReset(void); // defined below, next to introFloodStep -- introBegin() needs it first
 
-static void beginCartography(u8 firstPlanet, u8 limit)
+// showGalaxy: the "RUMBO: GALAXIA x" header belongs to the boot run, the
+// one that charts the sky you are arriving at. Charting one more planet
+// later is not a journey anywhere (user request: "cuando cargas un nuevo
+// planeta, no indiques que viajas a esa galaxia, solo cartografiando"),
+// so that line is left off and only the work itself is announced.
+static void beginCartography(u8 firstPlanet, u8 limit, bool showGalaxy)
 {
     char buf[40];
     char galaxy[16];
     int len;
 
     VDP_clearPlane(BG_A, TRUE);
-    pickGalaxyName(galaxy);
-    len = sprintf(buf, "RUMBO: GALAXIA %s", galaxy);
-    VDP_drawText(buf, (u16) ((40 - len) / 2), 2);
+    if (showGalaxy)
+    {
+        pickGalaxyName(galaxy);
+        len = sprintf(buf, "RUMBO: GALAXIA %s", galaxy);
+        VDP_drawText(buf, (u16) ((40 - len) / 2), 2);
+    }
     VDP_drawText("CARTOGRAFIANDO SECTORES...", 6, 4);
 
     introPlanetIndex = firstPlanet;
@@ -863,7 +902,7 @@ static void beginCartography(u8 firstPlanet, u8 limit)
 
 static void introBegin(void)
 {
-    beginCartography(0, PLANETS_AT_START);
+    beginCartography(0, PLANETS_AT_START, TRUE);
 }
 
 // Processes exactly one cell of introPlanetIndex's grid (a real room, or
@@ -1395,7 +1434,7 @@ static void newGame(void)
 // don't need to be redrawn here at all, only the text.
 static void drawMenu(void)
 {
-    char buf[32]; // widened from 24 for the sound-toggle hint line (spec §47), longest of this function's sprintfs
+    char buf[40]; // a full screen line: the longest sprintf here is the locked planet's "RECOGE n OBJETOS MAS PARA ABRIRLO"
     int len;
     const u8 letters = sizePresets[sizePresetIndex].letters;
     // Saved progress for the selected planet (spec §35) -- 0 only when
@@ -1406,20 +1445,13 @@ static void drawMenu(void)
 
     VDP_clearPlane(BG_A, TRUE);
 
-    // Sound toggle hint (spec §47, user request: "activable desde el
-    // menu y por defecto apagado") -- row 1, the only free row above the
-    // title (menu.c's orbits occupy most of rows 4-23), so it never
-    // collides with a planet sprite at any point in its orbit. Label
-    // generalized from "BOMBO AL GOLPEAR MURO" once the plant hi-hat
-    // (user request) started sharing the same Sfx_isEnabled() toggle --
-    // one single switch for every PCM4 one-shot in the game, not one
-    // per sound.
-    len = sprintf(buf, "C: SONIDO %s", Sfx_isEnabled() ? "ON" : "OFF");
-    VDP_drawText(buf, (40 - len) / 2, 1);
-
-    // Title moved up and the bottom text pushed down (spec §32quat) to
-    // free the extra vertical room the widened orbits need (menu.c).
-    VDP_drawText("OVNI", 18, 3);
+    // The big OVNI, top right (user request: "desaparece el texto que
+    // indica el switch del sonido. solo OVNI en su lugar, alineado a la
+    // derecha"). It replaces both the sound line that used to be on row 1
+    // and the small centred title that was on row 3 -- C still toggles the
+    // sound, it just isn't announced any more. Drawn as tiles by menu.c,
+    // 16x16 per letter, so it has to come after the VDP_clearPlane above.
+    Menu_drawTitle();
 
     // 3-line status block (user request: "n de total plantas \n n de
     // total letras \n pulsa a empezar") -- plants, then letters, same
@@ -1437,6 +1469,26 @@ static void drawMenu(void)
     // LEFT/RIGHT/A has been pressed at all, hasn't had the chance yet
     // (spec §54's random()-before-any-button-press trap) -- skipped
     // entirely then rather than showing a misleading "0 DE 0".
+    // A planet still locked says what it costs instead of what's in it
+    // (user request: "planetas bloqueados son seleccionables, pero te
+    // indica que objetos necesitan ser [recogidos] para entrar"). It has
+    // no numbers of its own to show anyway -- a locked planet is never
+    // charted, precisely because nobody can go there yet.
+    if (sizePresetIndex >= unlockedPlanets)
+    {
+        u16 percent, missing;
+
+        VDP_drawText("- BLOQUEADO -", (40 - 13) / 2, 25);
+
+        if (planetUnlockProgress(&percent, &missing))
+            len = sprintf(buf, "RECOGE %d OBJETOS MAS PARA ABRIRLO", missing);
+        else
+            len = sprintf(buf, "VISITA LOS PLANETAS YA ABIERTOS");
+
+        VDP_drawText(buf, (40 - len) / 2, 26);
+    }
+    else
+    {
     if (presetSave[sizePresetIndex].plantsTotalKnown)
     {
         len = sprintf(buf, "%d DE %d PLANTAS", presetSave[sizePresetIndex].plantsCollected,
@@ -1453,6 +1505,7 @@ static void drawMenu(void)
     VDP_drawText(buf, (40 - len) / 2, 26);
 
     VDP_drawText("PULSA A PARA EMPEZAR", 10, 27);
+    }
 
     // How close the next planet is to opening (user request: the rest of
     // them unlock at PLANET_UNLOCK_PERCENT of what's already available,
@@ -1461,9 +1514,9 @@ static void drawMenu(void)
     // open -- there is nothing left to wait for.
     if (unlockedPlanets < SIZE_PRESET_COUNT)
     {
-        u16 percent;
+        u16 percent, missing;
 
-        if (planetUnlockProgress(&percent))
+        if (planetUnlockProgress(&percent, &missing))
             len = sprintf(buf, "PROXIMO PLANETA: %d%% DE %d%%", percent, PLANET_UNLOCK_PERCENT);
         else
             len = sprintf(buf, "CARTOGRAFIA INCOMPLETA");
@@ -1478,9 +1531,107 @@ static void drawMenu(void)
 // whatever any of those 4 buttons would otherwise do that same frame.
 #define RESET_COMBO (BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_UP)
 
+// Screen-to-screen fades (user request: "quiero fundido de negro en la
+// pantalla de menu, y cuando empieza el juego", then refined -- "el
+// fundido tiene que ser mas suave y permanecer en negro un cuarto de
+// segundo. El fundido es al color 0 de la paleta, ese gris").
+//
+// It fades to the backdrop, not to black: colour 0 of palette 0 is the
+// dark grey everything in this game sits on (maze.c's 0x252525), so a
+// screen faded to it reads as the room emptying out rather than as the
+// console being switched off. Blocking on purpose -- SGDK runs its own
+// vblank loop inside, and nothing should be moving across a screen
+// change anyway.
+#define FADE_FRAMES 24 // each way, 0.4s
+#define FADE_HOLD   15 // a quarter second sitting on the backdrop
+
+static u16 fadePal[64];
+static u16 fadeFlat;
+
+// The colour everything fades to and from: palette entry 0, which is the
+// backdrop the VDP shows wherever nothing is drawn -- the menu's own
+// background, and the floor of every room (user request: "fundidos tienen
+// que ser al color de bg del menu, creo que es 0 en la paleta"). Read out
+// of CRAM rather than written down here, so it stays the backdrop even if
+// that colour ever changes.
+static u16 fadeBackdrop(void)
+{
+    u16 c;
+
+    PAL_getColors(0, &c, 1);
+
+    return c;
+}
+
+// Pushes the sprite table to the VDP NOW instead of waiting for the main
+// loop's own SPR_update at the end of the frame. Needed in the middle of
+// a transition: SPR_setVisibility only marks a sprite, and until the
+// table is actually sent the VDP keeps drawing whatever was in it -- for
+// however long the setup after it takes, which is not a frame but a whole
+// room generation. A sprite left there picks up every palette change that
+// setup makes, and lights up over a screen that is supposed to be flat.
+static void flushSprites(void)
+{
+    SPR_update();
+    SYS_doVBlankProcess();
+}
+
+static void fadeToBackdrop(void)
+{
+    u16 flat[64];
+    u16 i;
+
+    // The sprite list the VDP is showing is whatever SPR_update last sent
+    // it -- and these fades run their own vblank loop, outside the one in
+    // the main loop that calls it. Without this, everything the caller
+    // just hid or showed only reaches the screen when the frame after the
+    // fade ends: the menu's planets stayed up, in full colour, over the
+    // insertion room for the whole fade in (user report: "se cuelan los
+    // planetas superpuestos").
+    SPR_update();
+
+    fadeFlat = fadeBackdrop();
+    PAL_getColors(0, fadePal, 64);
+    for (i = 0; i < 64; i++)
+        flat[i] = fadeFlat;
+
+    PAL_fadeTo(0, 63, flat, FADE_FRAMES, FALSE);
+
+    for (i = 0; i < FADE_HOLD; i++)
+        SYS_doVBlankProcess();
+}
+
+// Back up from the backdrop. Whatever the new screen set up while it was
+// flat is in CRAM already -- but only the handful of slots it actually
+// touched; every other one still holds the fade's own colour. So the
+// target is "the new colour where there is one, the old one otherwise",
+// and a slot counts as new exactly when it differs from the backdrop.
+//
+// One slot genuinely collides: Menu_setVisible(FALSE) sets PAL3's index0
+// to that same backdrop grey (it hands that slot to maze.c's locked-door
+// tiles on the way out), so this can't tell it apart from an untouched
+// one. The menu->game path calls Menu_setVisible(FALSE) once more after
+// fading back in, which is idempotent and settles it.
+static void fadeFromBackdrop(void)
+{
+    u16 target[64];
+    u16 i;
+
+    SPR_update(); // same reason as above, and this is the half that showed
+
+    PAL_getColors(0, target, 64);
+    for (i = 0; i < 64; i++)
+        if (target[i] == fadeFlat)
+            target[i] = fadePal[i];
+
+    PAL_fadeInAll(target, FADE_FRAMES, FALSE);
+}
+
 static void resetToMenu(void)
 {
     const GameState previousState = gameState; // capture before overwriting below
+
+    fadeToBackdrop(); // the menu is built below, behind the black
 
     // Snapshot progress for the planet just left (spec §35, fixed in
     // §38: a finished planet used to clear its save entirely, which
@@ -1527,9 +1678,18 @@ static void resetToMenu(void)
     VDP_clearTextLineBG(BG_B, 0); // drawRoomIdHud's line (the FPS counter redraws itself next frame)
     VDP_clearTextLineBG(BG_B, 1);
     VDP_clearTextLineBG(BG_B, INSERT_STATUS_ROW);
+    VDP_clearTextLineBG(BG_B, RETURN_MSG_ROW); // the "go back" hint, same deal
+    returnMsgShown = FALSE;
+
+    // Same ordering rule in reverse: the ship and the enemy are off above,
+    // but until the table is sent they are still being drawn -- and
+    // Menu_setVisible(TRUE) is about to point their palette slots at the
+    // sun's white and the completed planets' yellow.
+    flushSprites();
 
     Menu_setVisible(TRUE);
     drawMenu();
+    fadeFromBackdrop();
 }
 
 // Starts a shake burst sized by `distance` (px the ship had slid before
@@ -1985,6 +2145,62 @@ static void drawPlantPath(void)
     plantPathFlood(currentCol, currentRow, startX, startY, FALSE);
 }
 
+// Everything on this planet collected -- letters AND plants (user
+// request: "se muestra cuando la nave recogio letras y plantas en su
+// totalidad") -- so tell the player to take it all back.
+//
+// It pulses once every RETURN_MSG_PERIOD frames (user request: "el
+// parpadeo cada 10 seg") instead of breathing without pause: the glyphs
+// are drawn through PAL2 -- free during play, since the enemy sprite only
+// ever reads that palette's index 1 and SGDK's font reads index 15 -- and
+// what animates is that one colour, up from black and back down through
+// the 8 greys the VDP's 3 bits per channel can actually make. Black is
+// invisible against the backdrop, so between pulses there is simply
+// nothing there, and the pulse itself fades in and out instead of
+// snapping on.
+static void drawReturnToInsertHint(void)
+{
+    static const u32 ramp[8] = { 0x000000, 0x242424, 0x484848, 0x6D6D6D,
+                                  0x919191, 0xB6B6B6, 0xDADADA, 0xFFFFFF };
+    const bool want = (gameState == STATE_PLAYING) && !inInsertRoom &&
+                      Items_allCollected() &&
+                      (Plants_collectedCount() >= presetSave[sizePresetIndex].plantsTotal) &&
+                      !mapViewOpen && !roomViewerOn && !sweepOn;
+
+    if (!want)
+    {
+        if (returnMsgShown)
+        {
+            VDP_clearTextLineBG(BG_B, RETURN_MSG_ROW);
+            returnMsgShown = FALSE;
+        }
+        return;
+    }
+
+    // Redrawn every frame rather than once: cheap at 13 glyphs, and it
+    // survives everything that wipes BG_B behind its back (the sweep
+    // screen, resetToMenu) without having to know about any of them.
+    VDP_setTextPriority(1);
+    VDP_setTextPalette(PAL2);
+    VDP_drawTextBG(BG_B, RETURN_MSG_TEXT, (40 - RETURN_MSG_LEN) / 2, RETURN_MSG_ROW);
+    VDP_setTextPalette(PAL0);
+    VDP_setTextPriority(0);
+    returnMsgShown = TRUE;
+
+    {
+        const u16 t = (u16) (returnMsgPhase % RETURN_MSG_PERIOD);
+        const u16 up = (u16) (8 * RETURN_MSG_HOLD);
+        // Outside the pulse it sits on ramp[0] -- black, invisible,
+        // waiting for the next one.
+        const u8 step = (t < RETURN_MSG_PULSE)
+                            ? (u8) (((t < up) ? t : (u16) (RETURN_MSG_PULSE - 1 - t)) / RETURN_MSG_HOLD)
+                            : 0;
+
+        PAL_setColor(RETURN_MSG_INK_INDEX, RGB24_TO_VDPCOLOR(ramp[step]));
+        returnMsgPhase++;
+    }
+}
+
 // One door's live state, read straight off the grid rather than off the
 // lock logic -- '.' no door there, 'o' open, '#' walled. Reading the grid
 // is deliberate: it reports what the player is actually looking at, so a
@@ -2185,7 +2401,10 @@ static void restoreLiveRoomAfterDebugScreen(void)
 static void beginDebugScreen(void)
 {
     if (mapShowingNoise)
+    {
         PSG_setEnvelope(3, PSG_ENVELOPE_MIN); // the static's own hiss, silenced the same way releasing A does
+        VDP_clearTextLineBG(BG_B, NO_MAP_SIGNAL_ROW);
+    }
 
     mapViewOpen = FALSE;
     mapShowingNoise = FALSE;
@@ -2779,11 +2998,13 @@ int main(bool hardReset)
                 introFloodStep(); // one glyph per frame, every frame -- see its own doc comment
                 if (introTick()) // one room per frame -- see its own doc comment
                 {
+                    fadeToBackdrop(); // the menu is built below, behind the black
                     VDP_clearPlane(BG_B, TRUE); // BG_B is HUD/debug territory during real play
                     introGenerating = FALSE;
                     gameState = STATE_MENU;
                     Menu_setVisible(TRUE);
                     drawMenu();
+                    fadeFromBackdrop();
                 }
             }
         }
@@ -2805,21 +3026,35 @@ int main(bool hardReset)
             // Checked every frame, not just on a run ending: a planet
             // that was blocking the next unlock by being uncharted stops
             // blocking it the moment the cartography screen maps it, and
-            // this is what notices.
-            updatePlanetUnlocks();
+            // this is what notices. A planet opening changes what the menu
+            // says about the one under the cursor, so redraw when it does.
+            {
+                const u8 before = unlockedPlanets;
+
+                updatePlanetUnlocks();
+                if (unlockedPlanets != before)
+                    drawMenu();
+            }
 
             // A planet that was still locked when the game booted has
             // never been mapped (beginCartography only did the first
-            // PLANETS_AT_START). The first time the cursor lands on one,
-            // map it through that very same screen, one room per frame,
-            // instead of freezing the menu for however long a 10x8 grid
-            // takes. It comes straight back here when it's done.
-            if (!presetSave[sizePresetIndex].plantsTotalKnown)
+            // PLANETS_AT_START). The first time the cursor lands on an
+            // UNLOCKED one, map it through that very same screen, one room
+            // per frame, instead of freezing the menu for however long a
+            // 10x8 grid takes. It comes straight back here when it's done.
+            // A locked planet is left uncharted on purpose: that is work
+            // for somewhere nobody can go yet, and the menu has nothing to
+            // show for it beyond what it still costs to open.
+            if ((sizePresetIndex < unlockedPlanets) && !presetSave[sizePresetIndex].plantsTotalKnown)
             {
+                fadeToBackdrop();
+                Menu_hideSprites();
+                flushSprites(); // same as the menu->game path below
                 Menu_setVisible(FALSE);
                 gameState = STATE_INTRO;
                 introGenerating = TRUE;
-                beginCartography(sizePresetIndex, (u8) (sizePresetIndex + 1));
+                beginCartography(sizePresetIndex, (u8) (sizePresetIndex + 1), FALSE);
+                fadeFromBackdrop();
                 prevState = state;
                 SPR_update();
                 SYS_doVBlankProcess();
@@ -2828,24 +3063,29 @@ int main(bool hardReset)
 
             Menu_update(sizePresetIndex, unlockedPlanets, completed);
 
-            // Navigation wraps within the UNLOCKED planets only, so the
-            // cursor can never land on one that isn't there (user
-            // request) and A is always a valid choice.
+            // Every planet can be looked at, locked or not (user request:
+            // "planetas bloqueados son seleccionables, pero te indica que
+            // objetos necesitan ser [desbloqueados] para entrar") -- what
+            // a locked one refuses is A, down below, not the cursor.
             if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
             {
-                sizePresetIndex = (u8) ((sizePresetIndex + unlockedPlanets - 1) % unlockedPlanets);
+                sizePresetIndex = (u8) ((sizePresetIndex + SIZE_PRESET_COUNT - 1) % SIZE_PRESET_COUNT);
                 drawMenu(); // an unmapped planet is handled above, by the cartography screen
             }
             if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
             {
-                sizePresetIndex = (u8) ((sizePresetIndex + 1) % unlockedPlanets);
+                sizePresetIndex = (u8) ((sizePresetIndex + 1) % SIZE_PRESET_COUNT);
                 drawMenu(); // an unmapped planet is handled above, by the cartography screen
             }
-            if ((state & BUTTON_A) && !(prevState & BUTTON_A))
+            if ((state & BUTTON_A) && !(prevState & BUTTON_A) && (sizePresetIndex < unlockedPlanets))
             {
+                fadeToBackdrop();  // the whole run is set up below, behind the flat screen
+                Menu_hideSprites();
+                flushSprites();    // no planets left in the table BEFORE their palette changes hands
                 Menu_setVisible(FALSE);
                 gameState = STATE_PLAYING;
                 newGame();
+                fadeFromBackdrop();
             }
             // Sound toggle (spec §47, user request: "activable desde el
             // menu y por defecto apagado") -- BUTTON_C alone, free in the
@@ -2963,7 +3203,13 @@ int main(bool hardReset)
             // mapShowingNoise's own doc comment): static beforehand, the
             // real overlay afterwards. Either way it vanishes the instant
             // A is released, no on/off memory.
-            if (!inInsertRoom)
+            // The map works from the insertion room too (user request:
+            // "desde la sala de insercion el mapa (si ya lo tiene la nave
+            // por que ha recogido A en ese planeta) tiene que estar
+            // disponible") -- same rules as anywhere else, the real
+            // overlay once letter A is in hand and the static until then.
+            // The room is drawn on the map already; what it never had was
+            // a way to open it from inside.
             {
                 if (state & BUTTON_A)
                 {
@@ -2974,6 +3220,22 @@ int main(bool hardReset)
 
                         if (mapShowingNoise)
                         {
+                            // The static is "this device has no signal" --
+                            // say so (user request), on BG_B so the noise,
+                            // which repaints all of BG_A every frame,
+                            // can't swallow it. Centred on the row the
+                            // static now grows out from.
+                            // White letters in their own black box (user
+                            // request). The letters are BG_B at high
+                            // priority, drawn once here; the box is a
+                            // rectangle of maze.c's solid tile on BG_A,
+                            // repainted under them every frame because the
+                            // static owns that whole plane.
+                            VDP_setTextPriority(1);
+                            VDP_drawTextBG(BG_B, NO_MAP_SIGNAL_TEXT,
+                                            (u16) ((40 - NO_MAP_SIGNAL_LEN) / 2), NO_MAP_SIGNAL_ROW);
+                            VDP_setTextPriority(0);
+
                             // No map device yet -- static instead of a
                             // real map, same PAL1-white-ink/PSG-noise-
                             // channel pair Maze_drawNoiseFrame's own doc
@@ -3003,7 +3265,10 @@ int main(bool hardReset)
                             // color, start visible, reset the blink timer
                             // -- the per-frame toggle below picks it up
                             // from here.
-                            GuideMap_roomBoxPixelPos(currentCol, currentRow, &mx, &my);
+                            if (inInsertRoom)
+                                GuideMap_insertRoomBoxPixelPos(&mx, &my);
+                            else
+                                GuideMap_roomBoxPixelPos(currentCol, currentRow, &mx, &my);
                             SPR_setPosition(mapShipSprite, mx + 8, my + 4);
                             PAL_setColor(PLAYER_SHIP_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF));
                             SPR_setVisibility(playerSprite, HIDDEN);
@@ -3029,7 +3294,7 @@ int main(bool hardReset)
                     //
                     // START is read as HELD, not as a press of its own, so
                     // it is the modifier and B/C stay edge-triggered.
-                    if (state & BUTTON_START)
+                    if ((state & BUTTON_START) && !inInsertRoom)
                     {
                         // Both tools take the screen over and shut the map
                         // down themselves, so releasing A afterwards
@@ -3042,7 +3307,11 @@ int main(bool hardReset)
                         else if ((state & BUTTON_C) && !(prevState & BUTTON_C))
                             enterSweep();
                         else if (mapShowingNoise)
+                        {
                             Maze_drawNoiseFrame();
+                            Maze_drawSolidBox(NO_MAP_SIGNAL_BOX_X, NO_MAP_SIGNAL_ROW - 1,
+                                               NO_MAP_SIGNAL_LEN + 2, 3);
+                        }
                     }
                     // B alone: lift the fog (user request, "que el mapa
                     // enseñe todas las habitaciones disponibles en el mapa
@@ -3058,28 +3327,48 @@ int main(bool hardReset)
                         GuideMap_drawOverlay();
                     }
                     else if (mapShowingNoise)
+                    {
                         Maze_drawNoiseFrame(); // fresh static every frame it's held
+                        Maze_drawSolidBox(NO_MAP_SIGNAL_BOX_X, NO_MAP_SIGNAL_ROW - 1,
+                                           NO_MAP_SIGNAL_LEN + 2, 3); // the banner's own backdrop
+                    }
                 }
                 else if (mapViewOpen) // A just released -- close whichever was open
                 {
                     if (mapShowingNoise)
+                    {
                         PSG_setEnvelope(3, PSG_ENVELOPE_MIN); // silence
+                        VDP_clearTextLineBG(BG_B, NO_MAP_SIGNAL_ROW); // the banner above
+                    }
 
                     Maze_draw();
-                    // Maze_draw() repaints every tile of BG_A, wiping the
-                    // room's letter (and any plants, spec §48) along with
-                    // the map overlay (or the static) -- put them back
-                    // (the map is never open in the insertion room, so
-                    // currentCol/currentRow are always valid here).
-                    Items_drawInRoom(currentCol, currentRow);
-                    Plants_drawInRoom(currentCol, currentRow);
+                    // Maze_draw() repaints every tile of BG_A, wiping
+                    // whatever the room had on it along with the map
+                    // overlay (or the static) -- put it back. The
+                    // insertion room has no letter and no plants of its
+                    // own, just its door arrow (spec §37), and
+                    // currentCol/currentRow are stale while in there.
+                    if (inInsertRoom)
+                    {
+                        drawInsertRoomArrow();
+                    }
+                    else
+                    {
+                        Items_drawInRoom(currentCol, currentRow);
+                        Plants_drawInRoom(currentCol, currentRow);
+                    }
                     // Restores the ship's normal color (spec §23) -- only
                     // the one word that PLAYER_SHIP_INK_INDEX touched, the
                     // transparent index0 was never changed.
                     PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR);
                     SPR_setVisibility(playerSprite, VISIBLE);
                     SPR_setVisibility(mapShipSprite, HIDDEN);
-                    SPR_setVisibility(enemySprite, Enemy_blinkVisible(&enemy) ? VISIBLE : HIDDEN);
+                    // No enemy in the insertion room (spec §27) -- `enemy`
+                    // is still whatever the last real room left in it, so
+                    // asking it whether to show the sprite would conjure
+                    // one up in a room that never had one.
+                    SPR_setVisibility(enemySprite,
+                                       (!inInsertRoom && Enemy_blinkVisible(&enemy)) ? VISIBLE : HIDDEN);
                     mapViewOpen = FALSE;
                     mapShowingNoise = FALSE;
                 }
@@ -3450,6 +3739,7 @@ int main(bool hardReset)
         drawDebugView(); // no-op unless the debug combo turned it on
         drawCollisionGizmos(); // no-op unless HITBOX is on and gameState is STATE_PLAYING
         drawPlantPath(); // no-op unless PLANTA is on and gameState is STATE_PLAYING
+        drawReturnToInsertHint(); // no-op until every letter is in hand
 
         prevState = state;
 

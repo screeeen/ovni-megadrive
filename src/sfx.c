@@ -1,7 +1,7 @@
 #include "sfx.h"
 #include "resources.h"
 
-static bool enabled = FALSE; // user request: "por defecto apagado"
+static bool enabled = TRUE; // user request: "sonido es ON por defecto" (it used to start off)
 
 // Rotating indices instead of a draw from the shared random() stream --
 // that stream is reserved for the map/room/item/enemy generators' own

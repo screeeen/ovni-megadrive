@@ -56,6 +56,13 @@
 // start after this to avoid overlapping maze.c's tileset in VRAM.
 #define MAZE_TILE_COUNT 40
 
+// What maze.c claims in VRAM BEYOND those: the 24-tile pool
+// Maze_drawNoiseFrame rewrites every call, plus the single solid tile the
+// debug panel's backdrop uses. Published so anything else stacking tiles
+// after maze.c's (guidemap.c, menu.c's big title) can say where the free
+// space starts instead of each one guessing.
+#define MAZE_SCRATCH_TILE_COUNT (24 + 1)
+
 // Item-letter coloring: a letter is drawn yellow while the door it lives
 // behind is still locked (matching maze.c's own locked-door wall tiles,
 // menu.c's LOCKED_DOOR_INK_INDEX). Call Maze_setTextColorLocked() right
@@ -230,6 +237,12 @@ void Maze_drawDebugEdges(void);
 // every frame -- the box itself never changes. Maze_draw() undoes it
 // (call that when the panel turns off).
 void Maze_drawDebugBackdrop(u8 firstRow, u8 rows);
+
+// The same solid black tile, as any rectangle of it (x/y/w/h in 8px tile
+// units). main.c paints one behind the "no map signal" banner so its
+// white letters read against something instead of against moving static
+// -- and repaints it every frame, since the static owns BG_A.
+void Maze_drawSolidBox(u16 x, u16 y, u16 w, u16 h);
 
 // TRUE if a plant placed on this cell can be collected no matter which
 // door the ship came in by -- the intersection of what is crossable from

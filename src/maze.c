@@ -2028,7 +2028,7 @@ void Maze_draw(void)
 // -- flipping a tile that's already pure noise looks identical to not
 // flipping it), all the actual randomness is spent regenerating the small
 // tile pool instead of shuffling a big screen of fixed shapes.
-#define NOISE_TILE_COUNT 24
+#define NOISE_TILE_COUNT 24 // counted into maze.h's MAZE_SCRATCH_TILE_COUNT
 #define NOISE_TILE_BASE  (TILE_USER_INDEX + MAZE_TILE_COUNT + 10 /* guidemap.h's GUIDEMAP_TILE_COUNT */)
 
 // One row (8 pixels, 4bpp) of pure noise: bit i of one random() draw
@@ -2067,23 +2067,43 @@ static void regenerateNoiseTiles(void)
 // pointing PAL1's index1 at white before the first call (the exact same
 // CRAM slot/trick already used for the map-ship blink, PLAYER_SHIP_INK_INDEX)
 // and restoring it, and the real screen underneath, once the effect ends.
-void Maze_drawNoiseFrame(void)
+// One row of fresh static. Kept as its own function so the row ORDER is a
+// decision of the caller's below rather than a loop bound.
+static void drawNoiseRow(s16 y)
 {
     static u16 band[40];
-    s16 x, y;
+    s16 x;
+
+    for (x = 0; x < 40; x++)
+    {
+        const u16 index = (u16) (NOISE_TILE_BASE + (random() % NOISE_TILE_COUNT));
+
+        band[x] = TILE_ATTR_FULL(PAL1, 0, FALSE, FALSE, index);
+    }
+
+    VDP_setTileMapDataRect(BG_A, band, 0, y, 40, 1, 40, CPU);
+}
+
+void Maze_drawNoiseFrame(void)
+{
+    s16 d;
 
     regenerateNoiseTiles();
 
-    for (y = 0; y < 28; y++)
+    // Outward from the middle, a row above and a row below at a time,
+    // instead of straight down from row 0 (user request: "se podria
+    // pintar de otra manera sin empezar por la parte superior de la
+    // pantalla? quiza desde la mitad? hacia arriba y abajo?"). The 40
+    // writes a row takes are slow enough to be seen sweeping, which is
+    // the whole point -- it is what makes the static look like it is
+    // being generated rather than just sitting there -- so this only
+    // changes where the sweep starts, not how fast it goes. 14 pairs
+    // cover the 28 rows exactly, symmetrically about the screen's own
+    // middle line.
+    for (d = 0; d < 14; d++)
     {
-        for (x = 0; x < 40; x++)
-        {
-            const u16 index = (u16) (NOISE_TILE_BASE + (random() % NOISE_TILE_COUNT));
-
-            band[x] = TILE_ATTR_FULL(PAL1, 0, FALSE, FALSE, index);
-        }
-
-        VDP_setTileMapDataRect(BG_A, band, 0, y, 40, 1, 40, CPU);
+        drawNoiseRow((s16) (13 - d));
+        drawNoiseRow((s16) (14 + d));
     }
 }
 
@@ -2103,12 +2123,8 @@ void Maze_drawNoiseFrame(void)
 
 static bool debugBoxTileLoaded = FALSE;
 
-void Maze_drawDebugBackdrop(u8 firstRow, u8 rows)
+static void loadDebugBoxTile(void)
 {
-    static u16 band[40];
-    u8 y;
-    u16 x;
-
     if (!debugBoxTileLoaded)
     {
         // Every nibble (pixel) = DEBUG_BOX_PAL_INDEX (5): 0x5 repeated 8x.
@@ -2118,12 +2134,31 @@ void Maze_drawDebugBackdrop(u8 firstRow, u8 rows)
         VDP_loadTileData(tileData, DEBUG_BOX_TILE_INDEX, 1, DMA);
         debugBoxTileLoaded = TRUE;
     }
+}
 
-    for (x = 0; x < 40; x++)
-        band[x] = TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, DEBUG_BOX_TILE_INDEX);
+// Same solid tile, any rectangle of it (user request: the no-signal
+// message over the static wanted "un recuadro de fondo negro" behind it).
+// Call it AFTER whatever paints BG_A underneath -- the static repaints the
+// whole plane every frame, so this has to go back on top every frame too.
+void Maze_drawSolidBox(u16 x, u16 y, u16 w, u16 h)
+{
+    static u16 band[40];
+    u16 i;
 
-    for (y = firstRow; y < (firstRow + rows); y++)
-        VDP_setTileMapDataRect(BG_A, band, 0, y, 40, 1, 40, CPU);
+    loadDebugBoxTile();
+
+    if (w > 40)
+        w = 40;
+    for (i = 0; i < w; i++)
+        band[i] = TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, DEBUG_BOX_TILE_INDEX);
+
+    for (i = 0; i < h; i++)
+        VDP_setTileMapDataRect(BG_A, band, x, (u16) (y + i), w, 1, w, CPU);
+}
+
+void Maze_drawDebugBackdrop(u8 firstRow, u8 rows)
+{
+    Maze_drawSolidBox(0, firstRow, 40, rows);
 }
 
 // Debug overlay (user request: "pinta puntitos de todo el grafo de cada

@@ -18,11 +18,17 @@
 // ENEMY_DANGEROUS kills the player on contact; ENEMY_VULNERABLE lets the
 // player kill IT on contact instead ("atropellarlo", melee by running
 // into it). Toggles every ENEMY_STATE_FRAMES regardless of the player --
-// not triggered by anything the player does.
+// not triggered by anything the player does. WHERE in that cycle an enemy
+// is when the ship walks in is drawn fresh every time (user request: "el
+// estado de la fase de vulnerabilidad de los enemigos tiene que ser
+// aleatoria cuando la nave entra en la room, no siempre la misma"), so
+// the same room never greets you the same way twice.
 typedef enum { ENEMY_DANGEROUS, ENEMY_VULNERABLE } EnemyState;
 
-// How long each state lasts (user request: "parpadea solo, por tiempo").
-#define ENEMY_STATE_FRAMES 150 // 2.5s at 60fps
+// How long each state lasts (user request: "parpadea solo, por tiempo",
+// then shortened -- "ese intervalo entre que es y no es vulnerable tiene
+// que ser un poco mas corto").
+#define ENEMY_STATE_FRAMES 100 // 1.67s at 60fps, was 150
 
 // How many frames a killed enemy blinks before actually disappearing
 // (placeholder "death animation" -- user request, no real art needed).
