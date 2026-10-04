@@ -1962,15 +1962,27 @@ void Maze_drawDebugGraph(void);
 
 void Maze_draw(void)
 {
-    // One 40x2-tile band per maze row, built in a buffer and written with a
-    // single VDP_setTileMapDataRect call -- instead of 4 VDP_setTileMapXY
-    // calls per cell (1120 per room), each of which recomputes the VRAM
-    // address and issues its own control-port write.
-    static u16 band[2 * MAZE_W * 2];
+    // The whole screen is built in RAM and handed to the VDP as ONE DMA
+    // transfer (user request: the room change stalled). It used to be 12
+    // separate CPU transfers of one maze row each -- 1920 bytes poked
+    // through the data port a word at a time, with the FIFO stalling the
+    // 68000 on every one of them for as long as the display is active.
+    // DMA moves the same bytes several times faster and costs one call.
+    //
+    // The buffer covers the HUD's band too (rows 0..MAZE_ORIGIN_ROW-1),
+    // left as tile 0: the room doesn't reach up there any more, but
+    // whatever was on BG_A -- the guide-map overlay, the static, a debug
+    // screen -- would still be sitting in it, and this is what every one
+    // of those is undone by. Those rows are never written after this
+    // file's own zero-init, so clearing them costs nothing per call.
+    static u16 plane[MAZE_ORIGIN_ROW + (MAZE_H * 2)][MAZE_W * 2];
     s16 x, y;
 
     for (y = 0; y < MAZE_H; y++)
     {
+        u16 *const top = plane[MAZE_ORIGIN_ROW + (y * 2)];
+        u16 *const bottom = plane[MAZE_ORIGIN_ROW + (y * 2) + 1];
+
         for (x = 0; x < MAZE_W; x++)
         {
             const u16 tl = BASE_TILE + (2 * grid[y][x]);
@@ -1981,26 +1993,15 @@ void Maze_draw(void)
             // same dither shape, just a different palette slot.
             const u8 pal = lockedDoorCell[y][x] ? PAL3 : PAL0;
 
-            band[i] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tl);
-            band[i + 1] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tl + 1);
-            band[(MAZE_W * 2) + i] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, bl);
-            band[(MAZE_W * 2) + i + 1] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, bl + 1);
+            top[i] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tl);
+            top[i + 1] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tl + 1);
+            bottom[i] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, bl);
+            bottom[i + 1] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, bl + 1);
         }
-
-        VDP_setTileMapDataRect(BG_A, band, 0, (y * 2) + MAZE_ORIGIN_ROW, MAZE_W * 2, 2, MAZE_W * 2, CPU);
     }
 
-    // The HUD's band (maze.h's MAZE_ORIGIN_ROW): the room doesn't reach it
-    // any more, but whatever was on BG_A up there -- the guide-map overlay,
-    // the static, a debug screen -- would still be sitting in it, since
-    // this is what every one of those is undone by.
-    {
-        static const u16 blank[MAZE_W * 2] = { 0 };
-        s16 r;
-
-        for (r = 0; r < MAZE_ORIGIN_ROW; r++)
-            VDP_setTileMapDataRect(BG_A, blank, 0, r, MAZE_W * 2, 1, MAZE_W * 2, CPU);
-    }
+    VDP_setTileMapDataRect(BG_A, &plane[0][0], 0, 0, MAZE_W * 2,
+                            MAZE_ORIGIN_ROW + (MAZE_H * 2), MAZE_W * 2, DMA);
 
     if (debugEdgesVisible)
     {

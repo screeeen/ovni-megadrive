@@ -360,6 +360,24 @@ void GuideMap_markEnemyDead(u8 col, u8 row)
     guideMap[row][col].enemyDead = TRUE;
 }
 
+void GuideMap_saveEnemyDead(bool out[MAX_MAP_ROWS][MAX_MAP_COLS])
+{
+    u8 r, c;
+
+    for (r = 0; r < MAX_MAP_ROWS; r++)
+        for (c = 0; c < MAX_MAP_COLS; c++)
+            out[r][c] = guideMap[r][c].enemyDead;
+}
+
+void GuideMap_restoreEnemyDead(const bool in[MAX_MAP_ROWS][MAX_MAP_COLS])
+{
+    u8 r, c;
+
+    for (r = 0; r < MAX_MAP_ROWS; r++)
+        for (c = 0; c < MAX_MAP_COLS; c++)
+            guideMap[r][c].enemyDead = in[r][c];
+}
+
 // Picks (goalCol,goalRow) among rooms at >= GOAL_MIN_DISTANCE_PERCENT of the
 // start's eccentricity, chosen at random among the qualifying candidates
 // (reuses `frontier`, idle after bfsFromStart's queue use) for variety

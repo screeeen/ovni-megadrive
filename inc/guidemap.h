@@ -154,6 +154,17 @@ bool GuideMap_isRoomLocked(u8 col, u8 row);
 bool GuideMap_isEnemyDead(u8 col, u8 row);
 void GuideMap_markEnemyDead(u8 col, u8 row);
 
+// Snapshots/restores those bits whole, the same way plants.c's own
+// Plants_saveMask/restoreMask do for collected plants (user request: "si
+// la nave muere... quiero que guardes el estado del planeta, con sus
+// estrellas y enemigos ya desaparecidos"). GuideMap_generate() clears
+// every one of them along with the rest of the map, so a planet being
+// resumed has to put them back afterwards or its enemies all come back to
+// life -- which no other part of the save would ever reveal, since an
+// enemy leaves nothing else behind when it dies.
+void GuideMap_saveEnemyDead(bool out[MAX_MAP_ROWS][MAX_MAP_COLS]);
+void GuideMap_restoreEnemyDead(const bool in[MAX_MAP_ROWS][MAX_MAP_COLS]);
+
 // Uploads the overlay tileset to VRAM (right after maze.c's tileset --
 // see MAZE_TILE_COUNT) and sets up PAL2 for the current-room highlight.
 // Call once at boot, alongside Maze_loadGraphics().

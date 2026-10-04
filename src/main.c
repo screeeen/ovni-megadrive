@@ -12,9 +12,10 @@
 // STATE_GAMEOVER (user request: "un enemigo por habitacion... si te mata
 // sale una pantalla game over") -- a static screen waiting for BUTTON_A,
 // same "hold the state until confirmed" idea as STATE_MENU already uses,
-// reached by touching a DANGEROUS enemy. Deliberately left OUT of
-// resetToMenu()'s own progress-save check below: dying does not preserve
-// this attempt's collected letters, unlike leaving mid-run.
+// reached by touching a DANGEROUS enemy. It used to be deliberately left
+// OUT of resetToMenu()'s own progress-save check, so dying threw the
+// attempt away; it now saves exactly like walking out does (user
+// request), letters, plants, dead enemies and all.
 //
 // There used to be a STATE_WIN here too (spec §34, the "FASE COMPLETADA"
 // screen reached by walking back out through the insertion link with
@@ -327,6 +328,21 @@ static u8 moveSpeedDebug;
 static GameState gameState;
 static u8 sizePresetIndex = SIZE_PRESET_DEFAULT;
 
+// Planet progression (user request: "haz que cargue solo en el buffer los
+// 3 primeros mundos. Los 3 grandes estan bloqueados, se desbloquean con
+// el 60% del computo de mundos anteriores"). Only the first
+// PLANETS_AT_START exist when the game boots -- which is also exactly how
+// many the boot cartography maps, so nothing is computed for a planet
+// nobody can reach yet. Each further one opens when the planets already
+// available are PLANET_UNLOCK_PERCENT complete, counting plants AND
+// letters pooled into a single ratio.
+//
+// Deliberately NOT persisted anywhere: presetSave lives in RAM for this
+// power-on session only, same as every other bit of progress here.
+#define PLANETS_AT_START       3
+#define PLANET_UNLOCK_PERCENT 60
+static u8 unlockedPlanets = PLANETS_AT_START;
+
 // Per-planet saved progress (spec §35, user request: "cada planeta tenga
 // el recuento de sus letras obtenidas... si el player sale de un
 // planeta, esas letras se conservan"). hasSave=FALSE for all until the
@@ -374,6 +390,12 @@ typedef struct
     u8 collectedCount;
     u16 plantsCollected;
     u16 plantsMask[MAX_MAP_ROWS][MAX_MAP_COLS];
+    // Which rooms' enemies are already dead (user request: a planet being
+    // resumed keeps "sus enemigos ya desaparecidos"). Nothing else in this
+    // struct implies it -- a killed enemy leaves no trace in the letter or
+    // plant counters -- and GuideMap_generate() wipes the live bits every
+    // time a planet is set up, so they have to travel in the save.
+    bool enemyDead[MAX_MAP_ROWS][MAX_MAP_COLS];
     u16 plantsTotal;
     bool plantsTotalKnown;
 } PresetSave;
@@ -598,6 +620,49 @@ _Static_assert(MAZE_MAP_SLOTS == SIZE_PRESET_COUNT, "MAZE_MAP_SLOTS must equal S
 // menu (without starting a run at all) just leaves those globals
 // clobbered until a real newGame() reinitializes them later -- harmless
 // too, nothing reads them while gameState is STATE_MENU.
+// Pooled progress over the planets already available: plants and letters
+// counted together into one percentage (user request). A planet nobody
+// has mapped yet has no totals to divide by, so it doesn't contribute --
+// and it BLOCKS the next unlock until it does, which is the point: a
+// planet that just opened would otherwise be free progress, since it adds
+// nothing to the denominator while it stays uncharted, and every planet
+// left would open at once. Going to look at it in the menu is enough to
+// map it (that's what the cartography screen is for), so this never
+// deadlocks.
+static bool planetUnlockProgress(u16 *outPercent)
+{
+    u16 got = 0, total = 0;
+    u8 i;
+
+    for (i = 0; i < unlockedPlanets; i++)
+    {
+        if (!presetSave[i].plantsTotalKnown)
+            return FALSE; // uncharted: no denominator, no answer
+
+        got = (u16) (got + presetSave[i].plantsCollected + presetSave[i].collectedCount);
+        total = (u16) (total + presetSave[i].plantsTotal + sizePresets[i].letters);
+    }
+
+    *outPercent = total ? (u16) (((u32) got * 100) / total) : 0;
+
+    return TRUE;
+}
+
+// Opens at most ONE planet per call -- the next one along, never a run of
+// them: the planet that just opened is uncharted, so planetUnlockProgress
+// above refuses to answer again until the player has at least been to the
+// menu and looked at it. Cheap enough to call every menu frame.
+static void updatePlanetUnlocks(void)
+{
+    u16 percent;
+
+    if (unlockedPlanets >= SIZE_PRESET_COUNT)
+        return;
+
+    if (planetUnlockProgress(&percent) && (percent >= PLANET_UNLOCK_PERCENT))
+        unlockedPlanets++;
+}
+
 static u16 scanPlanetPlantTotal(u8 presetIndex)
 {
     u16 total = 0;
@@ -740,6 +805,13 @@ static void pickGalaxyName(char *out)
 // one per frame, independent of how fast the real per-room work happens
 // to land.
 static u8 introPlanetIndex;
+// One past the last planet this cartography run maps. At boot it is
+// PLANETS_AT_START (user request: "haz que cargue solo en el buffer los 3
+// primeros mundos" -- the rest are locked, so mapping them would be work
+// for places nobody can go yet). Later the SAME screen runs again for a
+// single planet, the moment one that just unlocked is first looked at in
+// the menu: introPlanetIndex is that planet and this is one past it.
+static u8 introPlanetLimit = PLANETS_AT_START;
 static u16 introRoomCursor; // flattened row*mapCols+col into introPlanetIndex's own grid
 static u16 introPlanetTotal;
 // FALSE while still waiting for the prompt's first press; TRUE from
@@ -771,7 +843,7 @@ static void introSetUpPlanet(u8 presetIndex)
 // up planet 0 for introTick() to start chewing through.
 static void introFloodReset(void); // defined below, next to introFloodStep -- introBegin() needs it first
 
-static void introBegin(void)
+static void beginCartography(u8 firstPlanet, u8 limit)
 {
     char buf[40];
     char galaxy[16];
@@ -783,9 +855,15 @@ static void introBegin(void)
     VDP_drawText(buf, (u16) ((40 - len) / 2), 2);
     VDP_drawText("CARTOGRAFIANDO SECTORES...", 6, 4);
 
-    introPlanetIndex = 0;
-    introSetUpPlanet(0);
+    introPlanetIndex = firstPlanet;
+    introPlanetLimit = limit;
+    introSetUpPlanet(firstPlanet);
     introFloodReset();
+}
+
+static void introBegin(void)
+{
+    beginCartography(0, PLANETS_AT_START);
 }
 
 // Processes exactly one cell of introPlanetIndex's grid (a real room, or
@@ -807,7 +885,7 @@ static bool introTick(void)
         presetSave[introPlanetIndex].plantsTotalKnown = TRUE;
 
         introPlanetIndex++;
-        if (introPlanetIndex >= SIZE_PRESET_COUNT)
+        if (introPlanetIndex >= introPlanetLimit)
             return TRUE;
 
         introSetUpPlanet(introPlanetIndex);
@@ -1232,7 +1310,16 @@ static void newGame(void)
     Items_fastForward(save.collectedCount); // spec §35 -- restore prior progress on this planet
     Plants_setCollected(save.plantsCollected); // spec §51
     Plants_restoreMask(save.plantsMask); // bug fix, see PresetSave's own doc comment
+    // After GuideMap_generate() above, which cleared every one of them.
+    // Items_fastForward's restored count is also what makes the map device
+    // work again on a resumed planet (user request: "si ya ha recogido la
+    // A en ese planeta y vuelve a entrar, el mapa tiene que ser
+    // accesible") -- holding A reads Items_collectedCount(), so a planet
+    // whose letter A is already in hand shows the real overlay instead of
+    // the static, death or no death.
+    GuideMap_restoreEnemyDead(save.enemyDead);
     GuideMap_recomputeLocks(); // unlocks up through whichever letter is now due (spec §16)
+
 
     // The player's actual physical starting point is the special
     // insertion room (spec §27), outside the grid entirely -- NOT
@@ -1366,6 +1453,23 @@ static void drawMenu(void)
     VDP_drawText(buf, (40 - len) / 2, 26);
 
     VDP_drawText("PULSA A PARA EMPEZAR", 10, 27);
+
+    // How close the next planet is to opening (user request: the rest of
+    // them unlock at PLANET_UNLOCK_PERCENT of what's already available,
+    // plants and letters pooled). Row 24 is the one free line between the
+    // orbits and the status block. Nothing is drawn once they are all
+    // open -- there is nothing left to wait for.
+    if (unlockedPlanets < SIZE_PRESET_COUNT)
+    {
+        u16 percent;
+
+        if (planetUnlockProgress(&percent))
+            len = sprintf(buf, "PROXIMO PLANETA: %d%% DE %d%%", percent, PLANET_UNLOCK_PERCENT);
+        else
+            len = sprintf(buf, "CARTOGRAFIA INCOMPLETA");
+
+        VDP_drawText(buf, (40 - len) / 2, 24);
+    }
 }
 
 // Hard reset combo (user request): A+B+C+UP together, from anywhere
@@ -1389,14 +1493,21 @@ static void resetToMenu(void)
     // collected state would be stale leftovers from whatever was last
     // played, not "this" run). collectedCount naturally equals itemCount
     // when the run was won, which is exactly what should show in the menu.
-    if (previousState == STATE_PLAYING)
+    // Dying counts exactly the same as walking out (user request: "incluso
+    // si la nave muere y es game over... quiero que guardes el estado del
+    // planeta"). It used to be deliberately left out, so a death threw the
+    // whole attempt away -- letters, plants and the map device with them.
+    if ((previousState == STATE_PLAYING) || (previousState == STATE_GAMEOVER))
     {
         presetSave[sizePresetIndex].hasSave = TRUE;
         presetSave[sizePresetIndex].mapSeed = mapSeed;
         presetSave[sizePresetIndex].collectedCount = Items_collectedCount();
         presetSave[sizePresetIndex].plantsCollected = Plants_collectedCount(); // spec §51
         Plants_saveMask(presetSave[sizePresetIndex].plantsMask); // bug fix, see PresetSave's own doc comment
+        GuideMap_saveEnemyDead(presetSave[sizePresetIndex].enemyDead);
     }
+
+    updatePlanetUnlocks(); // this run's progress may have opened the next planet
 
     gameState = STATE_MENU;
     mapViewOpen = FALSE;
@@ -2691,19 +2802,44 @@ int main(bool hardReset)
             for (i = 0; i < SIZE_PRESET_COUNT; i++)
                 completed[i] = presetSave[i].hasSave && (presetSave[i].collectedCount >= sizePresets[i].letters);
 
-            Menu_update(sizePresetIndex, completed);
+            // Checked every frame, not just on a run ending: a planet
+            // that was blocking the next unlock by being uncharted stops
+            // blocking it the moment the cartography screen maps it, and
+            // this is what notices.
+            updatePlanetUnlocks();
 
+            // A planet that was still locked when the game booted has
+            // never been mapped (beginCartography only did the first
+            // PLANETS_AT_START). The first time the cursor lands on one,
+            // map it through that very same screen, one room per frame,
+            // instead of freezing the menu for however long a 10x8 grid
+            // takes. It comes straight back here when it's done.
+            if (!presetSave[sizePresetIndex].plantsTotalKnown)
+            {
+                Menu_setVisible(FALSE);
+                gameState = STATE_INTRO;
+                introGenerating = TRUE;
+                beginCartography(sizePresetIndex, (u8) (sizePresetIndex + 1));
+                prevState = state;
+                SPR_update();
+                SYS_doVBlankProcess();
+                continue;
+            }
+
+            Menu_update(sizePresetIndex, unlockedPlanets, completed);
+
+            // Navigation wraps within the UNLOCKED planets only, so the
+            // cursor can never land on one that isn't there (user
+            // request) and A is always a valid choice.
             if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
             {
-                sizePresetIndex = (sizePresetIndex + SIZE_PRESET_COUNT - 1) % SIZE_PRESET_COUNT;
-                ensurePlantsTotalKnown(sizePresetIndex); // user request: show the plant total even before entering
-                drawMenu();
+                sizePresetIndex = (u8) ((sizePresetIndex + unlockedPlanets - 1) % unlockedPlanets);
+                drawMenu(); // an unmapped planet is handled above, by the cartography screen
             }
             if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
             {
-                sizePresetIndex = (sizePresetIndex + 1) % SIZE_PRESET_COUNT;
-                ensurePlantsTotalKnown(sizePresetIndex); // user request: show the plant total even before entering
-                drawMenu();
+                sizePresetIndex = (u8) ((sizePresetIndex + 1) % unlockedPlanets);
+                drawMenu(); // an unmapped planet is handled above, by the cartography screen
             }
             if ((state & BUTTON_A) && !(prevState & BUTTON_A))
             {

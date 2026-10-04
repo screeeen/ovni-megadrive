@@ -69,6 +69,17 @@
 #define LOCKED_DOOR_BG_INDEX  ((PAL3 * 16) + 0)
 #define LOCKED_DOOR_INK_INDEX ((PAL3 * 16) + 1)
 
+// Absolute CRAM index of PAL0's index1, borrowed for the grey of a planet
+// that hasn't been unlocked yet (user request: "enseña los planetas
+// bloqueados pero en gris"). Same borrow-and-restore shape as the three
+// overrides above, and PAL0's index1 is free for exactly as long as the
+// menu is up: it is maze.c's wall colour, and no maze is on screen then.
+// Not the text -- SGDK's own font is drawn in colour index 15, which is
+// why the menu's lettering doesn't go grey along with the planets.
+#define LOCKED_PLANET_INK_INDEX ((PAL0 * 16) + 1)
+#define LOCKED_PLANET_COLOR     0x6D6D6D
+#define MAZE_WALL_COLOR         0x987DFA // maze.c's own WALL_COLOR_RGB, put back on the way out
+
 
 // Elliptical, not circular (spec §31) -- makes better use of the
 // 320x224 screen's aspect ratio than a true circle would. Radii grow
@@ -210,6 +221,14 @@ void Menu_setVisible(bool visible)
         PAL_setColor(LOCKED_DOOR_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFF00));
     }
 
+    // And PAL0's index1, which is grey for a locked planet while the menu
+    // is up and maze.c's wall colour the rest of the time (see
+    // LOCKED_PLANET_INK_INDEX).
+    if (visible)
+        PAL_setColor(LOCKED_PLANET_INK_INDEX, RGB24_TO_VDPCOLOR(LOCKED_PLANET_COLOR));
+    else
+        PAL_setColor(LOCKED_PLANET_INK_INDEX, RGB24_TO_VDPCOLOR(MAZE_WALL_COLOR));
+
     // Fresh entry into the menu always restarts the orbit animation from
     // the same spread-out starting angles -- simpler and just as good
     // visually as trying to resume mid-orbit, and avoids needing to
@@ -223,7 +242,7 @@ void Menu_setVisible(bool visible)
     }
 }
 
-void Menu_update(u8 selectedIndex, const bool *completed)
+void Menu_update(u8 selectedIndex, u8 unlockedCount, const bool *completed)
 {
     u8 i;
     s16 selCx = SUN_CENTER_X, selCy = SUN_CENTER_Y; // fallback, always overwritten below
@@ -244,10 +263,14 @@ void Menu_update(u8 selectedIndex, const bool *completed)
         cy = F16_toRoundedInt(fy);
 
         SPR_setPosition(planetSprites[i], cx - planetHalfSize[i], cy - planetHalfSize[i]);
-        // Completed planets read PAL2 (yellow, see COMPLETED_INK_INDEX)
-        // instead of PAL3 (violet) -- same pixel data either way, spec
-        // §45.
-        SPR_setPalette(planetSprites[i], completed[i] ? PAL2 : PAL3);
+        // Three looks, one set of pixels -- which palette the sprite reads
+        // is the only difference (spec §45): PAL0 grey for a planet still
+        // locked (user request), PAL2 yellow for one already completed,
+        // PAL3's own violet for the rest.
+        if (i >= unlockedCount)
+            SPR_setPalette(planetSprites[i], PAL0);
+        else
+            SPR_setPalette(planetSprites[i], completed[i] ? PAL2 : PAL3);
 
         if (i == selectedIndex)
         {

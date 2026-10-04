@@ -47,6 +47,12 @@ void Menu_setVisible(bool visible);
 // planet's sprite yellow instead of its usual violet (caller, main.c,
 // derives this from its own presetSave[]). Call once per frame while
 // the menu is showing.
-void Menu_update(u8 selectedIndex, const bool *completed);
+// unlockedCount (user request: only the first few planets exist to begin
+// with, the rest open up with progress) -- planets at or past that index
+// are drawn in grey instead of their own colour (user request: "enseña
+// los planetas bloqueados pero en gris"), so the ring shows what is still
+// to come rather than hiding it. selectedIndex is always below it, main.c's
+// own menu navigation never lets the cursor out of the unlocked range.
+void Menu_update(u8 selectedIndex, u8 unlockedCount, const bool *completed);
 
 #endif
