@@ -420,25 +420,46 @@ static u8 exitDirForDoorDir(u8 doorDir)
 // table, just indexed by the new room's own entry side instead of the
 // old room's exit side. offset is the door's column (N/S) or row (E/W),
 // spec §30 -- no longer always MAZE_DOOR_COL/MAZE_DOOR_ROW.
+// Which of the doorway's two cells the ship comes out on. It KEEPS the
+// one it left the previous room by (user request) instead of being
+// realigned onto the door's own offset cell every time: both rooms share
+// that door's offset (GuideMap_doorOffset guarantees it), so the cell it
+// was travelling along is a cell of this side's doorway too, and the ship
+// no longer jumps sideways up to 16px crossing a door.
+//
+// The fallback matters: `along` is only a lane when it is cell-aligned
+// AND inside this door's span. A cold start into the insertion room has
+// no previous room to have come from, and player.x/y are whatever the
+// last run left there.
+static s16 doorLanePx(s16 along, u8 offset)
+{
+    const s16 tile = (s16) (along / MAZE_TILE_PX);
+
+    if (((along % MAZE_TILE_PX) == 0) && ((tile == offset) || (tile == offset + 1)))
+        return along;
+
+    return (s16) (offset * MAZE_TILE_PX);
+}
+
 static void positionPlayerEnteringViaDoorDir(u8 doorDir, u8 offset)
 {
     switch (doorDir)
     {
         case DOOR_N:
             player.y = MAZE_TILE_PX;
-            player.x = offset * MAZE_TILE_PX;
+            player.x = doorLanePx(player.x, offset);
             break;
         case DOOR_S:
             player.y = MAZE_TILE_PX * (MAZE_H - 2);
-            player.x = offset * MAZE_TILE_PX;
+            player.x = doorLanePx(player.x, offset);
             break;
         case DOOR_E:
             player.x = MAZE_TILE_PX * (MAZE_W - 2);
-            player.y = offset * MAZE_TILE_PX;
+            player.y = doorLanePx(player.y, offset);
             break;
         default: // DOOR_W
             player.x = MAZE_TILE_PX;
-            player.y = offset * MAZE_TILE_PX;
+            player.y = doorLanePx(player.y, offset);
             break;
     }
 }
@@ -1084,9 +1105,21 @@ static void loadRoom(u8 col, u8 row)
     // same cached attempt, cheap, no new search (maze.h's own doc
     // comment: a locked door can unlock later without the interior ever
     // being regenerated).
-    Maze_generateRoom(doorN, doorE, doorS, doorW, doorN, doorE, doorS, doorW, doorOffsets, seed,
-                       (u8) ((row * MAX_MAP_COLS) + col));
-    Plants_spawnForRoom(seed); // spec §48 -- own line per room, same roomSeed as the layout itself
+    // Second and later visits take the room's plant lines straight out of
+    // plants.c's cache (user request: crossing a door stalled for a few
+    // frames). Both passes above exist only to feed Plants_spawnForRoom
+    // the grid it has to place against -- with the lines already known
+    // there is nothing to place, so the first pass goes away too and
+    // applyRoomDoorLocks' own generation is the only one left. It replays
+    // the same cached attempt either way (maze.h), so the grid it
+    // produces is identical.
+    if (!Plants_loadCachedRoom(col, row))
+    {
+        Maze_generateRoom(doorN, doorE, doorS, doorW, doorN, doorE, doorS, doorW, doorOffsets, seed,
+                           (u8) ((row * MAX_MAP_COLS) + col));
+        Plants_spawnForRoom(seed); // spec §48 -- own line per room, same roomSeed as the layout itself
+        Plants_cacheCurrentRoom(col, row); // never again for this room, this run
+    }
 
     applyRoomDoorLocks(col, row); // final generate + draw (Maze_draw/Items_drawInRoom/Plants_drawInRoom), see its own doc comment
     plantPathDirty = TRUE; // different room, different plants: the cached route is meaningless now
@@ -2158,10 +2191,10 @@ static void updateRoomViewer(u16 state, u16 prevState)
 // Same criterion maze.c's computePlantSafe places against, so the two
 // agree by construction: per door, rebuild the room the way arriving
 // through it really leaves it (only that one open, the rest sealed --
-// the state a fresh room is always met in), let the ship in on the one
-// lane it really arrives on (sweepArrivalRest -- still moving, so its
-// first stop is the end of the slide straight in) and flood every slide
-// that stays in the room. INTERSECT over the doors, not union: the room graph is a
+// the state a fresh room is always met in), lets the ship in on each half
+// of the doorway in turn (sweepArrivalRest -- still moving, so its first
+// stop is the end of the slide straight in) and floods every slide that
+// stays in the room. INTERSECT over the doors, not union: the room graph is a
 // tree, so before a room clears, the only door it can ever be entered by
 // is the one facing the start room, and neither this nor maze.c knows
 // which that is. A plant outside the intersection is one that, for some
@@ -2181,11 +2214,13 @@ static u16 sweepCursor; // room index into the map grid, mapCols-major like intr
 static u8 sweepDoor;
 static u16 sweepRooms, sweepBadRooms, sweepBadPlants;
 static u8 sweepReportRow;
-// sweepDoorReach is one door's answer (its two lanes unioned, this frame);
-// sweepSafe is the running intersection over the doors done so far, which
-// is what the room is judged on once the fourth has had its turn.
-static bool sweepDoorReach[MAZE_H][MAZE_W];
+// The running intersection over every arrival checked so far (each door,
+// each half of its doorway), which is what the room is judged on once the
+// fourth door has had its turn.
 static bool sweepSafe[MAZE_H][MAZE_W];
+// Just the cells one arrival slide crosses on its way in, before the flood
+// from where it stops takes over.
+static bool sweepArrival[MAZE_H][MAZE_W];
 static bool sweepFirstDoor;
 
 static void enterSweep(void)
@@ -2213,13 +2248,12 @@ static void enterSweep(void)
 // that first stop. FALSE when the arrival never stops at all (straight in
 // and straight out the far side).
 //
-// One lane only, the door's own offset: that is the half main.c's
-// positionPlayerEnteringViaDoorDir always delivers the ship on, whichever
-// half it left the previous room by. Same correction maze.c's
-// crossedEntering just got, and for the same reason -- checking both and
-// keeping the union is what let this sweep call a room clean while 3 of
-// its plants had no route from the lane the game actually gives you.
-static bool sweepArrivalRest(const RoomBuild *rb, u8 dir, s16 *outX, s16 *outY)
+// `lane` is which half of the doorway the ship comes out on -- it keeps
+// the one it left the previous room by (doorLanePx), so both are real
+// arrivals and the caller judges each on its own. Checking them and
+// keeping the UNION is what let this sweep call a room clean while 3 of
+// its plants had no route from one of the two.
+static bool sweepArrivalRest(const RoomBuild *rb, u8 dir, u8 lane, s16 *outX, s16 *outY)
 {
     const u8 inward = (u8) ((dir + 2) & 3);
     s16 x, y;
@@ -2229,16 +2263,23 @@ static bool sweepArrivalRest(const RoomBuild *rb, u8 dir, s16 *outX, s16 *outY)
 
     switch (dir)
     {
-        case DOOR_N: x = (s16) rb->off[dir]; y = 1;                      break;
-        case DOOR_E: x = MAZE_W - 2;         y = (s16) rb->off[dir];     break;
-        case DOOR_S: x = (s16) rb->off[dir]; y = MAZE_H - 2;             break;
-        default:     x = 1;                  y = (s16) rb->off[dir];     break;
+        case DOOR_N: x = (s16) (rb->off[dir] + lane); y = 1;                          break;
+        case DOOR_E: x = MAZE_W - 2;                  y = (s16) (rb->off[dir] + lane); break;
+        case DOOR_S: x = (s16) (rb->off[dir] + lane); y = MAZE_H - 2;                  break;
+        default:     x = 1;                           y = (s16) (rb->off[dir] + lane); break;
     }
 
     if (Maze_isWall(x, y))
         return FALSE;
 
-    sweepDoorReach[y][x] = TRUE;
+    {
+        s16 cx, cy;
+
+        for (cy = 0; cy < MAZE_H; cy++)
+            for (cx = 0; cx < MAZE_W; cx++)
+                sweepArrival[cy][cx] = FALSE;
+    }
+    sweepArrival[y][x] = TRUE;
 
     for (;;)
     {
@@ -2247,7 +2288,7 @@ static bool sweepArrivalRest(const RoomBuild *rb, u8 dir, s16 *outX, s16 *outY)
         if (Maze_isWall(nx, ny))
             break;
         x = nx; y = ny;
-        sweepDoorReach[y][x] = TRUE;
+        sweepArrival[y][x] = TRUE;
         if (plantPathSlideExits(x, y, inward))
             return FALSE; // in one door and out the opposite one, never stopping
     }
@@ -2265,6 +2306,7 @@ static void sweepStep(void)
     RoomBuild rb;
     char buf[40];
     s16 x, y;
+    u8 lane;
 
     if (sweepCursor >= cellCount)
     {
@@ -2296,32 +2338,28 @@ static void sweepStep(void)
     buildRoomForInspection(col, row, sweepDoor);
     loadPlantPathDoors(col, row);
 
-    for (y = 0; y < MAZE_H; y++)
-        for (x = 0; x < MAZE_W; x++)
-            sweepDoorReach[y][x] = FALSE;
-
+    // Intersection over every arrival this room has -- each door, and each
+    // half of its doorway. A plant has to survive all of them: which one
+    // the player turns up on is not something either this or maze.c can
+    // know (see the doc comment).
+    for (lane = 0; lane < 2; lane++)
     {
         s16 sx, sy;
 
-        if (sweepArrivalRest(&rb, sweepDoor, &sx, &sy))
-        {
-            plantPathFlood(col, row, sx, sy, TRUE);
-            for (y = 0; y < MAZE_H; y++)
-                for (x = 0; x < MAZE_W; x++)
-                    if (ppCrossed[y][x])
-                        sweepDoorReach[y][x] = TRUE;
-        }
-    }
+        if (!sweepArrivalRest(&rb, sweepDoor, lane, &sx, &sy))
+            continue;
 
-    if (rb.door[sweepDoor])
-    {
-        // Intersection over the doors: a plant has to survive every one of
-        // them, since which door this room is really entered by is not
-        // something either this or maze.c can know (see the doc comment).
+        // The arrival slide's own cells count as crossed too: sweepArrivalRest
+        // marked them, and plantPathFlood's ppCrossed starts from the cell it
+        // came to rest on.
+        plantPathFlood(col, row, sx, sy, TRUE);
         for (y = 0; y < MAZE_H; y++)
             for (x = 0; x < MAZE_W; x++)
-                sweepSafe[y][x] = sweepFirstDoor ? sweepDoorReach[y][x]
-                                                 : (sweepSafe[y][x] && sweepDoorReach[y][x]);
+            {
+                const bool reached = ppCrossed[y][x] || sweepArrival[y][x];
+
+                sweepSafe[y][x] = sweepFirstDoor ? reached : (sweepSafe[y][x] && reached);
+            }
         sweepFirstDoor = FALSE;
     }
 

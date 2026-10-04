@@ -527,23 +527,25 @@ static bool slideCross(s16 x, s16 y, u8 d, u8 openMask, s16 *outX, s16 *outY)
 // entry handling does) is what keeps a sideways move the ship could never
 // make on arrival out of the answer.
 //
-// And it arrives on ONE lane, the door's own offset, never the other half
-// of the 2-cell doorway: main.c's positionPlayerEnteringViaDoorDir puts
-// the ship at offset * MAZE_TILE_PX whichever half it left the previous
-// room by. This used to check both halves and keep the union, which is
-// how a room ended up with 3 plants only an arrival on the far half could
-// ever cross (user report, room R:012D of a 68BD map: "las plantas de
-// esta pantalla no son accesibles" -- and they weren't; from the lane the
-// game actually delivers there is no route to them at all, while from the
-// other one there is a 4-move one). The two slides are different moves
-// and they fan out into different halves of the room, so the union was
-// never a conservative answer.
-static void crossedEntering(u8 e, u8 openMask)
+// `lane` is which half of the 2-cell doorway it comes in on. The ship now
+// KEEPS the half it left the previous room by (main.c's doorLanePx), so
+// both are real arrivals and computePlantSafe below INTERSECTS them --
+// which half the player will actually turn up on isn't something this can
+// know, any more than which door.
+//
+// Union is what this used to do, and it is what let a room keep 3 plants
+// that only an arrival on the far half could ever cross (user report,
+// room R:012D of a 68BD map: "las plantas de esta pantalla no son
+// accesibles" -- and they weren't; from the half the game delivered there
+// was no route to them at all, while from the other there was a 4-move
+// one). The two arrivals are different slides fanning out into different
+// halves of the room: the union was never a conservative answer.
+static void crossedEntering(u8 e, u8 lane, u8 openMask)
 {
     s16 head = 0, tail = 0;
     s16 ix, iy, sx, sy;
 
-    slideEntryCell(e, plantSafeDoorOff[e], &ix, &iy);
+    slideEntryCell(e, (u8) (plantSafeDoorOff[e] + lane), &ix, &iy);
     if (plantSafeBlocked(ix, iy, openMask))
         return;
 
@@ -588,7 +590,7 @@ static void crossedEntering(u8 e, u8 openMask)
 // carry the ship out of the room entirely.
 static void computePlantSafe(void)
 {
-    u8 e, cfg;
+    u8 e, lane, cfg;
     s16 x, y;
     bool first = TRUE;
 
@@ -608,17 +610,20 @@ static void computePlantSafe(void)
             if (cfg && (plantSafeDoorMask == (u8) (1 << e)))
                 continue; // one-door room: both configurations are the same one
 
-            for (y = 0; y < MAZE_H; y++)
-                for (x = 0; x < MAZE_W; x++)
-                    crossScratch[y][x] = restScratch[y][x] = FALSE;
+            for (lane = 0; lane < 2; lane++)
+            {
+                for (y = 0; y < MAZE_H; y++)
+                    for (x = 0; x < MAZE_W; x++)
+                        crossScratch[y][x] = restScratch[y][x] = FALSE;
 
-            crossedEntering(e, openMask);
+                crossedEntering(e, lane, openMask);
 
-            for (y = 0; y < MAZE_H; y++)
-                for (x = 0; x < MAZE_W; x++)
-                    plantSafeCell[y][x] = first ? crossScratch[y][x]
-                                                : (plantSafeCell[y][x] && crossScratch[y][x]);
-            first = FALSE;
+                for (y = 0; y < MAZE_H; y++)
+                    for (x = 0; x < MAZE_W; x++)
+                        plantSafeCell[y][x] = first ? crossScratch[y][x]
+                                                    : (plantSafeCell[y][x] && crossScratch[y][x]);
+                first = FALSE;
+            }
         }
     }
 

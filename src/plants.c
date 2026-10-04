@@ -25,6 +25,16 @@ static u8 curCount[PLANTS_LINES_PER_ROOM];
 // curCol[line][i]/curRow[line][i], deterministic from roomSeed) already
 // collected.
 static u16 collectedMask[MAX_MAP_ROWS][MAX_MAP_COLS];
+
+// The layout cache (see Plants_cacheCurrentRoom's doc comment in
+// plants.h) -- the same three arrays above, one copy per map position.
+// 33 bytes a room, 80 rooms at the biggest preset: ~2.6 KB, against a
+// per-entry cost that showed up as a visible hitch every time the ship
+// crossed a door.
+static u8 cacheCol[MAX_MAP_ROWS][MAX_MAP_COLS][PLANTS_LINES_PER_ROOM][PLANTS_MAX_PER_LINE];
+static u8 cacheRow[MAX_MAP_ROWS][MAX_MAP_COLS][PLANTS_LINES_PER_ROOM][PLANTS_MAX_PER_LINE];
+static u8 cacheCount[MAX_MAP_ROWS][MAX_MAP_COLS][PLANTS_LINES_PER_ROOM];
+static bool cacheValid[MAX_MAP_ROWS][MAX_MAP_COLS];
 static u16 total;
 
 // This planet's real plant count (Plants_setPlanetTotal) -- the
@@ -95,7 +105,10 @@ void Plants_reset(void)
 
     for (r = 0; r < MAX_MAP_ROWS; r++)
         for (c = 0; c < MAX_MAP_COLS; c++)
+        {
             collectedMask[r][c] = 0;
+            cacheValid[r][c] = FALSE; // a different mapSeed puts different rooms at these positions
+        }
 
     total = 0;
     for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
@@ -307,6 +320,43 @@ void Plants_restoreMask(const u16 inMask[MAX_MAP_ROWS][MAX_MAP_COLS])
 void Plants_setPlanetTotal(u16 t)
 {
     planetTotal = t;
+}
+
+void Plants_cacheCurrentRoom(u8 col, u8 row)
+{
+    u8 line, i;
+
+    for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
+    {
+        cacheCount[row][col][line] = curCount[line];
+        for (i = 0; i < curCount[line]; i++)
+        {
+            cacheCol[row][col][line][i] = curCol[line][i];
+            cacheRow[row][col][line][i] = curRow[line][i];
+        }
+    }
+
+    cacheValid[row][col] = TRUE;
+}
+
+bool Plants_loadCachedRoom(u8 col, u8 row)
+{
+    u8 line, i;
+
+    if (!cacheValid[row][col])
+        return FALSE;
+
+    for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
+    {
+        curCount[line] = cacheCount[row][col][line];
+        for (i = 0; i < curCount[line]; i++)
+        {
+            curCol[line][i] = cacheCol[row][col][line][i];
+            curRow[line][i] = cacheRow[row][col][line][i];
+        }
+    }
+
+    return TRUE;
 }
 
 u16 Plants_lastRoomCount(void)

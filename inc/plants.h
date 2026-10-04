@@ -133,6 +133,26 @@ u16 Plants_lastRoomCount(void);
 // recogido las plantas y la letra de la misma").
 bool Plants_allCollectedInRoom(u8 col, u8 row);
 
+// Per-room layout cache (user request: crossing a door stalled for a few
+// frames). The stall was almost all spawn work: placing a room's lines
+// asks maze.c which cells are safe, which costs ~15x regenerating the
+// room itself -- and it ran on EVERY entry, although a room's lines are
+// deterministic from its roomSeed and so are identical every single time
+// for the whole run.
+//
+// Plants_cacheCurrentRoom stores whatever Plants_spawnForRoom last
+// produced under (col,row). Plants_loadCachedRoom puts it straight back
+// and returns TRUE; FALSE means that room has never been cached and the
+// caller still has to spawn it the slow way (once). Collected state is
+// NOT part of this -- that's collectedMask, which is per room already and
+// outlives any of it.
+//
+// Cleared by Plants_reset(), so a new planet can never read another's
+// layouts: the cache is indexed by map position, and a different mapSeed
+// puts completely different rooms at those same positions.
+void Plants_cacheCurrentRoom(u8 col, u8 row);
+bool Plants_loadCachedRoom(u8 col, u8 row);
+
 // TRUE if cell (x,y) of THIS room still holds an uncollected plant. Same
 // col/row meaning as Plants_drawInRoom. Used by main.c's "route to the
 // nearest plant" debug overlay.
