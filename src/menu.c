@@ -342,6 +342,65 @@ void Menu_hideSprites(void)
     SPR_setVisibility(sunSprite, HIDDEN);
 }
 
+void Menu_update(u8 selectedIndex, u8 unlockedCount, const bool *completed); // defined below
+
+// Mixes `from` toward `to`, num/den of the way, straight in VDP colour
+// space: three 3-bit channels packed as 0000 BBB0 GGG0 RRR0.
+static u16 mixColor(u16 from, u16 to, u16 num, u16 den)
+{
+    const s16 fr = (s16) ((from >> 1) & 7), fg = (s16) ((from >> 5) & 7), fb = (s16) ((from >> 9) & 7);
+    const s16 tr = (s16) ((to >> 1) & 7),   tg = (s16) ((to >> 5) & 7),   tb = (s16) ((to >> 9) & 7);
+    const u16 r = (u16) (fr + (((tr - fr) * (s16) num) / (s16) den));
+    const u16 g = (u16) (fg + (((tg - fg) * (s16) num) / (s16) den));
+    const u16 b = (u16) (fb + (((tb - fb) * (s16) num) / (s16) den));
+
+    return (u16) ((b << 9) | (g << 5) | (r << 1));
+}
+
+// Brings the menu's own sprites up out of the background, after the
+// screen itself has already faded in (user request: "los planetas
+// aparecen de fundido tambien una vez que haya terminado el fundido al
+// menu"). They are made visible at step 0, when all four of their ink
+// slots still hold exactly the background colour and there is nothing to
+// see, and then those four are ramped to their real values. The sun, the
+// cursor and all three planet looks come up together.
+#define MENU_SPRITE_FADE_FRAMES 20
+
+void Menu_fadeInSprites(u8 selectedIndex, u8 unlockedCount, const bool *completed)
+{
+    const u16 bg = RGB24_TO_VDPCOLOR(MAZE_BG_COLOR);
+    const u16 sun = RGB24_TO_VDPCOLOR(0xFFFFFF);
+    const u16 done = RGB24_TO_VDPCOLOR(0xFFFF00);
+    const u16 normal = planetSmall.palette->data[1];
+    const u16 locked = RGB24_TO_VDPCOLOR(LOCKED_PLANET_COLOR);
+    u16 f, i;
+
+    for (f = 0; f <= MENU_SPRITE_FADE_FRAMES; f++)
+    {
+        PAL_setColor(SUN_INK_INDEX, mixColor(bg, sun, f, MENU_SPRITE_FADE_FRAMES));
+        PAL_setColor(COMPLETED_INK_INDEX, mixColor(bg, done, f, MENU_SPRITE_FADE_FRAMES));
+        PAL_setColor(LOCKED_DOOR_INK_INDEX, mixColor(bg, normal, f, MENU_SPRITE_FADE_FRAMES));
+        PAL_setColor(LOCKED_PLANET_INK_INDEX, mixColor(bg, locked, f, MENU_SPRITE_FADE_FRAMES));
+
+        if (f == 0)
+        {
+            for (i = 0; i < MENU_PLANET_COUNT; i++)
+                SPR_setVisibility(planetSprites[i], VISIBLE);
+            SPR_setVisibility(cursorSprite, VISIBLE);
+            SPR_setVisibility(sunSprite, VISIBLE);
+        }
+
+        // Orbiting all the while (user request: "puedes hacer que los
+        // planetas hagan fade in pero ya moviendose?") -- the same
+        // per-frame update the menu runs, so they arrive already in
+        // motion instead of lighting up where they happen to be parked.
+        Menu_update(selectedIndex, unlockedCount, completed);
+
+        SPR_update();
+        SYS_doVBlankProcess();
+    }
+}
+
 void Menu_setVisible(bool visible)
 {
     u8 i;
@@ -382,7 +441,7 @@ void Menu_setVisible(bool visible)
     }
     else
     {
-        PAL_setColor(LOCKED_DOOR_BG_INDEX, RGB24_TO_VDPCOLOR(0x252525)); // maze.c's own dark background
+        PAL_setColor(LOCKED_DOOR_BG_INDEX, RGB24_TO_VDPCOLOR(MAZE_BG_COLOR)); // the game's one background colour (maze.h)
         PAL_setColor(LOCKED_DOOR_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFF00));
     }
 

@@ -12,6 +12,14 @@
 // 33.3 nodes/room, 13: 31.2, 12: 30.1, all of them with the same
 // generation success rate) -- what an even height really buys is the band
 // below, 4 rows instead of 2, which is what makes every HUD line fit.
+// Palette entry 0: the backdrop the VDP shows wherever nothing is drawn,
+// and the background of every maze tile -- so this one value is the
+// colour the menu, every room and the fades all sit on (user request:
+// "haz el background negro en todos los casos del juego", then "quiero
+// un azul oscuro"). Published so menu.c can hand the same colour to the
+// locked-door tiles instead of repeating the literal.
+#define MAZE_BG_COLOR 0x000024 // dark blue, nearly black (user request) -- blue level 1 of the 7 the VDP has
+
 #define MAZE_TILE_PX    16
 #define MAZE_W          20
 #define MAZE_H          12

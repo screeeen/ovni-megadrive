@@ -4,8 +4,8 @@
 // mazeTiles.png is a 160x16 source image: 10 logical 16x16 cells in a row
 // -- cell 0 = floor; cells 1-9 = the dither wall variants from ovni's
 // image_edit.png (matching the original's random getRandomValue() 2-10
-// look). Strict duotone: palette index 0 is the background (0x252525),
-// index 1 the one wall colour. The art used to carry three more copies of
+// look). Strict duotone: palette index 0 is the background (maze.h's
+// MAZE_BG_COLOR), index 1 the one wall colour. The art used to carry three more copies of
 // those 9 shapes in other accent colours, from when a room picked one of
 // 4; they were cropped out once every room went to a single colour. There
 // used to be an 11th "locked door" cell
@@ -1916,7 +1916,7 @@ void Maze_loadGraphics(void)
     // included. Order/index assignment verified against the compiled
     // out/release/res/resources.s after rebuilding, same as the index0
     // gotcha noted in guidemap.c.
-    PAL_setColor(0, RGB24_TO_VDPCOLOR(0x252525));
+    PAL_setColor(0, RGB24_TO_VDPCOLOR(MAZE_BG_COLOR));
     PAL_setColor(1, RGB24_TO_VDPCOLOR(WALL_COLOR_RGB));
 
     // index5: never touched by the dither art above (only 0-4 are), so

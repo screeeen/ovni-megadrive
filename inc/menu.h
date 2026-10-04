@@ -49,6 +49,14 @@ void Menu_drawTitle(void);
 // aren't in the middle of a fade.
 void Menu_hideSprites(void);
 
+// Fades the menu's sprites up from the background, once the screen
+// itself is already in (user request). Call right after the main fade,
+// with the sprites still hidden -- it makes them visible itself, at the
+// step where their ink is still exactly the background colour. Takes
+// Menu_update's own arguments because it runs that too, every frame, so
+// the orbits are already turning as the planets appear.
+void Menu_fadeInSprites(u8 selectedIndex, u8 unlockedCount, const bool *completed);
+
 void Menu_setVisible(bool visible);
 
 // Advances each planet's orbit position by one frame and repositions its

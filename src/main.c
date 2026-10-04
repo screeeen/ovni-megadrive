@@ -780,19 +780,39 @@ static void ensurePlantsTotalKnown(u8 presetIndex)
     VDP_clearPlane(BG_A, TRUE);
 }
 
+// The cartography page lives inside a margin of a fifth of the screen on
+// each side (user request: "la pagina de cartografiados es texto con
+// margenes de un 20% de espacio a cada lado") -- 8 columns of the 40, so
+// everything it draws, the flooding glyphs included, sits in the 24
+// columns between.
+#define INTRO_MARGIN_COLS 8
+#define INTRO_TEXT_COLS   (40 - (2 * INTRO_MARGIN_COLS))
+// Where a line of `len` characters starts to sit centred inside those 24
+// columns. Anything longer than the band just starts at the margin.
+static u16 introTextX(u16 len)
+{
+    return (u16) (INTRO_MARGIN_COLS + ((len < INTRO_TEXT_COLS) ? ((INTRO_TEXT_COLS - len) / 2) : 0));
+}
+
 // "PULSA UN BOTON" prompt (STATE_INTRO, user request -- see the enum's
 // own doc comment). Drawn once from main()'s boot code, BG_A (nothing
 // else is using it yet at this point in boot) -- the main loop's
 // STATE_INTRO branch just watches for the first press, same "draw once,
 // then poll per frame" shape drawMenu()/the menu's own LEFT/RIGHT
 // handlers already use.
+// Inside the same margins the cartography page uses (user request: "la
+// primera pantalla del enlace subespacial tiene que tener margen
+// tambien") -- which meant breaking the two long lines in two, since
+// neither fits in the 24 columns that leaves.
 static void drawIntroPrompt(void)
 {
     VDP_clearPlane(BG_A, TRUE);
-    VDP_drawText("OVNI-TERM MK.VII", 12, 10);
-    VDP_drawText("----------------", 12, 11);
-    VDP_drawText("ENLACE SUBESPACIAL INACTIVO", 6, 13);
-    VDP_drawText("PULSA UN BOTON PARA ESTABLECER CONEXION", 0, 16);
+    VDP_drawText("OVNI-TERM MK.VII", introTextX(16), 10);
+    VDP_drawText("----------------", introTextX(16), 11);
+    VDP_drawText("ENLACE SUBESPACIAL", introTextX(18), 13);
+    VDP_drawText("INACTIVO", introTextX(8), 14);
+    VDP_drawText("PULSA UN BOTON PARA", introTextX(19), 17);
+    VDP_drawText("ESTABLECER CONEXION", introTextX(19), 18);
 }
 
 // Invents a galaxy name from the shared random() stream -- 2 syllables
@@ -889,10 +909,10 @@ static void beginCartography(u8 firstPlanet, u8 limit, bool showGalaxy)
     if (showGalaxy)
     {
         pickGalaxyName(galaxy);
-        len = sprintf(buf, "RUMBO: GALAXIA %s", galaxy);
-        VDP_drawText(buf, (u16) ((40 - len) / 2), 2);
+        len = sprintf(buf, "GALAXIA %s", galaxy);
+        VDP_drawText(buf, introTextX(len), 2);
     }
-    VDP_drawText("CARTOGRAFIANDO SECTORES...", 6, 4);
+    VDP_drawText("CARTOGRAFIANDO...", introTextX(17), 4);
 
     introPlanetIndex = firstPlanet;
     introPlanetLimit = limit;
@@ -948,6 +968,7 @@ static bool introTick(void)
             const u16 seed = roomSeedFor(col, row);
             u16 roomPlants;
             char buf[40];
+            int len;
 
             Maze_generateRoom(doorN, doorE, doorS, doorW, doorN, doorE, doorS, doorW,
                                doorOffsets, seed, (u8) ((row * MAX_MAP_COLS) + col));
@@ -955,9 +976,11 @@ static bool introTick(void)
             roomPlants = Plants_lastRoomCount();
             introPlanetTotal = (u16) (introPlanetTotal + roomPlants);
 
-            sprintf(buf, "SEC.%d/%d  R%02d,%02d  SEED:%04X  NODE:%02X  PLT:%X", introPlanetIndex + 1,
-                    SIZE_PRESET_COUNT, col, row, seed, Maze_slideNodeCount(), roomPlants);
-            VDP_drawText(buf, 1, 6);
+            // Trimmed to fit the margins: the same four numbers, shorter
+            // labels. Room, seed, slide-graph nodes, plants.
+            len = sprintf(buf, "R%02d,%02d S:%04X N:%02X P:%X",
+                          col, row, seed, Maze_slideNodeCount(), roomPlants);
+            VDP_drawText(buf, introTextX((u16) len), 6);
         }
     }
 
@@ -982,7 +1005,7 @@ static bool introTick(void)
 // depends on it varying between boots.
 #define INTRO_FLOOD_FIRST_ROW 8
 #define INTRO_FLOOD_ROWS      (28 - INTRO_FLOOD_FIRST_ROW)
-#define INTRO_FLOOD_CELLS     (40 * INTRO_FLOOD_ROWS)
+#define INTRO_FLOOD_CELLS     (INTRO_TEXT_COLS * INTRO_FLOOD_ROWS)
 
 static u32 introFloodRng;
 static u16 introFloodCursor;
@@ -1012,8 +1035,8 @@ static void introFloodStep(void)
 {
     static const char glyphs[] = "0123456789ABCDEF*#%&+-/.:;<>=~^";
     char s[2];
-    const u16 x = introFloodCursor % 40;
-    const u16 y = (u16) (INTRO_FLOOD_FIRST_ROW + (introFloodCursor / 40));
+    const u16 x = (u16) (INTRO_MARGIN_COLS + (introFloodCursor % INTRO_TEXT_COLS));
+    const u16 y = (u16) (INTRO_FLOOD_FIRST_ROW + (introFloodCursor / INTRO_TEXT_COLS));
 
     s[0] = glyphs[introFloodNext() % (sizeof(glyphs) - 1)];
     s[1] = '\0';
@@ -1537,7 +1560,7 @@ static void drawMenu(void)
 // segundo. El fundido es al color 0 de la paleta, ese gris").
 //
 // It fades to the backdrop, not to black: colour 0 of palette 0 is the
-// dark grey everything in this game sits on (maze.c's 0x252525), so a
+// colour everything in this game sits on (maze.h's MAZE_BG_COLOR), so a
 // screen faded to it reads as the room emptying out rather than as the
 // console being switched off. Blocking on purpose -- SGDK runs its own
 // vblank loop inside, and nothing should be moving across a screen
@@ -1615,16 +1638,41 @@ static void fadeToBackdrop(void)
 static void fadeFromBackdrop(void)
 {
     u16 target[64];
+    u16 flat[64];
     u16 i;
 
     SPR_update(); // same reason as above, and this is the half that showed
 
     PAL_getColors(0, target, 64);
     for (i = 0; i < 64; i++)
+    {
         if (target[i] == fadeFlat)
             target[i] = fadePal[i];
+        flat[i] = fadeFlat;
+    }
 
-    PAL_fadeInAll(target, FADE_FRAMES, FALSE);
+    // Two reasons to flatten CRAM again before fading. One: whatever the
+    // setup poked while the screen was down is sitting in there at full
+    // strength -- it was written straight to CRAM, so it is on screen from
+    // the instant it was written. Two: PAL_fadeInAll, which this used to
+    // call, fades from BLACK rather than from wherever the palette is, so
+    // every fade in began by snapping the whole screen to black. That snap
+    // was the flicker. PAL_fadeTo starts from the current palette, which
+    // is now exactly the flat screen the fade out left.
+    PAL_setColors(0, flat, 64, CPU);
+    PAL_fadeTo(0, 63, target, FADE_FRAMES, FALSE);
+}
+
+// Which planets show as completed (spec §45) -- every letter of theirs
+// collected. Derived fresh from presetSave rather than tracked, which is
+// cheap at SIZE_PRESET_COUNT checks and never goes stale. Both the menu's
+// own per-frame update and the sprite fade-in need it.
+static void planetCompletedFlags(bool *out)
+{
+    u8 i;
+
+    for (i = 0; i < SIZE_PRESET_COUNT; i++)
+        out[i] = presetSave[i].hasSave && (presetSave[i].collectedCount >= sizePresets[i].letters);
 }
 
 static void resetToMenu(void)
@@ -1688,8 +1736,15 @@ static void resetToMenu(void)
     flushSprites();
 
     Menu_setVisible(TRUE);
+    Menu_hideSprites(); // they come up by themselves, after the screen does
     drawMenu();
     fadeFromBackdrop();
+    {
+        bool completed[SIZE_PRESET_COUNT];
+
+        planetCompletedFlags(completed);
+        Menu_fadeInSprites(sizePresetIndex, unlockedPlanets, completed);
+    }
 }
 
 // Starts a shake burst sized by `distance` (px the ship had slid before
@@ -3003,8 +3058,15 @@ int main(bool hardReset)
                     introGenerating = FALSE;
                     gameState = STATE_MENU;
                     Menu_setVisible(TRUE);
+                    Menu_hideSprites(); // same as resetToMenu: the sprites fade in after the screen
                     drawMenu();
                     fadeFromBackdrop();
+                    {
+                        bool completed[SIZE_PRESET_COUNT];
+
+                        planetCompletedFlags(completed);
+                        Menu_fadeInSprites(sizePresetIndex, unlockedPlanets, completed);
+                    }
                 }
             }
         }
@@ -3018,10 +3080,8 @@ int main(bool hardReset)
             // (SIZE_PRESET_COUNT checks) and avoids needing to hook into
             // every place presetSave[] can change.
             bool completed[SIZE_PRESET_COUNT];
-            u8 i;
 
-            for (i = 0; i < SIZE_PRESET_COUNT; i++)
-                completed[i] = presetSave[i].hasSave && (presetSave[i].collectedCount >= sizePresets[i].letters);
+            planetCompletedFlags(completed);
 
             // Checked every frame, not just on a run ending: a planet
             // that was blocking the next unlock by being uncharted stops
@@ -3082,10 +3142,27 @@ int main(bool hardReset)
                 fadeToBackdrop();  // the whole run is set up below, behind the flat screen
                 Menu_hideSprites();
                 flushSprites();    // no planets left in the table BEFORE their palette changes hands
-                Menu_setVisible(FALSE);
                 gameState = STATE_PLAYING;
                 newGame();
+                // The ship waits outside until the room is all the way in
+                // (user request: "quiero que la nave no aparezca en
+                // pantalla entrando hacia la insertion room hasta que el
+                // fundido haya terminado"). newGame() put it on screen;
+                // take it back off, push that, and only show it once the
+                // fade is done -- the main loop's own SPR_update, at the
+                // end of this very frame, is what puts it there.
+                SPR_setVisibility(playerSprite, HIDDEN);
+                flushSprites();
+                // Dead last, with nothing between it and the fade:
+                // Menu_setVisible puts PAL0's index1 back to the maze's own
+                // wall colour, and newGame() above drew a whole room in it.
+                // Anything that waits for a vblank after this -- and
+                // flushSprites does -- is a frame of that room on screen at
+                // full strength. fadeFromBackdrop flattens CRAM as its
+                // first act, so from here there is no vblank in between.
+                Menu_setVisible(FALSE);
                 fadeFromBackdrop();
+                SPR_setVisibility(playerSprite, VISIBLE);
             }
             // Sound toggle (spec §47, user request: "activable desde el
             // menu y por defecto apagado") -- BUTTON_C alone, free in the
