@@ -183,7 +183,7 @@ void GuideMap_drawOverlay(void);
 // only the ones already walked into. Spec §17's fog of war is exactly
 // what this lifts, and nothing else: it changes no state, so turning it
 // back off hides the unvisited rooms again as if it had never been on.
-// main.c toggles it with START while the overlay is up and redraws.
+// main.c toggles it with B while the overlay is up (A held) and redraws.
 void GuideMap_setRevealAll(bool on);
 bool GuideMap_revealAll(void);
 

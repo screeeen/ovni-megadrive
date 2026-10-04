@@ -261,7 +261,7 @@ void Plants_drawInRoom(u8 col, u8 row)
                 continue;
 
             // maze cell -> 2x2 VDP tiles, same convention as items.c
-            VDP_drawText("*", curCol[line][i] * 2, curRow[line][i] * 2);
+            VDP_drawText("*", curCol[line][i] * 2, (curRow[line][i] * 2) + MAZE_ORIGIN_ROW);
         }
     }
 }

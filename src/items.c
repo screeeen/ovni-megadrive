@@ -120,7 +120,7 @@ void Items_drawInRoom(u8 col, u8 row)
         // Default text colour: the player is physically standing in this
         // room, so by construction its door can't currently be locked --
         // never the Maze_setTextColorLocked() look.
-        VDP_drawText(s, MAZE_DOOR_COL * 2, MAZE_DOOR_ROW * 2); // maze cells are 2x2 VDP tiles (maze.h)
+        VDP_drawText(s, MAZE_DOOR_COL * 2, (MAZE_DOOR_ROW * 2) + MAZE_ORIGIN_ROW); // maze cells are 2x2 VDP tiles, under the HUD band (maze.h)
     }
 }
 

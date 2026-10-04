@@ -518,20 +518,32 @@ static bool slideCross(s16 x, s16 y, u8 d, u8 openMask, s16 *outX, s16 *outY)
     return TRUE;
 }
 
-// Everything the ship can cross having just come in through door `e`'s
-// `lane` half, in the configuration openMask describes.
+// Everything the ship can cross having just come in through door `e`, in
+// the configuration openMask describes.
 //
 // It arrives STILL MOVING, so its first resting place is wherever the
 // slide straight in from the threshold ends -- not the threshold itself.
 // Seeding the search there (the same thing tomboValidateSubset's own
 // entry handling does) is what keeps a sideways move the ship could never
 // make on arrival out of the answer.
-static void crossedEntering(u8 e, u8 lane, u8 openMask)
+//
+// And it arrives on ONE lane, the door's own offset, never the other half
+// of the 2-cell doorway: main.c's positionPlayerEnteringViaDoorDir puts
+// the ship at offset * MAZE_TILE_PX whichever half it left the previous
+// room by. This used to check both halves and keep the union, which is
+// how a room ended up with 3 plants only an arrival on the far half could
+// ever cross (user report, room R:012D of a 68BD map: "las plantas de
+// esta pantalla no son accesibles" -- and they weren't; from the lane the
+// game actually delivers there is no route to them at all, while from the
+// other one there is a 4-move one). The two slides are different moves
+// and they fan out into different halves of the room, so the union was
+// never a conservative answer.
+static void crossedEntering(u8 e, u8 openMask)
 {
     s16 head = 0, tail = 0;
     s16 ix, iy, sx, sy;
 
-    slideEntryCell(e, (u8) (plantSafeDoorOff[e] + lane), &ix, &iy);
+    slideEntryCell(e, plantSafeDoorOff[e], &ix, &iy);
     if (plantSafeBlocked(ix, iy, openMask))
         return;
 
@@ -576,7 +588,7 @@ static void crossedEntering(u8 e, u8 lane, u8 openMask)
 // carry the ship out of the room entirely.
 static void computePlantSafe(void)
 {
-    u8 e, lane, cfg;
+    u8 e, cfg;
     s16 x, y;
     bool first = TRUE;
 
@@ -600,10 +612,7 @@ static void computePlantSafe(void)
                 for (x = 0; x < MAZE_W; x++)
                     crossScratch[y][x] = restScratch[y][x] = FALSE;
 
-            // Both halves of the 2-cell-wide door: the ship can come in on
-            // either, same reasoning tomboRebuildGraph's own seeding has.
-            for (lane = 0; lane < 2; lane++)
-                crossedEntering(e, lane, openMask);
+            crossedEntering(e, openMask);
 
             for (y = 0; y < MAZE_H; y++)
                 for (x = 0; x < MAZE_W; x++)
@@ -1973,7 +1982,19 @@ void Maze_draw(void)
             band[(MAZE_W * 2) + i + 1] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, bl + 1);
         }
 
-        VDP_setTileMapDataRect(BG_A, band, 0, y * 2, MAZE_W * 2, 2, MAZE_W * 2, CPU);
+        VDP_setTileMapDataRect(BG_A, band, 0, (y * 2) + MAZE_ORIGIN_ROW, MAZE_W * 2, 2, MAZE_W * 2, CPU);
+    }
+
+    // The HUD's band (maze.h's MAZE_ORIGIN_ROW): the room doesn't reach it
+    // any more, but whatever was on BG_A up there -- the guide-map overlay,
+    // the static, a debug screen -- would still be sitting in it, since
+    // this is what every one of those is undone by.
+    {
+        static const u16 blank[MAZE_W * 2] = { 0 };
+        s16 r;
+
+        for (r = 0; r < MAZE_ORIGIN_ROW; r++)
+            VDP_setTileMapDataRect(BG_A, blank, 0, r, MAZE_W * 2, 1, MAZE_W * 2, CPU);
     }
 
     if (debugEdgesVisible)
@@ -2111,7 +2132,7 @@ void Maze_drawDebugGraph(void)
     u16 i;
 
     for (i = 0; i < slideCount; i++)
-        VDP_drawText(".", (u16) (slideNodeX[i] * 2), (u16) (slideNodeY[i] * 2));
+        VDP_drawText(".", (u16) (slideNodeX[i] * 2), (u16) ((slideNodeY[i] * 2) + MAZE_ORIGIN_ROW));
 }
 
 // Toggled by its own debug combo (user request: "haz un modo debug nuevo,
@@ -2167,7 +2188,7 @@ void Maze_drawDebugEdges(void)
                 const s16 hi = (slideNodeX[i] < slideNodeX[t]) ? slideNodeX[t] : slideNodeX[i];
 
                 for (a = lo; a <= hi; a++)
-                    VDP_drawText("-", (u16) (a * 2), (u16) (slideNodeY[i] * 2));
+                    VDP_drawText("-", (u16) (a * 2), (u16) ((slideNodeY[i] * 2) + MAZE_ORIGIN_ROW));
             }
             else // N/S: same column
             {
@@ -2175,7 +2196,7 @@ void Maze_drawDebugEdges(void)
                 const s16 hi = (slideNodeY[i] < slideNodeY[t]) ? slideNodeY[t] : slideNodeY[i];
 
                 for (b = lo; b <= hi; b++)
-                    VDP_drawText("|", (u16) (slideNodeX[i] * 2), (u16) (b * 2));
+                    VDP_drawText("|", (u16) (slideNodeX[i] * 2), (u16) ((b * 2) + MAZE_ORIGIN_ROW));
             }
         }
     }

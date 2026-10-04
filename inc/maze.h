@@ -4,10 +4,35 @@
 #include <genesis.h>
 
 // One maze cell = 16x16 px = 2x2 VDP background tiles.
-// 20x14 cells * 16px = 320x224px, exactly one Mega Drive screen (no scrolling needed).
+// 20x12 cells * 16px = 320x192px, and the 32px band left over at the top
+// of the 320x224 screen is the HUD's (see MAZE_ORIGIN_* below) -- still
+// exactly one Mega Drive screen, no scrolling needed. An even number of
+// rows, by request. Measured over 20000 generated rooms, height costs
+// slide-graph nodes smoothly and parity does nothing on its own (14 rows:
+// 33.3 nodes/room, 13: 31.2, 12: 30.1, all of them with the same
+// generation success rate) -- what an even height really buys is the band
+// below, 4 rows instead of 2, which is what makes every HUD line fit.
 #define MAZE_TILE_PX    16
 #define MAZE_W          20
-#define MAZE_H          14
+#define MAZE_H          12
+
+// The HUD's own band at the TOP of the screen (user request: "reserva
+// fila de tiles superior para pintar el hud, porque ahora se solapa con
+// el juego y no se aprecia"). 4 VDP text rows = 32px = exactly the two
+// maze rows the room gave up for it, so nothing else about the screen
+// changes. Wide enough for every HUD line there is -- rows 0 and 1 (the
+// room id/FPS and the letter/plant trackers) and INSERT_STATUS_ROW's
+// own, which used to be drawn over the room.
+//
+// Room coordinates are untouched -- still 0..MAZE_H-1 measured from the
+// room's own top-left -- and every conversion from a maze cell
+// to a screen position adds these instead: MAZE_ORIGIN_ROW for tile/text
+// rows, MAZE_ORIGIN_PX for sprite pixels. Anything that isn't the room
+// (the menu, the guide-map overlay, the intro, the HUD itself) addresses
+// the full screen as it always did.
+#define MAZE_HUD_ROWS   4
+#define MAZE_ORIGIN_ROW MAZE_HUD_ROWS
+#define MAZE_ORIGIN_PX  (MAZE_HUD_ROWS * 8)
 
 // The room's own interior hub -- the letter's cell, the point every tombo
 // room's generated graph is built around (maze.c's generateRoomTombo), and

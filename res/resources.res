@@ -18,3 +18,9 @@ WAV hihat0 "sound/hihat0.wav" PCM4
 WAV hihat1 "sound/hihat1.wav" PCM4
 WAV hihat2 "sound/hihat2.wav" PCM4
 WAV hihat3 "sound/hihat3.wav" PCM4
+
+# Placeholders, to be replaced with real art (user request: "que sea
+# placeholder, ya lo pondre yo a mi gusto") -- one sample each, no
+# variant rotation like the kick/hihat have.
+WAV enemyKill "sound/enemykill0.wav" PCM4
+WAV letterPickup "sound/letter0.wav" PCM4

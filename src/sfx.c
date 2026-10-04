@@ -83,3 +83,24 @@ void Sfx_playPlantPickup(void)
     SND_PCM4_startPlay(hihats[nextHihatVariant], hihatLens[nextHihatVariant], SOUND_PCM_CH_AUTO, FALSE);
     nextHihatVariant = (nextHihatVariant + 1) & 3;
 }
+
+// Placeholders -- see their doc comments in sfx.h. Synthesized at the
+// same mono/16-bit/16kHz the other samples use:
+//   enemyKill    a square tone sweeping 970 -> 70 Hz with a noise burst
+//                over it, both decaying fast (~190 ms)
+//   letterPickup two square blips a fifth apart, A5 then E6 (~160 ms)
+void Sfx_playEnemyKill(void)
+{
+    if (!enabled)
+        return;
+
+    SND_PCM4_startPlay(enemyKill, sizeof(enemyKill), SOUND_PCM_CH_AUTO, FALSE);
+}
+
+void Sfx_playLetterPickup(void)
+{
+    if (!enabled)
+        return;
+
+    SND_PCM4_startPlay(letterPickup, sizeof(letterPickup), SOUND_PCM_CH_AUTO, FALSE);
+}

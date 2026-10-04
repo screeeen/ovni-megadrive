@@ -54,4 +54,20 @@ void Sfx_playWallHit(u16 distance);
 // on the way Sfx_playWallHit does.
 void Sfx_playPlantPickup(void);
 
+// Enemy kill (running over a vulnerable one) and letter pickup. Both are
+// PLACEHOLDERS (user request: "pon efecto de sonido cuando matas un
+// enemigo y cuando coges una letra. que sea placeholder, ya lo pondre yo
+// a mi gusto") -- one single sample each, synthesized rather than
+// recorded, with none of the 4-variant rotation the kick and hi-hat use
+// to avoid sounding mechanical. Swapping either one is just dropping a
+// different mono 16-bit 16kHz wav over res/sound/enemykill0.wav /
+// res/sound/letter0.wav; nothing here needs to change.
+//
+// Both no-op while Sfx_isEnabled() is FALSE, and both let the PCM4 driver
+// auto-pick a free channel, same as Sfx_playPlantPickup (neither has a
+// per-hit volume, so neither needs to know which channel it landed on).
+// Call on the event's own edge, not every frame of it.
+void Sfx_playEnemyKill(void);
+void Sfx_playLetterPickup(void);
+
 #endif
