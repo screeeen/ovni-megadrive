@@ -1,9 +1,19 @@
 #include "player.h"
 #include "maze.h"
 
-// Same probe span as the original's `TILE - 2`: samples both edges of the
-// 16px box without landing exactly on the next cell boundary.
-#define BOX (MAZE_TILE_PX - 2)
+// The box the ship is tested with: its own last pixel, so probing x and
+// x+BOX samples both real edges of the 16x16 sprite.
+//
+// It used to be MAZE_TILE_PX - 2, the original's `TILE - 2`, which samples
+// 2px short of the right/bottom edge. That let the ship come to rest ONE
+// PIXEL past the cell grid whenever it stopped moving right or down (the
+// probe cleared the wall while the sprite's own edge was already on it) --
+// and one pixel is all a 16x16-against-16x16 overlap test needs to fire on
+// the cell beyond. Hence collisions that felt like they reached a little
+// down and to the right (user report), with enemies and with anything else
+// tested that way. Probing the real edge makes every stop land exactly on
+// the grid.
+#define BOX (MAZE_TILE_PX - 1)
 
 static s16 toTile(s16 px)
 {

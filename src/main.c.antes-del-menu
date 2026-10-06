@@ -1455,8 +1455,6 @@ static void newGame(void)
 // VDP_clearPlane wipes the title/hint text along with everything else on
 // BG_A -- the sun and planets are sprites now (spec §32septies), so they
 // don't need to be redrawn here at all, only the text.
-static void planetCompletedFlags(bool *out);
-
 static void drawMenu(void)
 {
     char buf[40]; // a full screen line: the longest sprintf here is the locked planet's "RECOGE n OBJETOS MAS PARA ABRIRLO"
@@ -1477,12 +1475,6 @@ static void drawMenu(void)
     // sound, it just isn't announced any more. Drawn as tiles by menu.c,
     // 16x16 per letter, so it has to come after the VDP_clearPlane above.
     Menu_drawTitle();
-
-    {
-        bool completed[SIZE_PRESET_COUNT];
-        planetCompletedFlags(completed);
-        Menu_drawPlanetBar(sizePresetIndex, unlockedPlanets, completed);
-    }
 
     // 3-line status block (user request: "n de total plantas \n n de
     // total letras \n pulsa a empezar") -- plants, then letters, same

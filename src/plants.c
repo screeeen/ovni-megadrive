@@ -9,6 +9,8 @@
 #define PLANTS_LINES_PER_ROOM 3
 #define PLANTS_MAX_PER_LINE   5
 #define PLANTS_LINE_MIN       3
+// A plant is drawn as one 8x8 text glyph, so that is how big it is to hit.
+#define PLANTS_GLYPH_PX       8
 // Random (anchor,axis,dir) tries before giving up on ONE line -- tombo
 // rooms are ~90% open interior (maze.h's own doc comment), so this
 // converges fast in practice, same reasoning as enemy.c's findOpenInLane.
@@ -244,8 +246,15 @@ bool Plants_tryCollect(u8 col, u8 row, s16 playerX, s16 playerY)
             {
                 const s16 px = curCol[line][i] * MAZE_TILE_PX;
                 const s16 py = curRow[line][i] * MAZE_TILE_PX;
-                const bool overlap = (playerX < px + MAZE_TILE_PX) && (px < playerX + MAZE_TILE_PX) &&
-                                      (playerY < py + MAZE_TILE_PX) && (py < playerY + MAZE_TILE_PX);
+                // The plant is ONE text glyph, 8x8, sitting in the top-left
+                // quarter of its 16x16 cell (Plants_drawInRoom) -- so that
+                // 8x8 is its collision box, not the whole cell. Testing the
+                // whole cell made it vanish while the ship was still a
+                // glyph's width away on the right or below it, which is
+                // exactly the "colisiona un poco abajo derecha" the player
+                // reported. The ship's own box stays the full 16.
+                const bool overlap = (playerX < px + PLANTS_GLYPH_PX) && (px < playerX + MAZE_TILE_PX) &&
+                                      (playerY < py + PLANTS_GLYPH_PX) && (py < playerY + MAZE_TILE_PX);
 
                 if (overlap)
                 {

@@ -12,7 +12,7 @@
 // text down (spec §32quat) to free up the extra vertical room these
 // wider orbits need.
 #define SUN_CENTER_X 160
-#define SUN_CENTER_Y 122
+#define SUN_CENTER_Y 142  // bajado: galaxia + fila de recuadros ocupan arriba
 
 // menuSun is a real 32x32 (4x4 tile) sprite, not a BG-tile fill (spec
 // §32septies, user request: "por que el bloque del centro no es un
@@ -114,7 +114,7 @@
 // user request) -- the planets still travel these exact elliptical
 // paths, just without a visible line traced under them.
 static const s16 orbitRadiusX[MENU_PLANET_COUNT] = { 46, 60, 74, 88, 102, 116, 130, 144 };
-static const s16 orbitRadiusY[MENU_PLANET_COUNT] = { 20, 26, 32, 38, 44, 50, 56, 62 };
+static const s16 orbitRadiusY[MENU_PLANET_COUNT] = { 11, 15, 18, 21, 24, 28, 31, 34 };
 
 // Per-planet angular speed (degrees/frame at 60fps) and starting angle
 // (spread apart so the planets don't all launch aligned) -- purely
@@ -146,6 +146,10 @@ static const s16 planetHalfSize[MENU_PLANET_COUNT] = { 4, 4, 4, 4, 8, 8, 12, 12 
 
 static Sprite *planetSprites[MENU_PLANET_COUNT];
 static Sprite *cursorSprite;
+
+// Ping-pong suavizado del cursor: un paso cada 3 tramas, ciclo de 48.
+static const s8 cursorBob[16] = { 0, 1, 1, 2, 2, 2, 1, 1, 0, -1, -1, -2, -2, -2, -1, -1 };
+static u16 cursorBobTick;
 static Sprite *sunSprite;
 
 // The big OVNI (user request: "solo OVNI en su lugar, alineado a la
@@ -290,9 +294,198 @@ void Menu_drawTitle(void)
     }
 }
 
+// --- fila de recuadros, uno por planeta ---
+#define BAR_X        4   // 8*4 = 32 tiles centrados: 4 de margen a cada lado
+#define BAR_Y        5   // separado del titulo, con la galaxia en medio
+#define BAR_BOX_W    4
+#define BAR_BOX_H    4
+#define BAR_GAP      0
+#define BAR_STRIDE   (BAR_BOX_W + BAR_GAP)
+#define BAR_INSET    2   // el marco se retranquea: deja 4 px de aire entre recuadros
+#define BAR_NAME_Y   (BAR_Y + BAR_BOX_H)
+#define BAR_GALAXY_Y (BAR_Y - 1)
+
+#define BAR_TILE_BASE   (TITLE_TILE_BASE + TITLE_TILES)
+#define BAR_FRAME_SET   8                      // piezas por marco
+#define BAR_CIRCLE_BASE (BAR_TILE_BASE + 48)   // 48 de marco: 3 tintas x 2 grosores x 8
+#define BAR_TILES       (48 + (3 * 3 * 4))
+
+// Editables. Cuatro letras por planeta, mismo orden que sizePresets[].
+static const char *const planetNames[MENU_PLANET_COUNT] = {
+    "XENU", "ZARG", "QORG", "NYXX", "VOID", "KLOP", "WURM", "ZYGN"
+};
+static const char *const galaxyName = "GALAXIA XR-13";
+static const u8 planetCircleSize[MENU_PLANET_COUNT] = { 0, 0, 0, 0, 1, 1, 2, 2 };
+static const u8 circleRadius[3] = { 3, 5, 7 };
+
+// Indice 2 = el violeta de los planetas, copiado desde PAL3 por
+// Menu_setVisible; indice 1 = el gris de los bloqueados.
+#define BAR_INK_INDEX ((PAL0 * 16) + 2)   // violeta de los planetas
+// 0 = blanco, 1 = gris (bloqueado), 2 = violeta (solo el contorno del seleccionado)
+static const u8 circleInk[3] = { 15, 1, 2 };
+static u16 savedBarInk;
+static bool barInkSaved;
+
+// El nombre de cada planeta se pinta con la fuente leyendo el indice 15 de
+// una paleta u otra: gris si esta bloqueado, violeta si esta abierto,
+// amarillo si esta superado. Mismos tres colores que el propio planeta.
+#define NAME_PAL_LOCKED    PAL1
+#define NAME_PAL_OPEN      PAL3
+#define NAME_PAL_DONE      PAL2
+static u16 savedNameInk[3];
+
+static void barPackTile(const u8 px[8][8], u16 index)
+{
+    u32 tile[8];
+    u8 row, col;
+
+    for (row = 0; row < 8; row++)
+    {
+        u32 bits = 0;
+        for (col = 0; col < 8; col++)
+            bits = (bits << 4) | px[row][col];
+        tile[row] = bits;
+    }
+    VDP_loadTileData(tile, index, 1, CPU);
+}
+
+static void loadBarTiles(void)
+{
+    u8 px[8][8];
+    u8 piece, row, col, grosor, variante, size, ink, quad;
+
+    for (ink = 0; ink < 3; ink++)
+      for (variante = 0; variante < 2; variante++)
+      {
+        grosor = (u8) (variante ? 2 : 1);   // el seleccionado lleva el trazo doble
+        {
+        const s16 chaflan = (s16) (variante ? 4 : 3);   // radio del redondeo
+
+        for (piece = 0; piece < 8; piece++)
+        {
+            const bool arriba  = (piece == 0 || piece == 1 || piece == 2);
+            const bool abajo   = (piece == 5 || piece == 6 || piece == 7);
+            const bool izq     = (piece == 0 || piece == 3 || piece == 5);
+            const bool der     = (piece == 2 || piece == 4 || piece == 7);
+            const bool esquina = (piece == 0 || piece == 2 || piece == 5 || piece == 7);
+
+            for (row = 0; row < 8; row++)
+                for (col = 0; col < 8; col++)
+                {
+                    // distancia al borde del recuadro, ya descontado el retranqueo
+                    const s16 dr = (s16) ((arriba ? row : (7 - row)) - BAR_INSET);
+                    const s16 dc = (s16) ((izq    ? col : (7 - col)) - BAR_INSET);
+                    bool on = FALSE;
+
+                    if (arriba && dr >= 0 && dr < grosor) on = TRUE;
+                    if (abajo  && dr >= 0 && dr < grosor) on = TRUE;
+                    if (izq    && dc >= 0 && dc < grosor) on = TRUE;
+                    if (der    && dc >= 0 && dc < grosor) on = TRUE;
+
+                    if (esquina)
+                    {
+
+                        if (dr < 0 || dc < 0)
+                        {
+                            on = FALSE;
+                        }
+                        else if (dr < chaflan && dc < chaflan)
+                        {
+                            const s16 ar = (s16) (dr - chaflan);
+                            const s16 ac = (s16) (dc - chaflan);
+                            const s16 d2 = (s16) ((ar * ar) + (ac * ac));
+                            const s16 inner = (s16) (chaflan - grosor);
+                            on = (d2 <= (s16) (chaflan * chaflan)) && (d2 >= (s16) (inner * inner));
+                        }
+                    }
+
+                    px[row][col] = on ? circleInk[ink] : 0;
+                }
+
+            barPackTile(px, (u16) (BAR_TILE_BASE + (((ink * 2) + variante) * BAR_FRAME_SET) + piece));
+        }
+        }
+      }
+
+    for (size = 0; size < 3; size++)
+        for (ink = 0; ink < 3; ink++)
+            for (quad = 0; quad < 4; quad++)
+            {
+                const s16 ox = (s16) ((quad & 1) * 8);
+                const s16 oy = (s16) ((quad >> 1) * 8);
+                const s16 r  = circleRadius[size];
+
+                for (row = 0; row < 8; row++)
+                    for (col = 0; col < 8; col++)
+                    {
+                        // centro del bloque de 16x16 entre los pixeles 7 y 8
+                        const s16 dx = (s16) ((ox + col) * 2 - 15);
+                        const s16 dy = (s16) ((oy + row) * 2 - 15);
+                        const bool dentro = (s16) (dx*dx + dy*dy) <= (s16) (4*r*r);
+                        px[row][col] = dentro ? circleInk[ink] : 0;
+                    }
+
+                barPackTile(px, (u16) (BAR_CIRCLE_BASE + (((size * 3) + ink) * 4) + quad));
+            }
+}
+
+static void barPutTile(u16 tileIndex, u16 x, u16 y)
+{
+    VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, tileIndex), x, y);
+}
+
+void Menu_drawPlanetBar(u8 selectedIndex, u8 unlockedCount, const bool *completed)
+{
+    u8 i;
+
+    VDP_drawText(galaxyName, BAR_X, BAR_GALAXY_Y);
+
+    for (i = 0; i < MENU_PLANET_COUNT; i++)
+    {
+        const u16 bx    = (u16) (BAR_X + (i * BAR_STRIDE));
+        const bool bloqueado = (i >= unlockedCount);
+        const bool elegido   = (i == selectedIndex);
+        const u8  ink   = (u8) (bloqueado ? 1 : 0);                       // circulo y marco normal
+        const u8  fink  = (u8) (elegido ? (bloqueado ? 1 : 2) : ink);     // violeta solo al elegido
+        const u16 frame = (u16) (BAR_TILE_BASE
+                                 + ((((u16) fink * 2) + (elegido ? 1u : 0u)) * BAR_FRAME_SET));
+        const u16 circ  = (u16) (BAR_CIRCLE_BASE + (((planetCircleSize[i] * 3) + ink) * 4));
+
+        barPutTile((u16) (frame + 0), bx,             BAR_Y);
+        barPutTile((u16) (frame + 1), (u16) (bx + 1), BAR_Y);
+        barPutTile((u16) (frame + 1), (u16) (bx + 2), BAR_Y);
+        barPutTile((u16) (frame + 2), (u16) (bx + 3), BAR_Y);
+
+        barPutTile((u16) (frame + 3), bx,             (u16) (BAR_Y + 1));
+        barPutTile((u16) (circ  + 0), (u16) (bx + 1), (u16) (BAR_Y + 1));
+        barPutTile((u16) (circ  + 1), (u16) (bx + 2), (u16) (BAR_Y + 1));
+        barPutTile((u16) (frame + 4), (u16) (bx + 3), (u16) (BAR_Y + 1));
+
+        barPutTile((u16) (frame + 3), bx,             (u16) (BAR_Y + 2));
+        barPutTile((u16) (circ  + 2), (u16) (bx + 1), (u16) (BAR_Y + 2));
+        barPutTile((u16) (circ  + 3), (u16) (bx + 2), (u16) (BAR_Y + 2));
+        barPutTile((u16) (frame + 4), (u16) (bx + 3), (u16) (BAR_Y + 2));
+
+        barPutTile((u16) (frame + 5), bx,             (u16) (BAR_Y + 3));
+        barPutTile((u16) (frame + 6), (u16) (bx + 1), (u16) (BAR_Y + 3));
+        barPutTile((u16) (frame + 6), (u16) (bx + 2), (u16) (BAR_Y + 3));
+        barPutTile((u16) (frame + 7), (u16) (bx + 3), (u16) (BAR_Y + 3));
+
+        if (bloqueado)                                VDP_setTextPalette(NAME_PAL_LOCKED);
+        else if (elegido)                             VDP_setTextPalette(NAME_PAL_OPEN);
+        else if (completed != NULL && completed[i])   VDP_setTextPalette(NAME_PAL_DONE);
+        else                                          VDP_setTextPalette(PAL0);
+
+        VDP_drawText(planetNames[i], bx, BAR_NAME_Y);
+    }
+
+    VDP_setTextPalette(PAL0);   // el resto del menu vuelve a blanco
+}
+
 void Menu_loadGraphics(void)
 {
     loadTitleTiles();
+    loadBarTiles();
 
     // PAL3 is otherwise unused by the rest of the game (PAL0=maze/text,
     // PAL1=playerShip/mapShip, PAL2=enemyShip) -- dedicated here so the
@@ -410,6 +603,32 @@ void Menu_setVisible(bool visible)
     SPR_setVisibility(cursorSprite, visible ? VISIBLE : HIDDEN);
     SPR_setVisibility(sunSprite, visible ? VISIBLE : HIDDEN);
 
+    // La fila de recuadros pinta sus circulos y el contorno del
+    // seleccionado con el mismo violeta que los planetas de las orbitas.
+    if (visible)
+    {
+        if (!barInkSaved)   // no re-guardar los colores sobre si mismos
+        {
+            savedBarInk      = PAL_getColor(BAR_INK_INDEX);
+            savedNameInk[0]  = PAL_getColor((NAME_PAL_LOCKED * 16) + 15);
+            savedNameInk[1]  = PAL_getColor((NAME_PAL_OPEN   * 16) + 15);
+            savedNameInk[2]  = PAL_getColor((NAME_PAL_DONE   * 16) + 15);
+            barInkSaved = TRUE;
+        }
+        PAL_setColor(BAR_INK_INDEX, planetSmall.palette->data[1]);
+        PAL_setColor((NAME_PAL_LOCKED * 16) + 15, RGB24_TO_VDPCOLOR(LOCKED_PLANET_COLOR));
+        PAL_setColor((NAME_PAL_OPEN   * 16) + 15, planetSmall.palette->data[1]);
+        PAL_setColor((NAME_PAL_DONE   * 16) + 15, RGB24_TO_VDPCOLOR(0xFFFF00));
+    }
+    else if (barInkSaved)
+    {
+        PAL_setColor(BAR_INK_INDEX, savedBarInk);
+        PAL_setColor((NAME_PAL_LOCKED * 16) + 15, savedNameInk[0]);
+        PAL_setColor((NAME_PAL_OPEN   * 16) + 15, savedNameInk[1]);
+        PAL_setColor((NAME_PAL_DONE   * 16) + 15, savedNameInk[2]);
+        barInkSaved = FALSE;
+    }
+
     // Flip PAL1's index1 between white (menu showing, spec §32septies)
     // and playerShip's own violet (leaving the menu) -- safe because
     // playerShip/mapShip, the only other things using PAL1, are always
@@ -507,7 +726,9 @@ void Menu_update(u8 selectedIndex, u8 unlockedCount, const bool *completed)
     // edge CURSOR_GAP_PX above that planet's own top edge (spec §31,
     // "justo encima del planeta") -- tracks the live position computed
     // above, not a separately-maintained angle.
+    cursorBobTick++;
     SPR_setPosition(cursorSprite,
                      selCx - CURSOR_HALF_W,
-                     selCy - planetHalfSize[selectedIndex] - CURSOR_GAP_PX - (2 * CURSOR_HALF_H));
+                     selCy - planetHalfSize[selectedIndex] - CURSOR_GAP_PX - (2 * CURSOR_HALF_H)
+                       + cursorBob[(cursorBobTick / 3) & 15]);
 }

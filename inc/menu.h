@@ -57,6 +57,11 @@ void Menu_hideSprites(void);
 // the orbits are already turning as the planets appear.
 void Menu_fadeInSprites(u8 selectedIndex, u8 unlockedCount, const bool *completed);
 
+// Fila de recuadros bajo el título: uno por planeta, con su círculo y su
+// nombre dentro, y el trazo doble en el seleccionado a modo de cursor.
+// Los bloqueados van en gris. Redibujar tras cada VDP_clearPlane(BG_A).
+void Menu_drawPlanetBar(u8 selectedIndex, u8 unlockedCount, const bool *completed);
+
 void Menu_setVisible(bool visible);
 
 // Advances each planet's orbit position by one frame and repositions its

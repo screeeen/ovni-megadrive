@@ -90,13 +90,18 @@ bool Items_tryCollect(u8 col, u8 row, s16 playerX, s16 playerY)
     if (i != nextIndex)
         return FALSE; // no item here, or it's not this one's turn yet
 
-    // Same 16x16 AABB overlap as Enemy_overlaps -- the item "sprite" is a
-    // single background tile, but the collision box is the same size.
+    // The letter is ONE text glyph, 8x8, drawn in the top-left quarter of
+    // the hub cell (Items_drawInRoom) -- so that 8x8 is what the ship has
+    // to touch, not the whole cell. Same correction plants.c got, and for
+    // the same reason: against the full cell it was picked up while the
+    // ship was still a glyph's width short of it on the right or below.
+    // The ship's own box stays the full 16.
+    #define ITEM_GLYPH_PX 8
     {
         const s16 itemX = MAZE_DOOR_COL * MAZE_TILE_PX;
         const s16 itemY = MAZE_DOOR_ROW * MAZE_TILE_PX;
-        const bool overlap = (playerX < itemX + MAZE_TILE_PX) && (itemX < playerX + MAZE_TILE_PX) &&
-                              (playerY < itemY + MAZE_TILE_PX) && (itemY < playerY + MAZE_TILE_PX);
+        const bool overlap = (playerX < itemX + ITEM_GLYPH_PX) && (itemX < playerX + MAZE_TILE_PX) &&
+                              (playerY < itemY + ITEM_GLYPH_PX) && (itemY < playerY + MAZE_TILE_PX);
 
         if (!overlap)
             return FALSE;

@@ -3,9 +3,10 @@
 #include "player.h"
 #include "plants.h" // Plants_cellOccupied -- see pickLaneRunClear below
 
-// Same probe span as player.c's own BOX -- samples both edges of the 16px
-// box without landing exactly on the next cell boundary.
-#define BOX (MAZE_TILE_PX - 2)
+// Same probe span as player.c's own BOX, and for the same reason -- see
+// its comment: the real edge of the 16x16 box, so an enemy comes to rest
+// exactly on the cell grid instead of a pixel past it.
+#define BOX (MAZE_TILE_PX - 1)
 
 static s16 toTile(s16 px)
 {
@@ -25,16 +26,14 @@ static bool wallAt(s16 px, s16 py)
     return Maze_isWall(toTile(px), toTile(py));
 }
 
-// A door trajectory cell is probed with the FULL 16px box (TRAJ), not the
-// 14px BOX walls use. BOX samples 2px short of the box's real edge, which
-// against a wall only means the enemy ends up resting 1px inside it --
-// invisible and harmless. Against a trajectory it is NOT harmless: the
-// ship entering the room sits on those cells with its own full 16x16 box
-// (Enemy_overlapsBox), so an enemy resting 1px into the neighbouring cell
-// still overlaps it and still kills. Probing the full box makes the enemy
-// stop on the cell boundary instead, leaving the trajectory completely
-// untouched (user requirement: "un enemigo no puede ... colisionar con la
-// trayectoria de la nave entrando en una habitacion").
+// Door trajectories were always probed with the box's real edge, back when
+// walls were probed 2px short of it: an enemy resting 1px inside a wall is
+// invisible and harmless, but an enemy resting 1px into a trajectory cell
+// still overlaps the ship arriving there and still kills it (user
+// requirement: "un enemigo no puede ... colisionar con la trayectoria de
+// la nave entrando en una habitacion"). BOX above is that same real edge
+// now, so the two spans agree -- kept as its own name because what it
+// means is different.
 #define TRAJ (MAZE_TILE_PX - 1)
 
 static bool trajectoryAt(s16 px, s16 py)
