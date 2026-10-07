@@ -100,10 +100,22 @@ static void setDoorBit(u8 col, u8 row, u8 dir, bool value)
 // the room's outer wall corners, matching the margin the old fixed
 // ANCHOR_* points in maze.c already used (ANCHOR_W_X=2/ANCHOR_E_X=
 // MAZE_W-4, ANCHOR_N_Y=2/ANCHOR_S_Y=MAZE_H-4).
-#define DOOR_COL_MIN 2
-#define DOOR_COL_MAX (MAZE_W - 4)
-#define DOOR_ROW_MIN 2
-#define DOOR_ROW_MAX (MAZE_H - 4)
+// The range itself now comes from maze.c (Maze_doorOffsetRange), because
+// it depends on the planet's room SHAPE and not just its size: where a
+// shape cuts a corner away, that side's border is shorter than the
+// bounding box and a door placed at the old 2..MAZE_W-4 range could land
+// in the cut-out, with nothing behind it. Both rooms sharing a door still
+// get the identical value, as they always did -- a planet's rooms all
+// have the same footprint, so they all get the same range (see
+// Maze_setRoomShape's own doc comment on why the shape is per-planet).
+static u8 pickDoorOffset(u8 dir)
+{
+    u8 lo, hi;
+
+    Maze_doorOffsetRange(dir, &lo, &hi);
+
+    return (u8) (lo + (random() % (hi - lo + 1)));
+}
 
 static void setDoorOffset(u8 col, u8 row, u8 dir, u8 offset)
 {
@@ -127,10 +139,7 @@ static void openDoor(u8 col, u8 row, u8 dir)
 
     neighborInDir(col, row, dir, &ncol, &nrow);
 
-    if ((dir == DOOR_N) || (dir == DOOR_S))
-        offset = DOOR_COL_MIN + (random() % (DOOR_COL_MAX - DOOR_COL_MIN + 1));
-    else
-        offset = DOOR_ROW_MIN + (random() % (DOOR_ROW_MAX - DOOR_ROW_MIN + 1));
+    offset = pickDoorOffset(dir);
 
     setDoorBit(col, row, dir, TRUE);
     setDoorBit((u8) ncol, (u8) nrow, opposite(dir), TRUE);
@@ -655,7 +664,7 @@ static void selectInsertionLink(void)
         insertLinkCol = startCol;
         insertLinkRow = startRow;
         insertLinkDir = DOOR_N;
-        insertLinkOffset = DOOR_COL_MIN;
+        insertLinkOffset = pickDoorOffset(DOOR_N);
         return;
     }
 
@@ -671,10 +680,7 @@ static void selectInsertionLink(void)
         // this behaves like one physically (main.c reuses this exact
         // value for the insertion room's own door too, spec §29quat's
         // shared-axis reasoning still applies unchanged).
-        if ((insertLinkDir == DOOR_N) || (insertLinkDir == DOOR_S))
-            insertLinkOffset = DOOR_COL_MIN + (random() % (DOOR_COL_MAX - DOOR_COL_MIN + 1));
-        else
-            insertLinkOffset = DOOR_ROW_MIN + (random() % (DOOR_ROW_MAX - DOOR_ROW_MIN + 1));
+        insertLinkOffset = pickDoorOffset(insertLinkDir);
     }
 }
 

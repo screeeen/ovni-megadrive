@@ -68,7 +68,16 @@ static bool tombMoving;
 static u8 tombQueuedDir = DIR_NONE;
 static u8 tombSpeedIdx; // where the current slide is on tombRamp
 
-typedef struct { u8 cols, rows, letters; } SizePreset;
+// cols/rows = how many ROOMS the planet's map has; roomW/roomH/shape =
+// how big and what shape each of those rooms is (user request: "cuanto
+// mas grande sea el planeta, mas grande es la habitacion... me gustaria
+// probar con distintas geometrias"). The room footprint used to be the
+// same fixed 20x12 box everywhere; it now grows with the planet, from
+// 16x10 on the 1x1 test planet up to the full screen (MAZE_MAX_W x
+// MAZE_MAX_H = 40x24) on the outermost one, and each planet gets its own
+// geometry from maze.h's MAZE_SHAPE_*. The shape is per-planet rather
+// than per-room on purpose -- see Maze_setRoomShape's doc comment.
+typedef struct { u8 cols, rows, letters, roomW, roomH, shape; } SizePreset;
 
 // 4 new smaller/shorter phases (spec §33, user request: "fases mas
 // pequeñas, con 1,2,3,4 letras y grids mas pequeñas") ahead of the
@@ -94,14 +103,14 @@ typedef struct { u8 cols, rows, letters; } SizePreset;
 // default planet (SIZE_PRESET_DEFAULT below) so starting a game goes
 // straight into it.
 static const SizePreset sizePresets[] = {
-    { 1, 1, 1 },
-    { 3, 3, 1 },
-    { 4, 3, 2 },
-    { 5, 3, 3 },
-    { 5, 4, 4 },
-    { 6, 4, 5 },
-    { 8, 6, 5 },
-    { 10, 8, 5 },
+    { 1, 1, 1, 16, 10, MAZE_SHAPE_RECT },
+    { 3, 3, 1, 20, 12, MAZE_SHAPE_RECT },
+    { 4, 3, 2, 24, 14, MAZE_SHAPE_L    },
+    { 5, 3, 3, 28, 16, MAZE_SHAPE_T    },
+    { 5, 4, 4, 30, 18, MAZE_SHAPE_S    },
+    { 6, 4, 5, 34, 20, MAZE_SHAPE_PLUS },
+    { 8, 6, 5, 36, 22, MAZE_SHAPE_O    },
+    { 10, 8, 5, 40, 24, MAZE_SHAPE_RECT },
 };
 // Must equal menu.h's MENU_PLANET_COUNT (spec §31) -- sizePresetIndex
 // (0..SIZE_PRESET_COUNT-1) is passed straight into Menu_update() as the
@@ -361,7 +370,12 @@ static u8 sizePresetIndex = SIZE_PRESET_DEFAULT;
 //
 // Deliberately NOT persisted anywhere: presetSave lives in RAM for this
 // power-on session only, same as every other bit of progress here.
+#define DEBUG_UNLOCK_ALL 1 // temporal: pon 0 para recuperar la progresion normal
+#if DEBUG_UNLOCK_ALL
+#define PLANETS_AT_START       SIZE_PRESET_COUNT
+#else
 #define PLANETS_AT_START       3
+#endif
 #define PLANET_UNLOCK_PERCENT 60
 static u8 unlockedPlanets = PLANETS_AT_START;
 
@@ -524,29 +538,31 @@ static void positionPlayerEnteringViaDoorDir(u8 doorDir, u8 offset)
 static void drawInsertRoomArrow(void)
 {
     char s[2] = { 0, '\0' };
+    const u16 ox = Maze_originColumn(); // a maze cell is one VDP tile now (maze.h)
+    const u16 oy = Maze_originRow();
     u16 tx, ty;
 
     switch (insertRoomDoorDir)
     {
         case DOOR_N:
             s[0] = '^';
-            tx = (u16) ((insertLinkOffset * 2) + 1);
-            ty = 3 + MAZE_ORIGIN_ROW;
+            tx = (u16) (ox + insertLinkOffset);
+            ty = (u16) (oy + 2);
             break;
         case DOOR_S:
             s[0] = 'v';
-            tx = (u16) ((insertLinkOffset * 2) + 1);
-            ty = (MAZE_H * 2) - 4 + MAZE_ORIGIN_ROW;
+            tx = (u16) (ox + insertLinkOffset);
+            ty = (u16) (oy + MAZE_H - 3);
             break;
         case DOOR_E:
             s[0] = '>';
-            tx = (MAZE_W * 2) - 4;
-            ty = (u16) ((insertLinkOffset * 2) + 1 + MAZE_ORIGIN_ROW);
+            tx = (u16) (ox + MAZE_W - 3);
+            ty = (u16) (oy + insertLinkOffset);
             break;
         default: // DOOR_W
             s[0] = '<';
-            tx = 3;
-            ty = (u16) ((insertLinkOffset * 2) + 1 + MAZE_ORIGIN_ROW);
+            tx = (u16) (ox + 2);
+            ty = (u16) (oy + insertLinkOffset);
             break;
     }
 
@@ -704,6 +720,11 @@ static u16 scanPlanetPlantTotal(u8 presetIndex)
     itemCount = sizePresets[presetIndex].letters;
     mapSeed = presetSave[presetIndex].mapSeed; // roomSeedFor() reads this global directly
     setRandomSeed(mapSeed);
+    // Before GuideMap_generate(): the door offsets it picks depend on
+    // this planet's room footprint (Maze_doorOffsetRange), and every
+    // room generated afterwards is carved at this size.
+    Maze_setRoomShape(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
+                      sizePresets[presetIndex].shape);
     GuideMap_generate();
     Maze_setActiveMapSlot(presetIndex);
     Maze_clearRoomCache(); // fresh bank (boot time: always empty anyway) -- defensive, cheap
@@ -882,6 +903,11 @@ static void introSetUpPlanet(u8 presetIndex)
     }
     mapSeed = presetSave[presetIndex].mapSeed;
     setRandomSeed(mapSeed);
+    // Before GuideMap_generate(): the door offsets it picks depend on
+    // this planet's room footprint (Maze_doorOffsetRange), and every
+    // room generated afterwards is carved at this size.
+    Maze_setRoomShape(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
+                      sizePresets[presetIndex].shape);
     GuideMap_generate();
     Maze_setActiveMapSlot(presetIndex);
     Maze_clearRoomCache();
@@ -1286,7 +1312,7 @@ static void loadRoom(u8 col, u8 row)
     {
         Enemy_spawnForRoom(&enemy, seed, doorN, doorE, doorS, doorW, doorOffsets);
         PAL_setColor(ENEMY_INK_INDEX, ENEMY_DANGEROUS_COLOR);
-        SPR_setPosition(enemySprite, enemy.x, enemy.y + MAZE_ORIGIN_PX);
+        SPR_setPosition(enemySprite, enemy.x + Maze_originPxX(), enemy.y + Maze_originPxY());
         // Not always alive: a room with nowhere legal to put an enemy (every
         // open cell on a door trajectory) gets none -- see Enemy_spawnForRoom.
         SPR_setVisibility(enemySprite, enemy.alive ? VISIBLE : HIDDEN);
@@ -1350,6 +1376,11 @@ static void newGame(void)
     mapRows = sizePresets[sizePresetIndex].rows;
     itemCount = sizePresets[sizePresetIndex].letters; // spec §33
 
+    // Before GuideMap_generate(): the door offsets it picks depend on
+    // this planet's room footprint (Maze_doorOffsetRange), and every
+    // room generated afterwards is carved at this size.
+    Maze_setRoomShape(sizePresets[sizePresetIndex].roomW, sizePresets[sizePresetIndex].roomH,
+                      sizePresets[sizePresetIndex].shape);
     GuideMap_generate();
     // Switches to THIS planet's own room-attempt-cache bank (spec §52) --
     // already fully populated by ensurePlantsTotalKnown()'s scan above
@@ -1444,7 +1475,7 @@ static void newGame(void)
         case DOOR_E: player.dir = DIR_LEFT;  break;
         default:     player.dir = DIR_RIGHT; break; // DOOR_W
     }
-    SPR_setPosition(playerSprite, player.x, player.y + MAZE_ORIGIN_PX); // room pixels -> screen, under the HUD band (maze.h)
+    SPR_setPosition(playerSprite, player.x + Maze_originPxX(), player.y + Maze_originPxY()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
     SPR_setVisibility(playerSprite, VISIBLE);
     SPR_setVisibility(enemySprite, HIDDEN); // no enemy in the insertion room (spec §27)
 }
@@ -1821,8 +1852,8 @@ static void clearHitboxMarks(void)
 
 static void markHitboxTile(s16 px, s16 py, const char *glyph)
 {
-    const u16 tx = (u16) (px >> 3); // 8px-per-VDP-tile, same unit VDP_drawTextBG's x/y already are
-    const u16 ty = (u16) ((py >> 3) + MAZE_ORIGIN_ROW); // room rows -> screen rows (maze.h)
+    const u16 tx = (u16) ((px + Maze_originPxX()) >> 3); // 8px-per-VDP-tile, same unit VDP_drawTextBG's x/y already are
+    const u16 ty = (u16) ((py + Maze_originPxY()) >> 3); // room pixels -> screen rows (maze.h)
 
     // The room starts below the HUD's own band now, so a mark can no
     // longer land on one of its two rows at all -- this only still guards
@@ -1914,10 +1945,10 @@ static u16 plantPathMarkX[PLANTPATH_MAX_MARKS];
 static u16 plantPathMarkY[PLANTPATH_MAX_MARKS];
 static u8 plantPathMarkCount;
 
-static s8 ppFromDir[MAZE_H][MAZE_W]; // which way the ship arrived here, -1 = not reached
-static u8 ppFromX[MAZE_H][MAZE_W], ppFromY[MAZE_H][MAZE_W];
-static u8 ppQX[MAZE_W * MAZE_H], ppQY[MAZE_W * MAZE_H];
-static bool ppCrossed[MAZE_H][MAZE_W]; // reachMode only: every cell some slide crosses
+static s8 ppFromDir[MAZE_MAX_H][MAZE_MAX_W]; // which way the ship arrived here, -1 = not reached
+static u8 ppFromX[MAZE_MAX_H][MAZE_MAX_W], ppFromY[MAZE_MAX_H][MAZE_MAX_W];
+static u8 ppQX[MAZE_MAX_W * MAZE_MAX_H], ppQY[MAZE_MAX_W * MAZE_MAX_H];
+static bool ppCrossed[MAZE_MAX_H][MAZE_MAX_W]; // reachMode only: every cell some slide crosses
 
 
 static const s8 ppDX[4] = { 0, 1, 0, -1 }; // N,E,S,W -- maze.h's own order
@@ -2000,8 +2031,8 @@ static void clearPlantPathMarks(void)
 static void markPlantPathCell(s16 cx, s16 cy, u8 dir)
 {
     static const char *const arrow[5] = { "^", ">", "v", "<", "o" }; // 4 = the route's own start cell
-    const u16 tx = (u16) (cx * 2);
-    const u16 ty = (u16) ((cy * 2) + MAZE_ORIGIN_ROW); // room rows -> screen rows (maze.h)
+    const u16 tx = (u16) (Maze_originColumn() + cx);
+    const u16 ty = (u16) (Maze_originRow() + cy); // room cells -> screen tiles, 1:1 now (maze.h)
 
     if (plantPathMarkCount >= PLANTPATH_MAX_MARKS)
         return;
@@ -2610,10 +2641,10 @@ static u8 sweepReportRow;
 // The running intersection over every arrival checked so far (each door,
 // each half of its doorway), which is what the room is judged on once the
 // fourth door has had its turn.
-static bool sweepSafe[MAZE_H][MAZE_W];
+static bool sweepSafe[MAZE_MAX_H][MAZE_MAX_W];
 // Just the cells one arrival slide crosses on its way in, before the flood
 // from where it stops takes over.
-static bool sweepArrival[MAZE_H][MAZE_W];
+static bool sweepArrival[MAZE_MAX_H][MAZE_MAX_W];
 static bool sweepFirstDoor;
 
 static void enterSweep(void)
@@ -3573,7 +3604,7 @@ int main(bool hardReset)
                     resetToMenu();
                 }
 
-                SPR_setPosition(playerSprite, player.x, player.y + MAZE_ORIGIN_PX); // room pixels -> screen, under the HUD band (maze.h)
+                SPR_setPosition(playerSprite, player.x + Maze_originPxX(), player.y + Maze_originPxY()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
             }
             else
             {
@@ -3605,7 +3636,7 @@ int main(bool hardReset)
                 // it in sync with enemy.state.
                 Enemy_update(&enemy);
                 PAL_setColor(ENEMY_INK_INDEX, (enemy.state == ENEMY_DANGEROUS) ? ENEMY_DANGEROUS_COLOR : ENEMY_VULNERABLE_COLOR);
-                SPR_setPosition(enemySprite, enemy.x, enemy.y + MAZE_ORIGIN_PX);
+                SPR_setPosition(enemySprite, enemy.x + Maze_originPxX(), enemy.y + Maze_originPxY());
                 SPR_setVisibility(enemySprite, Enemy_blinkVisible(&enemy) ? VISIBLE : HIDDEN);
 
                 // One 1px sub-step at a time, checking for the letter (and
@@ -3796,7 +3827,7 @@ int main(bool hardReset)
                     }
                 }
 
-                SPR_setPosition(playerSprite, player.x, player.y + MAZE_ORIGIN_PX); // room pixels -> screen, under the HUD band (maze.h)
+                SPR_setPosition(playerSprite, player.x + Maze_originPxX(), player.y + Maze_originPxY()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
             }
 
             // Did the ship travel this frame? (The steering lock,

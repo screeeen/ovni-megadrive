@@ -20,9 +20,44 @@
 // locked-door tiles instead of repeating the literal.
 #define MAZE_BG_COLOR 0x000024 // dark blue, nearly black (user request) -- blue level 1 of the 7 the VDP has
 
-#define MAZE_TILE_PX    16
-#define MAZE_W          20
-#define MAZE_H          12
+// One maze cell = 8x8 px = exactly one VDP background tile (user
+// request: rooms that vary with the planet, "cuanto mas grande sea el
+// planeta, mas grande es la habitacion"). It used to be 16px/2x2 tiles,
+// which capped a room at 20x12 cells -- one screen, and there is nowhere
+// to grow without scrolling. Halving the cell doubles the grid on both
+// axes for the same 320x192 play area, so the biggest planet gets 40x24
+// cells instead. The ship halves with it (8x8, see main.c's playerShip)
+// -- that is what makes the room genuinely bigger rather than just
+// finer: the room is the same pixels, the ship is half the size.
+//
+// MAZE_W/MAZE_H are now the MAXIMUM a room can be (40x24 = the full
+// screen below the HUD), and only ever dimension the static grids.
+// The size a room actually IS comes from Maze_setRoomShape() below and
+// is read back with Maze_roomW()/Maze_roomH() -- inside maze.c itself
+// MAZE_W/MAZE_H are redefined to those runtime values, see the top of
+// that file.
+#define MAZE_TILE_PX    8
+// log2(MAZE_TILE_PX). Converting a room pixel to a cell is a SHIFT, not a
+// divide, because it has to floor toward minus infinity: a coordinate one
+// pixel outside the room must land on cell -1 so Maze_isWall() reports it
+// out of range, and a signed divide would round it to 0 and read a real
+// cell instead. Derived from MAZE_TILE_PX and checked against it by a
+// _Static_assert in maze.c -- player.c and enemy.c each had this shift
+// hardcoded to 4 for the old 16px cell, which is exactly the kind of
+// silent drift that survives a clean compile.
+#define MAZE_TILE_SHIFT 3
+#define MAZE_MAX_W      40
+#define MAZE_MAX_H      24
+
+// The size the CURRENT room actually is. Every call site that used to
+// read the old fixed 20x12 constants keeps working unchanged -- it just
+// reads the live value now. MAZE_MAX_W/MAZE_MAX_H above are only for
+// dimensioning storage. (maze.c redefines these two to its own variables
+// so its generator loops don't pay a cross-module call per cell.)
+u8 Maze_roomW(void);
+u8 Maze_roomH(void);
+#define MAZE_W ((s16) Maze_roomW())
+#define MAZE_H ((s16) Maze_roomH())
 
 // The HUD's own band at the TOP of the screen (user request: "reserva
 // fila de tiles superior para pintar el hud, porque ahora se solapa con
@@ -51,18 +86,68 @@
 // borders don't derive from this either (spec §30: they're independently
 // random per door, see MapCell's doorOffsetN/E/S/W in guidemap.h) -- this
 // is only ever a room's center, not a door coordinate.
-#define MAZE_DOOR_COL (MAZE_W / 2)
-#define MAZE_DOOR_ROW ((MAZE_H / 2) & ~1)
+// Follows the room's live size now that that varies per planet (see
+// MAZE_W/MAZE_H above), so this stays the room's own centre whatever
+// shape it has. maze.c has its own cheap copy of the same expression.
+u8 Maze_hubX(void);
+u8 Maze_hubY(void);
+#define MAZE_DOOR_COL ((s16) Maze_hubX())
+#define MAZE_DOOR_ROW ((s16) Maze_hubY())
+
+// Room footprint (user request: "me gustaria probar con distintas
+// geometrias, no solo cuadrado, sino rectangular o con forma de
+// tetromino, como haciendo una L"). A shape is always the room's
+// bounding box (roomW x roomH) MINUS one or two cut-out rectangles, and
+// every cut is placed so it never swallows a whole side of the box --
+// otherwise a door could have nowhere to sit. Cells inside the box but
+// outside the shape are permanent wall: the generator never opens them,
+// and the slide validator therefore handles the shape with no special
+// casing at all (it only ever asks Maze_isWall).
+#define MAZE_SHAPE_RECT  0 // the plain box, what every room was until now
+#define MAZE_SHAPE_L     1 // one corner cut away
+#define MAZE_SHAPE_T     2 // both bottom corners cut
+#define MAZE_SHAPE_S     3 // opposite corners cut, diagonally
+#define MAZE_SHAPE_PLUS  4 // all four corners cut
+#define MAZE_SHAPE_O     5 // a solid block in the middle, box intact
+#define MAZE_SHAPE_COUNT 6
+
+// Sets the footprint every room generated from here on uses. Call once
+// per planet, BEFORE generating any of its rooms -- it is what makes a
+// bigger planet's rooms bigger. w/h are clamped to MAZE_MAX_W/MAZE_MAX_H
+// and to the minimum a room can be and still hold a puzzle. The shape is
+// per-planet, not per-room, on purpose: two rooms that share a door must
+// agree on where along the border that door sits (see
+// Maze_doorOffsetRange), and that is only guaranteed when both have the
+// same footprint.
+void Maze_setRoomShape(u8 w, u8 h, u8 shape);
+
+// Where the room's top-left cell lands on screen, in pixels. A room
+// smaller than the full 40x24 is centred in the play area rather than
+// pinned to a corner; the Y value already includes the HUD band
+// (MAZE_ORIGIN_PX). Every cell -> screen conversion adds these.
+s16 Maze_originPxX(void);
+s16 Maze_originPxY(void);
+// Same two, in 8px VDP tile/text units, for VDP_drawText call sites.
+u16 Maze_originColumn(void);
+u16 Maze_originRow(void);
+
+// The range a door's offset along border `dir` (0=N,1=E,2=S,3=W) may
+// take for the current footprint: the span of that side that the shape
+// actually reaches, inset 2 cells from each corner the way the old fixed
+// DOOR_COL_MIN/MAX in guidemap.c did. guidemap.c asks this instead of
+// deriving the range from MAZE_W/MAZE_H, so a cut-out corner never gets
+// a door placed into it.
+void Maze_doorOffsetRange(u8 dir, u8 *lo, u8 *hi);
 
 // mazeTiles occupies this many contiguous VRAM tiles starting at
-// TILE_USER_INDEX (see maze.c's BASE_TILE/CELL_ROW_TILES comment: 20
-// cols x 2 rows of 8x8 subtiles -- 10 logical 16x16 cells: floor plus the
-// 9 wall dither variants. No separate locked-door cell (spec §19: a
-// sealed door reuses an ordinary wall cell, drawn through a different
-// palette). Anything
-// else built on TILE_USER_INDEX (e.g. guidemap.c's overlay tiles) must
-// start after this to avoid overlapping maze.c's tileset in VRAM.
-#define MAZE_TILE_COUNT 40
+// TILE_USER_INDEX: 10 logical cells (floor plus the 9 wall dither
+// variants) and, now that a cell is 8x8, exactly one VDP tile each --
+// it used to be 40, 4 subtiles per 16x16 cell. No separate locked-door
+// cell (spec §19: a sealed door reuses an ordinary wall cell, drawn
+// through a different palette). Anything else built on TILE_USER_INDEX
+// (e.g. guidemap.c's overlay tiles) must start after this to avoid
+// overlapping maze.c's tileset in VRAM.
+#define MAZE_TILE_COUNT 10
 
 // What maze.c claims in VRAM BEYOND those: the 24-tile pool
 // Maze_drawNoiseFrame rewrites every call, plus the single solid tile the

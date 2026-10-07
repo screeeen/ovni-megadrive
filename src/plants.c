@@ -81,8 +81,9 @@ static const s8 dirDX[4] = {  0, 1, 0, -1 };
 static const s8 dirDY[4] = { -1, 0, 1,  0 };
 
 // Generous upper bound on how many cells a single straight slide can ever
-// cross in either axis (the larger of MAZE_W/MAZE_H).
-#define PLANTS_MAX_EDGE_LEN 20
+// cross in either axis: the larger of MAZE_MAX_W/MAZE_MAX_H, since a room
+// may now be anything up to that (maze.h).
+#define PLANTS_MAX_EDGE_LEN MAZE_MAX_W
 
 // TRUE if (x,y) is already used by an earlier line placed THIS room
 // (occCol/occRow[0..occCount-1]) -- checked while walking a candidate
@@ -282,8 +283,8 @@ void Plants_drawInRoom(u8 col, u8 row)
             if (collectedMask[row][col] & (u16) (1u << bit))
                 continue;
 
-            // maze cell -> 2x2 VDP tiles, same convention as items.c
-            VDP_drawText("*", curCol[line][i] * 2, (curRow[line][i] * 2) + MAZE_ORIGIN_ROW);
+            // a maze cell is one VDP tile now; the origin carries the HUD band and the centring, same convention as items.c
+            VDP_drawText("*", Maze_originColumn() + curCol[line][i], Maze_originRow() + curRow[line][i]);
         }
     }
 }

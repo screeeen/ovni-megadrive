@@ -10,7 +10,7 @@
 
 static s16 toTile(s16 px)
 {
-    return px >> 4;
+    return px >> MAZE_TILE_SHIFT;
 }
 
 // Every cell on a door's entry/exit trajectory (see markDoorTrajectory
@@ -19,7 +19,7 @@ static s16 toTile(s16 px)
 // maze.c. Read back by wallAt() below, so the enemy bounces off these
 // cells exactly like a real wall for the rest of its life in this room,
 // not just at spawn.
-static bool doorTrajectory[MAZE_H][MAZE_W];
+static bool doorTrajectory[MAZE_MAX_H][MAZE_MAX_W];
 
 static bool wallAt(s16 px, s16 py)
 {
