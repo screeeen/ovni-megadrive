@@ -33,10 +33,10 @@ static u16 collectedMask[MAX_MAP_ROWS][MAX_MAP_COLS];
 // 33 bytes a room, 80 rooms at the biggest preset: ~2.6 KB, against a
 // per-entry cost that showed up as a visible hitch every time the ship
 // crossed a door.
-static u8 cacheCol[MAX_MAP_ROWS][MAX_MAP_COLS][PLANTS_LINES_PER_ROOM][PLANTS_MAX_PER_LINE];
-static u8 cacheRow[MAX_MAP_ROWS][MAX_MAP_COLS][PLANTS_LINES_PER_ROOM][PLANTS_MAX_PER_LINE];
-static u8 cacheCount[MAX_MAP_ROWS][MAX_MAP_COLS][PLANTS_LINES_PER_ROOM];
-static bool cacheValid[MAX_MAP_ROWS][MAX_MAP_COLS];
+static u8 cacheCol[PLANTS_CACHE_SLOTS][PLANTS_LINES_PER_ROOM][PLANTS_MAX_PER_LINE];
+static u8 cacheRow[PLANTS_CACHE_SLOTS][PLANTS_LINES_PER_ROOM][PLANTS_MAX_PER_LINE];
+static u8 cacheCount[PLANTS_CACHE_SLOTS][PLANTS_LINES_PER_ROOM];
+static bool cacheValid[PLANTS_CACHE_SLOTS];
 static u16 total;
 
 // This planet's real plant count (Plants_setPlanetTotal) -- the
@@ -110,8 +110,15 @@ void Plants_reset(void)
         for (c = 0; c < MAX_MAP_COLS; c++)
         {
             collectedMask[r][c] = 0;
-            cacheValid[r][c] = FALSE; // a different mapSeed puts different rooms at these positions
         }
+
+    // cacheValid is deliberately NOT cleared here any more. It used to be,
+    // because the cache was indexed by map position alone and a different
+    // planet put different rooms at those positions. Slots are per planet
+    // now, and a planet's mapSeed is decided once per session, so what is
+    // in there stays true for the rest of the session -- which is the
+    // whole point: it is filled during the cartography screen at boot, so
+    // no room has to pay for its own first visit mid-play.
 
     total = 0;
     for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
@@ -148,7 +155,10 @@ void Plants_spawnForRoom(u16 roomSeed)
             const u8 dir = (u8) (rngNext() % 4);
             const s16 target = Maze_slideEdge(node, dir);
             s16 srcX, srcY, dstX, dstY;
-            s16 px[PLANTS_MAX_EDGE_LEN], py[PLANTS_MAX_EDGE_LEN];
+            // static for the same reason tomboTooEasy's queues are: these
+            // doubled when a cell became 8px (PLANTS_MAX_EDGE_LEN went
+            // from 20 to 40), and this runs deep inside room loading.
+            static s16 px[PLANTS_MAX_EDGE_LEN], py[PLANTS_MAX_EDGE_LEN];
             u8 pathLen = 0;
             bool hitHub = FALSE;
             s16 x, y;
@@ -332,37 +342,40 @@ void Plants_setPlanetTotal(u16 t)
     planetTotal = t;
 }
 
-void Plants_cacheCurrentRoom(u8 col, u8 row)
+void Plants_cacheCurrentRoom(u16 slot)
 {
     u8 line, i;
+
+    if (slot >= PLANTS_CACHE_SLOTS)
+        return; // not a real room, or the table outgrew the cache
 
     for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
     {
-        cacheCount[row][col][line] = curCount[line];
+        cacheCount[slot][line] = curCount[line];
         for (i = 0; i < curCount[line]; i++)
         {
-            cacheCol[row][col][line][i] = curCol[line][i];
-            cacheRow[row][col][line][i] = curRow[line][i];
+            cacheCol[slot][line][i] = curCol[line][i];
+            cacheRow[slot][line][i] = curRow[line][i];
         }
     }
 
-    cacheValid[row][col] = TRUE;
+    cacheValid[slot] = TRUE;
 }
 
-bool Plants_loadCachedRoom(u8 col, u8 row)
+bool Plants_loadCachedRoom(u16 slot)
 {
     u8 line, i;
 
-    if (!cacheValid[row][col])
+    if ((slot >= PLANTS_CACHE_SLOTS) || !cacheValid[slot])
         return FALSE;
 
     for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
     {
-        curCount[line] = cacheCount[row][col][line];
+        curCount[line] = cacheCount[slot][line];
         for (i = 0; i < curCount[line]; i++)
         {
-            curCol[line][i] = cacheCol[row][col][line][i];
-            curRow[line][i] = cacheRow[row][col][line][i];
+            curCol[line][i] = cacheCol[slot][line][i];
+            curRow[line][i] = cacheRow[slot][line][i];
         }
     }
 

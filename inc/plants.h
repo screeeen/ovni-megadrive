@@ -150,8 +150,15 @@ bool Plants_allCollectedInRoom(u8 col, u8 row);
 // Cleared by Plants_reset(), so a new planet can never read another's
 // layouts: the cache is indexed by map position, and a different mapSeed
 // puts completely different rooms at those same positions.
-void Plants_cacheCurrentRoom(u8 col, u8 row);
-bool Plants_loadCachedRoom(u8 col, u8 row);
+// Slots are per PLANET now, not per map position: the cache used to be
+// indexed by (col,row) alone, so it only ever held one planet's rooms and
+// whichever planet was cartographed last evicted the rest. main.c hands
+// out a slot per (planet, col, row) -- packed, so only cells that are
+// really rooms take space. PLANTS_CACHE_SLOTS must cover every planet's
+// rooms added together; main.c checks it against the real total.
+#define PLANTS_CACHE_SLOTS 171
+void Plants_cacheCurrentRoom(u16 slot);
+bool Plants_loadCachedRoom(u16 slot);
 
 // TRUE if cell (x,y) of THIS room is part of any of its plant lines, no
 // matter whether that plant has been collected already. Unlike

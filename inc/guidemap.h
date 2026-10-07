@@ -70,6 +70,13 @@ typedef struct
 extern u8 mapCols, mapRows;
 
 extern MapCell guideMap[MAX_MAP_ROWS][MAX_MAP_COLS];
+
+// The planet's map footprint, drawn in ASCII -- one string per row, '#'
+// where a room may exist and anything else where none ever can (user
+// request: "no tienen por que ser siempre rectangulos"). Call before
+// GuideMap_generate(); NULL means the full mapCols x mapRows rectangle,
+// which is what every planet was until now.
+void GuideMap_setShape(const char *const *rows, u8 cols, u8 rowCount);
 extern u8 startCol, startRow;
 extern u8 goalCol, goalRow;
 

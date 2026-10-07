@@ -75,9 +75,51 @@ static u8 tombSpeedIdx; // where the current slide is on tombRamp
 // same fixed 20x12 box everywhere; it now grows with the planet, from
 // 16x10 on the 1x1 test planet up to the full screen (MAZE_MAX_W x
 // MAZE_MAX_H = 40x24) on the outermost one, and each planet gets its own
-// geometry from maze.h's MAZE_SHAPE_*. The shape is per-planet rather
-// than per-room on purpose -- see Maze_setRoomShape's doc comment.
-typedef struct { u8 cols, rows, letters, roomW, roomH, shape; } SizePreset;
+// shape rolled per room by maze.c (Maze_setRoomSize's last column is how
+// many cuts a room may take: 0 = plain boxes).
+// Each planet's MAP drawn in ASCII, one string per row: '#' is a room,
+// '.' is nothing there. cols/rows below must match these strings. The
+// map used to be a solid rectangle always (Prim's filled the whole
+// grid); these are the polyomino shapes instead.
+static const char *const map0[] = { "#" };                 // una sola sala
+static const char *const map1[] = { "####",                // T
+                                    ".##.",
+                                    ".##." };
+static const char *const map2[] = { "##....",              // J
+                                    "##....",
+                                    "######",
+                                    "######" };
+static const char *const map3[] = { "######",              // I con remates
+                                    "..##..",
+                                    "..##..",
+                                    "######" };
+static const char *const map4[] = { "..###..",             // cruz
+                                    "..###..",
+                                    "#######",
+                                    "..###..",
+                                    "..###.." };
+static const char *const map5[] = { "#######.",            // O con patas
+                                    "##...##.",
+                                    "##...###",
+                                    "#######.",
+                                    "##....##",
+                                    "##....##" };
+static const char *const map6[] = { "#.####.#",            // O con esquinas
+                                    "########",
+                                    "##....##",
+                                    "##....##",
+                                    "########",
+                                    "#.####.#" };
+static const char *const map7[] = { "##########",          // T grande
+                                    "##########",
+                                    "....##....",
+                                    "....##....",
+                                    "....##....",
+                                    "..######..",
+                                    "..######..",
+                                    "..######.." };
+
+typedef struct { const char *const *map; u8 cols, rows, letters, roomW, roomH, variety; } SizePreset;
 
 // 4 new smaller/shorter phases (spec §33, user request: "fases mas
 // pequeñas, con 1,2,3,4 letras y grids mas pequeñas") ahead of the
@@ -103,20 +145,25 @@ typedef struct { u8 cols, rows, letters, roomW, roomH, shape; } SizePreset;
 // default planet (SIZE_PRESET_DEFAULT below) so starting a game goes
 // straight into it.
 static const SizePreset sizePresets[] = {
-    { 1, 1, 1, 16, 10, MAZE_SHAPE_RECT },
-    { 3, 3, 1, 20, 12, MAZE_SHAPE_RECT },
-    { 4, 3, 2, 24, 14, MAZE_SHAPE_L    },
-    { 5, 3, 3, 28, 16, MAZE_SHAPE_T    },
-    { 5, 4, 4, 30, 18, MAZE_SHAPE_S    },
-    { 6, 4, 5, 34, 20, MAZE_SHAPE_PLUS },
-    { 8, 6, 5, 36, 22, MAZE_SHAPE_O    },
-    { 10, 8, 5, 40, 24, MAZE_SHAPE_RECT },
+    { map0,  1, 1, 1, 16, 10, 0 },
+    { map1,  4, 3, 1, 20, 12, 1 },
+    { map2,  6, 4, 2, 24, 14, 2 },
+    { map3,  6, 4, 3, 28, 16, 2 },
+    { map4,  7, 5, 4, 30, 18, 3 },
+    { map5,  8, 6, 5, 34, 20, 3 },
+    { map6,  8, 6, 5, 36, 22, 4 },
+    { map7, 10, 8, 5, 40, 24, 4 },
 };
 // Must equal menu.h's MENU_PLANET_COUNT (spec §31) -- sizePresetIndex
 // (0..SIZE_PRESET_COUNT-1) is passed straight into Menu_update() as the
 // selected planet index, indexing menu.c's own per-planet arrays.
 #define SIZE_PRESET_COUNT 8
 #define SIZE_PRESET_DEFAULT 0 // the new 1x1 tombo test planet (user request)
+
+// temporal: solo se cartografian y se pueden elegir los planetas de este
+// indice en adelante. 0 = todos, que es el comportamiento normal.
+#define DEBUG_FIRST_PLANET 0
+#define PLANET_SEL_COUNT (SIZE_PRESET_COUNT - DEBUG_FIRST_PLANET)
 
 // playerShip's palette (spec §13bis) is 2 colors: index0 (never rendered
 // -- Genesis sprite hardware always treats palette index0 as transparent)
@@ -269,6 +316,18 @@ static bool debugViewOn;
 // combo would also fire RUTAS every time.
 #define DEBUG_HITBOX_COMBO (BUTTON_B | BUTTON_C | BUTTON_START)
 
+// "DATOS" (user request: the FPS counter and the room's seeds should only
+// show in debug). B+C+RIGHT: same B+C family as the rest, and RIGHT is
+// the one direction none of the others claim -- VISOR has DOWN, RESET has
+// UP, and RUTAS deliberately uses no direction at all. It is a superset
+// of plain B+C, but DEBUG_EDGES_EXCLUDE already lists BUTTON_RIGHT, so
+// holding this does not also fire RUTAS; and it is not a subset of
+// RESET_COMBO (A+B+C+UP), which tests UP. Like B+C+DOWN it nudges the
+// ship right while held, which is the same trade VISOR already makes.
+// Off by default: both readouts are developer information.
+#define DEBUG_INFO_COMBO (BUTTON_B | BUTTON_C | BUTTON_RIGHT)
+static bool debugInfoOn;
+
 // "PLANTA", the route to the nearest plant (user request: "haz un debug
 // que pinte la trayectoria que hay que tomar a la planta mas cercana").
 // No longer a debug chord: it is a feature of the game now, on a lone B
@@ -357,7 +416,10 @@ static bool returnMsgShown;
 // outside that scope.
 static u8 moveSpeedDebug;
 static GameState gameState;
-static u8 sizePresetIndex = SIZE_PRESET_DEFAULT;
+static u8 sizePresetIndex = DEBUG_FIRST_PLANET ? DEBUG_FIRST_PLANET : SIZE_PRESET_DEFAULT;
+
+static void invalidateHudLines(void); // defined with the HUD drawing below
+static u16 plantCacheSlot(u8 planet, u8 col, u8 row); // defined with loadRoom below
 
 // Planet progression (user request: "haz que cargue solo en el buffer los
 // 3 primeros mundos. Los 3 grandes estan bloqueados, se desbloquean con
@@ -434,8 +496,22 @@ typedef struct
     bool enemyDead[MAX_MAP_ROWS][MAX_MAP_COLS];
     u16 plantsTotal;
     bool plantsTotalKnown;
+    // How many letters this planet's map COULD actually place. itemCount
+    // starts at sizePresets[].letters but GuideMap_generate lowers it when
+    // the map has fewer dead-end rooms than that, and with shaped maps
+    // that happens for real. Completion compared against the preset
+    // constant instead, so such a planet could never be finished and the
+    // unlock percentage stalled with it. 0 = not generated yet.
+    u8 lettersActual;
 } PresetSave;
 static PresetSave presetSave[SIZE_PRESET_COUNT];
+
+// The letter target to judge planet i by: what its map really placed,
+// falling back to the preset until that is known.
+static u8 lettersFor(u8 i)
+{
+    return presetSave[i].lettersActual ? presetSave[i].lettersActual : sizePresets[i].letters;
+}
 
 // Deterministic per-room seed (spec §5): same (col,row) under the same
 // mapSeed always yields the same roomSeed, so Maze_generateRoom's layout
@@ -678,7 +754,7 @@ static bool planetUnlockProgress(u16 *outPercent, u16 *outMissing)
             return FALSE; // uncharted: no denominator, no answer
 
         got = (u16) (got + presetSave[i].plantsCollected + presetSave[i].collectedCount);
-        total = (u16) (total + presetSave[i].plantsTotal + sizePresets[i].letters);
+        total = (u16) (total + presetSave[i].plantsTotal + lettersFor(i));
     }
 
     *outPercent = total ? (u16) (((u32) got * 100) / total) : 0;
@@ -723,9 +799,12 @@ static u16 scanPlanetPlantTotal(u8 presetIndex)
     // Before GuideMap_generate(): the door offsets it picks depend on
     // this planet's room footprint (Maze_doorOffsetRange), and every
     // room generated afterwards is carved at this size.
-    Maze_setRoomShape(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
-                      sizePresets[presetIndex].shape);
+    Maze_setRoomSize(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
+                     sizePresets[presetIndex].variety);
+    GuideMap_setShape(sizePresets[presetIndex].map, sizePresets[presetIndex].cols,
+                      sizePresets[presetIndex].rows);
     GuideMap_generate();
+    presetSave[presetIndex].lettersActual = itemCount; // generate may have lowered it
     Maze_setActiveMapSlot(presetIndex);
     Maze_clearRoomCache(); // fresh bank (boot time: always empty anyway) -- defensive, cheap
 
@@ -756,6 +835,9 @@ static u16 scanPlanetPlantTotal(u8 presetIndex)
             Maze_generateRoom(doorN, doorE, doorS, doorW, doorN, doorE, doorS, doorW,
                                doorOffsets, seed, (u8) ((row * MAX_MAP_COLS) + col));
             Plants_spawnForRoom(seed);
+            // Keep what this pass already computed instead of throwing it
+            // away: that is what spares the room its first-visit flood.
+            Plants_cacheCurrentRoom(plantCacheSlot(presetIndex, col, row));
             total += Plants_lastRoomCount();
         }
     }
@@ -906,9 +988,12 @@ static void introSetUpPlanet(u8 presetIndex)
     // Before GuideMap_generate(): the door offsets it picks depend on
     // this planet's room footprint (Maze_doorOffsetRange), and every
     // room generated afterwards is carved at this size.
-    Maze_setRoomShape(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
-                      sizePresets[presetIndex].shape);
+    Maze_setRoomSize(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
+                     sizePresets[presetIndex].variety);
+    GuideMap_setShape(sizePresets[presetIndex].map, sizePresets[presetIndex].cols,
+                      sizePresets[presetIndex].rows);
     GuideMap_generate();
+    presetSave[presetIndex].lettersActual = itemCount; // generate may have lowered it
     Maze_setActiveMapSlot(presetIndex);
     Maze_clearRoomCache();
     introRoomCursor = 0;
@@ -948,7 +1033,7 @@ static void beginCartography(u8 firstPlanet, u8 limit, bool showGalaxy)
 
 static void introBegin(void)
 {
-    beginCartography(0, PLANETS_AT_START, TRUE);
+    beginCartography(DEBUG_FIRST_PLANET, PLANETS_AT_START, TRUE);
 }
 
 // Processes exactly one cell of introPlanetIndex's grid (a real room, or
@@ -999,6 +1084,7 @@ static bool introTick(void)
             Maze_generateRoom(doorN, doorE, doorS, doorW, doorN, doorE, doorS, doorW,
                                doorOffsets, seed, (u8) ((row * MAX_MAP_COLS) + col));
             Plants_spawnForRoom(seed);
+            Plants_cacheCurrentRoom(plantCacheSlot(introPlanetIndex, col, row)); // same reason as the scan above
             roomPlants = Plants_lastRoomCount();
             introPlanetTotal = (u16) (introPlanetTotal + roomPlants);
 
@@ -1053,6 +1139,7 @@ static void introFloodReset(void)
     introFloodRng = 2463534242u; // nonzero -- xorshift's one hard requirement
     introFloodCursor = 0;
     VDP_clearPlane(BG_B, TRUE);
+    invalidateHudLines();
 }
 
 // Call once per frame while STATE_INTRO is generating, alongside
@@ -1224,6 +1311,61 @@ static void applyRoomDoorLocks(u8 col, u8 row)
     Plants_drawInRoom(col, row);
 }
 
+// Plant-cache slots (plants.h): one per real room, per planet, packed so
+// that only cells the planet's map shape actually fills take space. The
+// cache is filled during the cartography screen -- the pass that already
+// generates every room and used to throw the plant lines away -- so by
+// the time a room is walked into, its line is already known and the
+// expensive part of a first visit (maze.c's computePlantSafe flood,
+// measured at ~100% of what a first visit costs) never runs during play.
+//
+// Base is the running total of rooms in the planets before this one.
+// Computed once at boot, from the same ASCII map table the generator
+// uses, so the two can never disagree.
+static u16 planetSlotBase[SIZE_PRESET_COUNT];
+static u16 planetSlotTotal;
+
+static void initPlantCacheSlots(void)
+{
+    u8 p;
+
+    planetSlotTotal = 0;
+    for (p = 0; p < SIZE_PRESET_COUNT; p++)
+    {
+        u8 col, row;
+
+        planetSlotBase[p] = planetSlotTotal;
+        for (row = 0; row < sizePresets[p].rows; row++)
+            for (col = 0; col < sizePresets[p].cols; col++)
+                if (sizePresets[p].map[row][col] == '#')
+                    planetSlotTotal++;
+    }
+}
+
+// PLANTS_CACHE_SLOTS if this cell is not a room (or the table outgrew the
+// cache) -- plants.c treats that as "no slot" and falls back to spawning
+// the line on the spot, which is exactly the old behaviour.
+static u16 plantCacheSlot(u8 planet, u8 col, u8 row)
+{
+    const char *const *map = sizePresets[planet].map;
+    u16 slot = planetSlotBase[planet];
+    u8 c, r;
+
+    if ((row >= sizePresets[planet].rows) || (col >= sizePresets[planet].cols) ||
+        (map[row][col] != '#') || (planetSlotTotal > PLANTS_CACHE_SLOTS))
+        return PLANTS_CACHE_SLOTS;
+
+    for (r = 0; r < row; r++)
+        for (c = 0; c < sizePresets[planet].cols; c++)
+            if (map[r][c] == '#')
+                slot++;
+    for (c = 0; c < col; c++)
+        if (map[row][c] == '#')
+            slot++;
+
+    return slot;
+}
+
 static void loadRoom(u8 col, u8 row)
 {
     const u16 seed = roomSeedFor(col, row);
@@ -1279,12 +1421,12 @@ static void loadRoom(u8 col, u8 row)
     // applyRoomDoorLocks' own generation is the only one left. It replays
     // the same cached attempt either way (maze.h), so the grid it
     // produces is identical.
-    if (!Plants_loadCachedRoom(col, row))
+    if (!Plants_loadCachedRoom(plantCacheSlot(sizePresetIndex, col, row)))
     {
         Maze_generateRoom(doorN, doorE, doorS, doorW, doorN, doorE, doorS, doorW, doorOffsets, seed,
                            (u8) ((row * MAX_MAP_COLS) + col));
         Plants_spawnForRoom(seed); // spec §48 -- own line per room, same roomSeed as the layout itself
-        Plants_cacheCurrentRoom(col, row); // never again for this room, this run
+        Plants_cacheCurrentRoom(plantCacheSlot(sizePresetIndex, col, row)); // never again for this room, this session
     }
 
     applyRoomDoorLocks(col, row); // final generate + draw (Maze_draw/Items_drawInRoom/Plants_drawInRoom), see its own doc comment
@@ -1346,7 +1488,8 @@ static void enterRoomFrom(u8 exitDir)
 
 static void newGame(void)
 {
-    PresetSave save;
+    static PresetSave save; // ~254 bytes kept off the stack, see tomboTooEasy
+
 
     mapViewOpen = FALSE;
 
@@ -1379,9 +1522,12 @@ static void newGame(void)
     // Before GuideMap_generate(): the door offsets it picks depend on
     // this planet's room footprint (Maze_doorOffsetRange), and every
     // room generated afterwards is carved at this size.
-    Maze_setRoomShape(sizePresets[sizePresetIndex].roomW, sizePresets[sizePresetIndex].roomH,
-                      sizePresets[sizePresetIndex].shape);
+    Maze_setRoomSize(sizePresets[sizePresetIndex].roomW, sizePresets[sizePresetIndex].roomH,
+                     sizePresets[sizePresetIndex].variety);
+    GuideMap_setShape(sizePresets[sizePresetIndex].map, sizePresets[sizePresetIndex].cols,
+                      sizePresets[sizePresetIndex].rows);
     GuideMap_generate();
+    presetSave[sizePresetIndex].lettersActual = itemCount; // generate may have lowered it
     // Switches to THIS planet's own room-attempt-cache bank (spec §52) --
     // already fully populated by ensurePlantsTotalKnown()'s scan above
     // (first entry, or an earlier menu browse) or an earlier real entry
@@ -1492,7 +1638,7 @@ static void drawMenu(void)
 {
     char buf[40]; // a full screen line: the longest sprintf here is the locked planet's "RECOGE n OBJETOS MAS PARA ABRIRLO"
     int len;
-    const u8 letters = sizePresets[sizePresetIndex].letters;
+    const u8 letters = lettersFor(sizePresetIndex);
     // Saved progress for the selected planet (spec §35) -- 0 only when
     // it has never been played at all. A finished planet's save keeps
     // collectedCount == letters (spec §38 fix), so it correctly reads as
@@ -1711,7 +1857,7 @@ static void planetCompletedFlags(bool *out)
     u8 i;
 
     for (i = 0; i < SIZE_PRESET_COUNT; i++)
-        out[i] = presetSave[i].hasSave && (presetSave[i].collectedCount >= sizePresets[i].letters);
+        out[i] = presetSave[i].hasSave && (presetSave[i].collectedCount >= lettersFor(i));
 }
 
 static void resetToMenu(void)
@@ -1762,7 +1908,8 @@ static void resetToMenu(void)
     // -- clear them so a reset mid-game doesn't leave either lingering
     // over the menu (BG_A's own VDP_clearPlane in drawMenu() below only
     // touches BG_A, a separate plane).
-    VDP_clearTextLineBG(BG_B, 0); // drawRoomIdHud's line (the FPS counter redraws itself next frame)
+    VDP_clearTextLineBG(BG_B, 0); // drawRoomIdHud's line, and the FPS counter shares it
+    invalidateHudLines();
     VDP_clearTextLineBG(BG_B, 1);
     VDP_clearTextLineBG(BG_B, INSERT_STATUS_ROW);
     VDP_clearTextLineBG(BG_B, RETURN_MSG_ROW); // the "go back" hint, same deal
@@ -2662,6 +2809,7 @@ static void enterSweep(void)
 
     VDP_clearPlane(BG_A, TRUE);
     VDP_clearPlane(BG_B, TRUE);
+    invalidateHudLines();
     VDP_drawText("BARRIDO DE RUTAS", 12, 2);
     VDP_drawText("PLANTAS QUE ALGUNA ENTRADA NO ALCANZA", 2, 3);
 }
@@ -2836,13 +2984,34 @@ static void updateSweep(u16 state, u16 prevState)
         sweepStep();
 }
 
+// Both BG_B status lines below are rebuilt only when what they SAY
+// changes, not every frame. They used to run a sprintf and a 31-glyph
+// VDP_drawTextBG on every single frame of play, for text that only ever
+// changes when the player crosses a door (the room line) or once a
+// second (the FPS counter) -- on a 68000 an sprintf with nine
+// conversions is thousands of cycles, and the glyphs are poked through
+// the VDP port one word at a time while the display is active. Set this
+// wherever something else wipes those lines, so the next frame puts them
+// back.
+static bool hudLinesDirty = TRUE;
+
+static void invalidateHudLines(void)
+{
+    hudLinesDirty = TRUE;
+}
+
 static void drawRoomIdHud(void)
 {
+    static char prev[40];
+    static bool prevValid = FALSE;
     char buf[40];
     int len;
 
-    if (gameState != STATE_PLAYING)
+    if (!debugInfoOn || (gameState != STATE_PLAYING))
+    {
+        prevValid = FALSE; // nothing of ours is on screen any more
         return;
+    }
 
     if (inInsertRoom)
         len = sprintf(buf, "P%d M:%04X INS", sizePresetIndex, mapSeed);
@@ -2859,6 +3028,12 @@ static void drawRoomIdHud(void)
     while (len < 31)
         buf[len++] = ' ';
     buf[len] = '\0';
+
+    if (prevValid && !hudLinesDirty && !strcmp(buf, prev))
+        return; // same text already on screen
+
+    strcpy(prev, buf);
+    prevValid = TRUE;
 
     VDP_setTextPriority(1);
     VDP_drawTextBG(BG_B, buf, 0, 0);
@@ -2946,6 +3121,15 @@ static void updateDebugCombo(u16 state, u16 prevState)
         if (!hitboxDebugOn)
             clearHitboxMarks(); // drawCollisionGizmos() (per-frame, STATE_PLAYING only) won't run again to do it itself
     }
+
+    if (((state & DEBUG_INFO_COMBO) == DEBUG_INFO_COMBO) && ((prevState & DEBUG_INFO_COMBO) != DEBUG_INFO_COMBO))
+    {
+        debugInfoOn = !debugInfoOn;
+        if (debugInfoOn)
+            invalidateHudLines(); // both readouts share row 0: put them straight back
+        else
+            VDP_clearTextLineBG(BG_B, 0); // neither will run again to clear itself
+    }
 }
 
 // The debug panel itself (user request: "quiero que hagas un display
@@ -3029,7 +3213,14 @@ int main(bool hardReset)
     u16 prevState = 0;
 
     VDP_setPlaneSize(64, 32, TRUE);
+    // Our own font, over the one SGDK loaded during its own VDP init:
+    // same 96 tiles at the same TILE_FONT_INDEX, so every VDP_drawText in
+    // the game picks it up with nothing else to change. Must happen
+    // before anything draws text.
+    VDP_loadFont(&gameFont, DMA);
+
     SPR_init();
+    initPlantCacheSlots(); // before any cartography pass fills the cache
 
     Maze_loadGraphics();
     GuideMap_loadGraphics();
@@ -3094,6 +3285,7 @@ int main(bool hardReset)
                 {
                     fadeToBackdrop(); // the menu is built below, behind the black
                     VDP_clearPlane(BG_B, TRUE); // BG_B is HUD/debug territory during real play
+                    invalidateHudLines();
                     introGenerating = FALSE;
                     gameState = STATE_MENU;
                     Menu_setVisible(TRUE);
@@ -3168,12 +3360,12 @@ int main(bool hardReset)
             // a locked one refuses is A, down below, not the cursor.
             if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
             {
-                sizePresetIndex = (u8) ((sizePresetIndex + SIZE_PRESET_COUNT - 1) % SIZE_PRESET_COUNT);
+                sizePresetIndex = (u8) (DEBUG_FIRST_PLANET + ((sizePresetIndex - DEBUG_FIRST_PLANET + PLANET_SEL_COUNT - 1) % PLANET_SEL_COUNT));
                 drawMenu(); // an unmapped planet is handled above, by the cartography screen
             }
             if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
             {
-                sizePresetIndex = (u8) ((sizePresetIndex + 1) % SIZE_PRESET_COUNT);
+                sizePresetIndex = (u8) (DEBUG_FIRST_PLANET + ((sizePresetIndex - DEBUG_FIRST_PLANET + 1) % PLANET_SEL_COUNT));
                 drawMenu(); // an unmapped planet is handled above, by the cartography screen
             }
             if ((state & BUTTON_A) && !(prevState & BUTTON_A) && (sizePresetIndex < unlockedPlanets))
@@ -3843,15 +4035,29 @@ int main(bool hardReset)
         // exactly once per frame (its own doc comment) -- this is that
         // one call, unconditional regardless of gameState.
         {
-            char buf[8];
-            int len = sprintf(buf, "FPS%lu", SYS_getFPS());
+            // SYS_getFPS() still runs every frame (its own doc comment
+            // requires exactly one call per frame); only the sprintf and
+            // the glyph poking are skipped while the number is unchanged,
+            // which it is for ~59 frames out of 60.
+            const u32 fps = SYS_getFPS();
+            static u32 prevFps = 0xFFFFFFFF;
 
-            VDP_setTextPriority(1);
-            VDP_drawTextBG(BG_B, buf, 40 - len - 1, 0);
-            VDP_setTextPriority(0);
+            if (!debugInfoOn)
+                prevFps = 0xFFFFFFFF; // so it redraws the moment DATOS comes back on
+            else if ((fps != prevFps) || hudLinesDirty)
+            {
+                char buf[8];
+                int len = sprintf(buf, "FPS%lu", fps);
+
+                prevFps = fps;
+                VDP_setTextPriority(1);
+                VDP_drawTextBG(BG_B, buf, 40 - len - 1, 0);
+                VDP_setTextPriority(0);
+            }
         }
 
         drawRoomIdHud(); // always-on room identity line, STATE_PLAYING only
+        hudLinesDirty = FALSE; // both readers above have had their frame
         drawDebugView(); // no-op unless the debug combo turned it on
         drawCollisionGizmos(); // no-op unless HITBOX is on and gameState is STATE_PLAYING
         drawPlantPath(); // no-op unless PLANTA is on and gameState is STATE_PLAYING

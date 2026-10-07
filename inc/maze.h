@@ -32,7 +32,7 @@
 //
 // MAZE_W/MAZE_H are now the MAXIMUM a room can be (40x24 = the full
 // screen below the HUD), and only ever dimension the static grids.
-// The size a room actually IS comes from Maze_setRoomShape() below and
+// The size a room actually IS comes from Maze_setRoomSize() below and
 // is read back with Maze_roomW()/Maze_roomH() -- inside maze.c itself
 // MAZE_W/MAZE_H are redefined to those runtime values, see the top of
 // that file.
@@ -94,37 +94,25 @@ u8 Maze_hubY(void);
 #define MAZE_DOOR_COL ((s16) Maze_hubX())
 #define MAZE_DOOR_ROW ((s16) Maze_hubY())
 
-// Room footprint (user request: "me gustaria probar con distintas
-// geometrias, no solo cuadrado, sino rectangular o con forma de
-// tetromino, como haciendo una L"). A shape is always the room's
-// bounding box (roomW x roomH) MINUS one or two cut-out rectangles, and
-// every cut is placed so it never swallows a whole side of the box --
-// otherwise a door could have nowhere to sit. Cells inside the box but
-// outside the shape are permanent wall: the generator never opens them,
-// and the slide validator therefore handles the shape with no special
-// casing at all (it only ever asks Maze_isWall).
-#define MAZE_SHAPE_RECT  0 // the plain box, what every room was until now
-#define MAZE_SHAPE_L     1 // one corner cut away
-#define MAZE_SHAPE_T     2 // both bottom corners cut
-#define MAZE_SHAPE_S     3 // opposite corners cut, diagonally
-#define MAZE_SHAPE_PLUS  4 // all four corners cut
-#define MAZE_SHAPE_O     5 // a solid block in the middle, box intact
-#define MAZE_SHAPE_COUNT 6
+// Room footprint. Every room rolls its OWN shape when it generates --
+// a random set of cuts out of its bounding box: corners, bites out of a
+// side, solid islands in the middle (user request: "quiero que sean
+// mucho mas aleatorias y distintas"; it used to be one fixed shape per
+// planet, picked from a 6-entry enum). Cells inside the box but outside
+// the shape are permanent wall, which is all the slide validator ever
+// needs to know -- it only asks Maze_isWall, so a shaped room needs no
+// special casing anywhere.
+//
+// The shape is rolled from the generation ATTEMPT's seed, so one that
+// turns out unplayable is rejected and re-rolled like any bad layout,
+// and the accepted attempt reproduces it exactly on re-entry. It never
+// cuts the lane behind an active door or the hub, which is what lets
+// each room be shaped independently of its neighbours: guidemap decides
+// a door's position first and the shape works around it.
+//
+// variety is how many cuts a room may roll (0 = always a plain box).
+void Maze_setRoomSize(u8 w, u8 h, u8 variety);
 
-// Sets the footprint every room generated from here on uses. Call once
-// per planet, BEFORE generating any of its rooms -- it is what makes a
-// bigger planet's rooms bigger. w/h are clamped to MAZE_MAX_W/MAZE_MAX_H
-// and to the minimum a room can be and still hold a puzzle. The shape is
-// per-planet, not per-room, on purpose: two rooms that share a door must
-// agree on where along the border that door sits (see
-// Maze_doorOffsetRange), and that is only guaranteed when both have the
-// same footprint.
-void Maze_setRoomShape(u8 w, u8 h, u8 shape);
-
-// Where the room's top-left cell lands on screen, in pixels. A room
-// smaller than the full 40x24 is centred in the play area rather than
-// pinned to a corner; the Y value already includes the HUD band
-// (MAZE_ORIGIN_PX). Every cell -> screen conversion adds these.
 s16 Maze_originPxX(void);
 s16 Maze_originPxY(void);
 // Same two, in 8px VDP tile/text units, for VDP_drawText call sites.

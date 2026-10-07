@@ -39,9 +39,25 @@ static bool inBounds(s16 col, s16 row)
     return (col >= 0) && (col < mapCols) && (row >= 0) && (row < mapRows);
 }
 
+// Which cells of the bounding box this planet's map is allowed to use
+// (user request: los mapas no tienen por que ser rectangulos). All TRUE
+// unless GuideMap_setShape says otherwise.
+static bool mapAllowed[MAX_MAP_ROWS][MAX_MAP_COLS];
+static bool mapShapeSet = FALSE; // until set, allowed() ignores mapAllowed entirely
+
+static bool allowed(s16 col, s16 row)
+{
+    return !mapShapeSet || mapAllowed[row][col];
+}
+
+// The one chokepoint for "can this cell become a room": carveTree only
+// ever claims cells through here, so masking it is all a shaped map
+// needs -- Prim's fills the shape instead of the box and every later
+// stage already copes with CELL_EMPTY cells mid-map (pruneLeaves has
+// been making them for other reasons all along).
 static bool isEmpty(s16 col, s16 row)
 {
-    return inBounds(col, row) && (guideMap[row][col].type == CELL_EMPTY);
+    return inBounds(col, row) && allowed(col, row) && (guideMap[row][col].type == CELL_EMPTY);
 }
 
 static bool isRoom(s16 col, s16 row)
@@ -145,6 +161,23 @@ static void openDoor(u8 col, u8 row, u8 dir)
     setDoorBit((u8) ncol, (u8) nrow, opposite(dir), TRUE);
     setDoorOffset(col, row, dir, offset);
     setDoorOffset((u8) ncol, (u8) nrow, opposite(dir), offset);
+}
+
+// rows[] is the map drawn in ASCII, one string per row, '#' = a room may
+// live here and anything else = never. cols/rowCount must match the
+// strings. Call before GuideMap_generate(); pass NULL for a full
+// rectangle.
+void GuideMap_setShape(const char *const *rows, u8 cols, u8 rowCount)
+{
+    s16 col, row;
+
+    mapShapeSet = (rows != NULL);
+    if (!mapShapeSet)
+        return;
+
+    for (row = 0; row < MAX_MAP_ROWS; row++)
+        for (col = 0; col < MAX_MAP_COLS; col++)
+            mapAllowed[row][col] = (row < rowCount) && (col < cols) && (rows[row][col] == '#');
 }
 
 static void clearMap(void)
@@ -619,10 +652,14 @@ static void selectInsertionLink(void)
             if (!pathToAScratch[row][col])
                 continue;
 
-            if (row == 0)           { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_N; candidateCount++; }
-            if (row == mapRows - 1) { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_S; candidateCount++; }
-            if (col == 0)           { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_W; candidateCount++; }
-            if (col == mapCols - 1) { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_E; candidateCount++; }
+            // Outward-facing side = the neighbour is not a room. On a
+            // rectangular map that is exactly the old border test; on a
+            // shaped one it also catches the shape's own edges, which sit
+            // inside the bounding box.
+            if (!isRoom(col, row - 1)) { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_N; candidateCount++; }
+            if (!isRoom(col, row + 1)) { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_S; candidateCount++; }
+            if (!isRoom(col - 1, row)) { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_W; candidateCount++; }
+            if (!isRoom(col + 1, row)) { candidates[candidateCount].col = (u8) col; candidates[candidateCount].row = (u8) row; candidates[candidateCount].dir = DOOR_E; candidateCount++; }
         }
     }
 
@@ -688,8 +725,35 @@ void GuideMap_generate(void)
 {
     clearMap();
 
-    startCol = random() % mapCols;
-    startRow = random() % mapRows;
+    // Pick among the cells the shape actually allows, not anywhere in the
+    // bounding box -- a start outside the shape would leave carveTree with
+    // an empty frontier and no map at all.
+    {
+        s16 col, row;
+        u16 n = 0;
+
+        for (row = 0; row < mapRows; row++)
+            for (col = 0; col < mapCols; col++)
+                if (allowed(col, row))
+                    n++;
+
+        if (n == 0) // a shape with nothing in it: fall back to the whole box
+        {
+            mapShapeSet = FALSE;
+            n = (u16) (mapCols * mapRows);
+        }
+
+        n = random() % n;
+        startCol = 0;
+        startRow = 0;
+        for (row = 0; row < mapRows; row++)
+            for (col = 0; col < mapCols; col++)
+                if (allowed(col, row) && (n-- == 0))
+                {
+                    startCol = (u8) col;
+                    startRow = (u8) row;
+                }
+    }
 
     carveTree();
     pruneLeaves();

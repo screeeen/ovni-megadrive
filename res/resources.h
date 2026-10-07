@@ -15,6 +15,7 @@ extern const u8 enemyKill[3072];
 extern const u8 letterPickup[2560];
 extern const TileSet mazeTiles;
 extern const TileSet mapTiles;
+extern const TileSet gameFont;
 extern const SpriteDefinition playerShip;
 extern const SpriteDefinition enemyShip;
 extern const SpriteDefinition mapShip;

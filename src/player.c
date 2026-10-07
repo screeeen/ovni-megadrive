@@ -108,8 +108,15 @@ static bool inDoorSpan(s16 px, s16 tile)
 // per visual frame WITHOUT changing any of the actual collision/exit
 // math -- each repetition is byte-for-byte the same check a speed-1 game
 // would have done on its own separate frame, just compressed into one.
+// lastX/lastY are the room's own far edge in pixels. They are passed in
+// rather than read here because MAZE_W/MAZE_H are calls into maze.c now
+// that a room's size varies per planet, and this runs once per 1px
+// sub-step -- up to 13 times a frame, each of them re-asking maze.c for
+// a number that cannot change mid-frame. The build drops -flto at link
+// time (see the Makefile), so nothing was going to inline those away.
 static u8 updateRoomStep(Player *p, bool doorN, bool doorE, bool doorS, bool doorW,
-                          u8 doorOffsetN, u8 doorOffsetE, u8 doorOffsetS, u8 doorOffsetW)
+                          u8 doorOffsetN, u8 doorOffsetE, u8 doorOffsetS, u8 doorOffsetW,
+                          s16 lastX, s16 lastY)
 {
     switch (p->dir)
     {
@@ -118,7 +125,7 @@ static u8 updateRoomStep(Player *p, bool doorN, bool doorE, bool doorS, bool doo
                 return EXIT_NORTH;
             break;
         case DIR_DOWN:
-            if (doorS && (p->y >= MAZE_TILE_PX * (MAZE_H - 1)) && inDoorSpan(p->x, doorOffsetS))
+            if (doorS && (p->y >= lastY) && inDoorSpan(p->x, doorOffsetS))
                 return EXIT_SOUTH;
             break;
         case DIR_LEFT:
@@ -126,7 +133,7 @@ static u8 updateRoomStep(Player *p, bool doorN, bool doorE, bool doorS, bool doo
                 return EXIT_WEST;
             break;
         case DIR_RIGHT:
-            if (doorE && (p->x >= MAZE_TILE_PX * (MAZE_W - 1)) && inDoorSpan(p->y, doorOffsetE))
+            if (doorE && (p->x >= lastX) && inDoorSpan(p->y, doorOffsetE))
                 return EXIT_EAST;
             break;
         default: // DIR_NONE -- nothing held, can't exit
@@ -152,12 +159,16 @@ static u8 updateRoomStep(Player *p, bool doorN, bool doorE, bool doorS, bool doo
 u8 Player_updateRoom(Player *p, u8 speed, bool doorN, bool doorE, bool doorS, bool doorW,
                       u8 doorOffsetN, u8 doorOffsetE, u8 doorOffsetS, u8 doorOffsetW)
 {
+    // Read once per frame, not once per sub-step: see updateRoomStep.
+    const s16 lastX = (s16) (MAZE_TILE_PX * (MAZE_W - 1));
+    const s16 lastY = (s16) (MAZE_TILE_PX * (MAZE_H - 1));
     u8 i;
 
     for (i = 0; i < speed; i++)
     {
         const u8 exitDir = updateRoomStep(p, doorN, doorE, doorS, doorW,
-                                           doorOffsetN, doorOffsetE, doorOffsetS, doorOffsetW);
+                                           doorOffsetN, doorOffsetE, doorOffsetS, doorOffsetW,
+                                           lastX, lastY);
 
         if (exitDir != EXIT_NONE)
             return exitDir;

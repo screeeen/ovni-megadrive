@@ -1,5 +1,11 @@
 TILESET mazeTiles "sprite/maze_tiles.png" NONE NONE ROW
 TILESET mapTiles "sprite/map_tiles.png" NONE NONE ROW
+# La fuente del juego: 128x48 px = 16 columnas x 6 filas de caracteres de
+# 8x8, en orden ASCII desde el espacio (0x20). Dos colores: indice 0 el
+# fondo, indice 1 la tinta. Sustituye a la de SGDK en VRAM, asi que no
+# ocupa ni un tile extra. NONE (sin comprimir) a proposito: una tileset
+# comprimida se descomprime en el heap al cargarla, y de heap vamos justos.
+TILESET gameFont "sprite/font.png" NONE NONE ROW
 SPRITE playerShip "sprite/player.png" 1 1 BEST
 SPRITE enemyShip "sprite/enemy.png" 1 1 BEST
 SPRITE mapShip "sprite/map_ship.png" 1 1 BEST

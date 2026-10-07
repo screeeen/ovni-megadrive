@@ -14,7 +14,7 @@ _Static_assert((1 << MAZE_TILE_SHIFT) == MAZE_TILE_PX,
 
 static u8 roomW = MAZE_MAX_W;
 static u8 roomH = MAZE_MAX_H;
-static u8 roomShape = MAZE_SHAPE_RECT;
+static u8 shapeVariety = 2; // how many cuts a room may roll, 0 = plain box
 
 #undef MAZE_W
 #undef MAZE_H
@@ -22,12 +22,23 @@ static u8 roomShape = MAZE_SHAPE_RECT;
 #define MAZE_H ((s16) roomH)
 
 // Cells inside the bounding box but outside the room's shape (see
-// maze.h's MAZE_SHAPE_*). Permanent wall: tomboMark() refuses to open
+// maze.h's Maze_setRoomSize). Permanent wall: tomboMark() refuses to open
 // one and Maze_isWall() reports it as wall, which is the whole of what
 // makes a non-rectangular room work -- the generator scatters obstacles
 // and the validator simulates slides exactly as before, they just find
-// the cut-out is solid. All FALSE for MAZE_SHAPE_RECT.
+// the cut-out is solid. All FALSE for a room that rolled no cuts.
 static bool outsideShape[MAZE_MAX_H][MAZE_MAX_W];
+
+// Of those cut cells, the ones that touch the room: its silhouette.
+// Only these are DRAWN as wall -- everything deeper in the cut is left
+// as empty backdrop (user request: "las zonas de bloque muros no las
+// pintes... quedara la habitacion con esa forma"). Collision is
+// unaffected: every cut cell is solid either way, this only decides what
+// the player sees. The outline is not optional, because the floor tile
+// and the backdrop are both palette index 0 (MAZE_BG_COLOR) -- with the
+// cut drawn fully empty the room's edge would be invisible and the ship
+// would stop against nothing.
+static bool shapeEdge[MAZE_MAX_H][MAZE_MAX_W];
 
 // mazeTiles.png is an 80x8 source image: 10 logical 8x8 cells in a row
 // -- cell 0 = floor; cells 1-9 = the dither wall variants from ovni's
@@ -135,6 +146,7 @@ static void anchorForDoor(u8 dir, u8 offset, s16 *outX, s16 *outY)
 // else the generator does, so it's guaranteed explicitly here instead --
 // a no-op on N/W, which never had a gap to begin with.
 static void tomboMark(s16 x, s16 y); // defined below, respects the room's shape
+static void buildRandomShape(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY); // defined below
 
 static void connectAnchorToBorder(u8 dir, s16 ax, s16 ay)
 {
@@ -270,12 +282,12 @@ static void tomboResetDebugGraph(void);
 // alone would cost 20KB of the Mega Drive's 64KB and leave too little
 // for the heap. It is a reservation, not a measurement: over 6000
 // generated 40x24 rooms (every door mask, 400 seeds each) the real count
-// averaged 110 and PEAKED AT 183, because a stop only ever happens next
+// averaged 110 and PEAKED AT 191, because a stop only ever happens next
 // to a wall and a tombo room is ~10% walls by design. 320 is that peak
 // with 1.7x headroom, and overflowing it is already handled -- slideNode()
 // refuses past this and the room is rejected rather than half-checked, so
 // the cap can only ever cost a re-roll, never a bad room.
-#define SLIDE_MAX_NODES 320
+#define SLIDE_MAX_NODES 224
 #define SLIDE_NO_MOVE   (-1) // wall right ahead, the slide doesn't go anywhere
 #define SLIDE_EXIT      (-2) // the slide runs out through a door
 
@@ -644,13 +656,22 @@ static void crossedEntering(u8 e, u8 lane, u8 openMask)
 // carry the ship out of the room entirely.
 static void computePlantSafe(void)
 {
+    // The bookkeeping here used to cost more than the searches it
+    // brackets: up to 16 passes (4 doors x 2 configurations x 2 lanes),
+    // each clearing two full scratch grids and intersecting a third, all
+    // through 2D indexing -- at 40x24 that is ~46,000 indexed cell
+    // operations per room, and it runs on the first visit to every room.
+    // Same result, done with memset/memcpy and one flat walk instead: the
+    // grids are plain byte arrays, and cells outside the room are never
+    // set by a search, so sweeping the whole array is both correct and
+    // much cheaper than computing a row address per cell.
+    bool *const safe = &plantSafeCell[0][0];
+    const bool *const cross = &crossScratch[0][0];
+    const u16 cells = MAZE_MAX_W * MAZE_MAX_H;
     u8 e, lane, cfg;
-    s16 x, y;
     bool first = TRUE;
 
-    for (y = 0; y < MAZE_H; y++)
-        for (x = 0; x < MAZE_W; x++)
-            plantSafeCell[y][x] = FALSE;
+    memset(plantSafeCell, FALSE, sizeof(plantSafeCell));
 
     for (e = 0; e < 4; e++)
     {
@@ -666,17 +687,23 @@ static void computePlantSafe(void)
 
             for (lane = 0; lane < 2; lane++)
             {
-                for (y = 0; y < MAZE_H; y++)
-                    for (x = 0; x < MAZE_W; x++)
-                        crossScratch[y][x] = restScratch[y][x] = FALSE;
+                memset(crossScratch, FALSE, sizeof(crossScratch));
+                memset(restScratch, FALSE, sizeof(restScratch));
 
                 crossedEntering(e, lane, openMask);
 
-                for (y = 0; y < MAZE_H; y++)
-                    for (x = 0; x < MAZE_W; x++)
-                        plantSafeCell[y][x] = first ? crossScratch[y][x]
-                                                    : (plantSafeCell[y][x] && crossScratch[y][x]);
-                first = FALSE;
+                if (first)
+                {
+                    memcpy(plantSafeCell, crossScratch, sizeof(plantSafeCell));
+                    first = FALSE;
+                }
+                else
+                {
+                    u16 i;
+
+                    for (i = 0; i < cells; i++)
+                        safe[i] = safe[i] && cross[i];
+                }
             }
         }
     }
@@ -1249,15 +1276,28 @@ static bool tomboValidate(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, 
 #endif
 
 #define QUICK_MAX_NODES 48
-static u16 quickStamp[MAZE_MAX_H][MAZE_MAX_W];
-static u16 quickGen;
+// u8, not u16: 960 bytes saved on a Mega Drive whose heap had run out
+// (SGDK's own DMA buffer takes 8KB of it before main() even runs). The
+// price is that the generation counter wraps every 255 calls instead of
+// every 65535 -- which the code that bumps it already handles by
+// clearing the grid on wrap, so u8 just makes that path run more often.
+static u8 quickStamp[MAZE_MAX_H][MAZE_MAX_W];
+static u8 quickGen;
+
+// (the wrap itself is handled at the one place that bumps it, in
+// tomboTooEasy below: ++quickGen == 0 clears the grid and restarts at 1)
 
 static bool tomboTooEasy(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, bool spawnAtHub)
 {
     const s16 exitMin = puzzle->exitMin;
     const s16 hubMin = spawnAtHub ? 0 : puzzle->hubMin; // no letter in the insertion room
     const s16 maxDepth = ((exitMin > hubMin) ? exitMin : hubMin) - 2; // deepest node whose slides can still be too short
-    s16 qx[QUICK_MAX_NODES], qy[QUICK_MAX_NODES], qd[QUICK_MAX_NODES];
+    // static, not locals: 3 x 48 x 2 = 288 bytes that do not belong on a
+    // 2560-byte stack, and this sits near the bottom of the deepest call
+    // chain the game has (newGame -> loadRoom -> applyRoomDoorLocks ->
+    // Maze_generateRoom -> ... -> here). Not reentrant and never called
+    // from an interrupt, so one copy is all there ever is.
+    static s16 qx[QUICK_MAX_NODES], qy[QUICK_MAX_NODES], qd[QUICK_MAX_NODES];
     u8 e;
 
     for (e = 0; e < 4; e++)
@@ -1524,6 +1564,10 @@ static bool tomboTryOnce(u16 seed, s16 hubX, s16 hubY, u8 doorMask, const u8 doo
     u16 tries;
 
     setRandomSeed(seed);
+    // Before anything touches the grid: this attempt's own footprint.
+    // Drawing from the attempt seed is deliberate -- an unplayable shape
+    // is then just another rejected attempt.
+    buildRandomShape(doorMask, doorOff, hubX, hubY);
     fillWallsFixed(useFixedWall ? fixedWallVariant : 1); // cheap: variants are only rolled for the accepted room
     tomboResetDebugGraph();
 
@@ -1632,15 +1676,9 @@ u8 Maze_roomW(void) { return roomW; }
 u8 Maze_roomH(void) { return roomH; }
 
 // The room's hub: the letter's cell, what the generated graph is built
-// around and what the validator insists every route can cross. Normally
-// the room's own centre, as it always was.
-//
-// MAZE_SHAPE_O is the exception, and it is why this is a function at all:
-// its cut-out IS the centre, so a centred hub sits inside solid wall and
-// nothing can ever reach it -- every single room came back rejected
-// (measured: 100% fallback across all 5 sizes) until the hub moved out
-// onto the ring. It goes to the middle of the ring's top band, clamped
-// off the border row.
+// around and what the validator insists every route can cross. Always
+// the room's own centre -- buildRandomShape guards its 3x3 so no cut can
+// ever swallow it, which is why this needs no per-shape special case.
 u8 Maze_hubX(void)
 {
     return (u8) (roomW / 2);
@@ -1648,14 +1686,6 @@ u8 Maze_hubX(void)
 
 u8 Maze_hubY(void)
 {
-    if (roomShape == MAZE_SHAPE_O)
-    {
-        const s16 band = roomH / 3;
-        const s16 y = band / 2;
-
-        return (u8) ((y < 2) ? 2 : (y & ~1));
-    }
-
     return (u8) ((roomH / 2) & ~1);
 }
 
@@ -1675,13 +1705,8 @@ static void cutRect(s16 x0, s16 y0, s16 x1, s16 y1)
             outsideShape[y][x] = TRUE;
 }
 
-void Maze_setRoomShape(u8 w, u8 h, u8 shape)
+void Maze_setRoomSize(u8 w, u8 h, u8 variety)
 {
-    // A corner cut is a third of the box on each axis, which is deep
-    // enough to read as a tetromino and still leaves the middle third of
-    // every side free for a door (see Maze_doorOffsetRange).
-    s16 cw, ch;
-
     if (w > MAZE_MAX_W) w = MAZE_MAX_W;
     if (h > MAZE_MAX_H) h = MAZE_MAX_H;
     if (w < ROOM_MIN_W) w = ROOM_MIN_W;
@@ -1689,52 +1714,177 @@ void Maze_setRoomShape(u8 w, u8 h, u8 shape)
 
     roomW = w;
     roomH = h;
-    roomShape = (shape < MAZE_SHAPE_COUNT) ? shape : MAZE_SHAPE_RECT;
+    shapeVariety = variety;
+
+    // No shape until a room is actually generated: every room rolls its
+    // own (buildRandomShape below), so leaving this clear just means a
+    // plain box for anything that draws before the first generate.
+    memset(outsideShape, FALSE, sizeof(outsideShape));
+    memset(shapeEdge, FALSE, sizeof(shapeEdge));
+}
+
+// The cells a cut must never touch, or the room stops working: the lane
+// behind every ACTIVE door (its 2-cell span plus a cell either side, 3
+// deep from the border -- that is where anchorForDoor and
+// connectAnchorToBorder put the approach) and the hub's own 3x3, since
+// the letter lives there and the validator insists every route crosses
+// it. Guarding these is what lets each room roll its shape independently
+// of its neighbours: a door's position is decided first, by guidemap,
+// and the shape then works around it, so two rooms sharing a door never
+// have to agree on anything.
+static bool cellGuarded(s16 x, s16 y, u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
+{
+    u8 d;
+
+    if ((x >= hubX - 1) && (x <= hubX + 1) && (y >= hubY - 1) && (y <= hubY + 1))
+        return TRUE;
+
+    for (d = 0; d < 4; d++)
+    {
+        const s16 o = doorOff[d];
+
+        if (!(doorMask & (1 << d)))
+            continue;
+
+        switch (d)
+        {
+            case MAZE_DIR_N: if ((y <= 2) && (x >= o - 1) && (x <= o + 2)) return TRUE; break;
+            case MAZE_DIR_S: if ((y >= MAZE_H - 3) && (x >= o - 1) && (x <= o + 2)) return TRUE; break;
+            case MAZE_DIR_E: if ((x >= MAZE_W - 3) && (y >= o - 1) && (y <= o + 2)) return TRUE; break;
+            default:         if ((x <= 2) && (y >= o - 1) && (y <= o + 2)) return TRUE; break;
+        }
+    }
+
+    return FALSE;
+}
+
+// Applies the cut only if it clears every guard -- a refused cut is just
+// dropped, which costs this attempt some shape and nothing else.
+static void tryCut(s16 x0, s16 y0, s16 x1, s16 y1, u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
+{
+    s16 x, y;
+
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > MAZE_W - 1) x1 = MAZE_W - 1;
+    if (y1 > MAZE_H - 1) y1 = MAZE_H - 1;
+
+    for (y = y0; y <= y1; y++)
+        for (x = x0; x <= x1; x++)
+            if (cellGuarded(x, y, doorMask, doorOff, hubX, hubY))
+                return;
+
+    cutRect(x0, y0, x1, y1);
+}
+
+// Derives the silhouette (see shapeEdge's own comment) once the cuts are in.
+static void buildShapeEdge(void)
+{
+    s16 x, y, dx, dy;
+
+    memset(shapeEdge, FALSE, sizeof(shapeEdge));
+
+    for (y = 0; y < MAZE_H; y++)
+        for (x = 0; x < MAZE_W; x++)
+        {
+            if (!outsideShape[y][x])
+                continue;
+
+            for (dy = -1; dy <= 1; dy++)
+                for (dx = -1; dx <= 1; dx++)
+                {
+                    const s16 nx = x + dx, ny = y + dy;
+
+                    if ((nx < 0) || (ny < 0) || (nx >= MAZE_W) || (ny >= MAZE_H))
+                        continue;
+                    if (!outsideShape[ny][nx])
+                        shapeEdge[y][x] = TRUE;
+                }
+        }
+}
+
+// One room's own footprint, rolled fresh from whatever the RNG is sitting
+// on -- which is the generation ATTEMPT's seed, so a shape that turns out
+// unplayable is rejected and re-rolled exactly like a bad obstacle
+// layout, and the accepted attempt's code reproduces it byte for byte on
+// re-entry. Replaces the old fixed per-planet enum (user request: "quiero
+// que sean mucho mas aleatorias y distintas").
+static void buildRandomShape(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
+{
+    // Up to ~45% of each axis: a third barely reads once the guards have
+    // trimmed a cut, and the whole point is that two rooms should not
+    // look like the same box.
+    const s16 maxW = (MAZE_W * 9) / 20;
+    const s16 maxH = (MAZE_H * 9) / 20;
+    u8 cuts, i;
 
     memset(outsideShape, FALSE, sizeof(outsideShape));
 
-    cw = roomW / 3;
-    ch = roomH / 3;
-
-    switch (roomShape)
+    if (shapeVariety == 0) // this planet wants plain boxes
     {
-        case MAZE_SHAPE_L:    // top-right corner gone
-            cutRect(roomW - cw, 0, roomW - 1, ch - 1);
-            break;
-        case MAZE_SHAPE_T:    // both bottom corners gone
-            cutRect(0, roomH - ch, cw - 1, roomH - 1);
-            cutRect(roomW - cw, roomH - ch, roomW - 1, roomH - 1);
-            break;
-        case MAZE_SHAPE_S:    // top-left and bottom-right, diagonally
-            cutRect(0, 0, cw - 1, ch - 1);
-            cutRect(roomW - cw, roomH - ch, roomW - 1, roomH - 1);
-            break;
-        case MAZE_SHAPE_PLUS: // all four corners
-            cutRect(0, 0, cw - 1, ch - 1);
-            cutRect(roomW - cw, 0, roomW - 1, ch - 1);
-            cutRect(0, roomH - ch, cw - 1, roomH - 1);
-            cutRect(roomW - cw, roomH - ch, roomW - 1, roomH - 1);
-            break;
-        case MAZE_SHAPE_O:
-            // Solid block in the middle, every side of the box intact.
-            // The ring around it has to stay wide enough to hold a
-            // puzzle -- obstacles need a clear halo on every side, so a
-            // 3-cell ring leaves nowhere to put one and the room comes
-            // back rejected (measured: 58% fallback at 20x12 with a
-            // ring of roomH/3). 5 is where that goes away.
-            {
-                const s16 rw = (cw < 5) ? 5 : cw;
-                const s16 rh = (ch < 5) ? 5 : ch;
-
-                if ((roomW - (2 * rw) >= 2) && (roomH - (2 * rh) >= 2))
-                    cutRect(rw, rh, roomW - rw - 1, roomH - rh - 1);
-                // else: the room is too small to be a ring at all, so it
-                // stays a plain box rather than a box with a speck in it.
-            }
-            break;
-        default:              // MAZE_SHAPE_RECT: nothing cut
-            break;
+        memset(shapeEdge, FALSE, sizeof(shapeEdge));
+        return;
     }
+
+    cuts = (u8) (1 + (random() % shapeVariety)); // at least one, or the room is just a box
+
+    for (i = 0; i < cuts; i++)
+    {
+        const u8 kind = (u8) (random() % 10);
+        s16 cw = 3 + (random() % maxW);
+        s16 ch = 3 + (random() % maxH);
+
+        // Every span below feeds a modulo, so each one has to be proven
+        // positive first: a cut as deep as the room leaves zero room to
+        // slide it along, and `random() % 0` is a divide-by-zero
+        // exception on the 68000, i.e. a hang on real hardware.
+        if (cw > MAZE_W - 2) cw = MAZE_W - 2;
+        if (ch > MAZE_H - 2) ch = MAZE_H - 2;
+
+        if (kind < 5) // a corner, the tetromino look
+        {
+            switch (random() % 4)
+            {
+                case 0: tryCut(0, 0, cw - 1, ch - 1, doorMask, doorOff, hubX, hubY); break;
+                case 1: tryCut(MAZE_W - cw, 0, MAZE_W - 1, ch - 1, doorMask, doorOff, hubX, hubY); break;
+                case 2: tryCut(0, MAZE_H - ch, cw - 1, MAZE_H - 1, doorMask, doorOff, hubX, hubY); break;
+                default:tryCut(MAZE_W - cw, MAZE_H - ch, MAZE_W - 1, MAZE_H - 1, doorMask, doorOff, hubX, hubY); break;
+            }
+        }
+        else if (kind < 8) // a bite out of one side
+        {
+            const s16 spanX = MAZE_W - cw;
+            const s16 spanY = MAZE_H - ch;
+
+            if ((spanX <= 0) || (spanY <= 0))
+                continue;
+
+            switch (random() % 4)
+            {
+                case 0: { const s16 x = random() % spanX; tryCut(x, 0, x + cw - 1, ch - 1, doorMask, doorOff, hubX, hubY); break; }
+                case 1: { const s16 x = random() % spanX; tryCut(x, MAZE_H - ch, x + cw - 1, MAZE_H - 1, doorMask, doorOff, hubX, hubY); break; }
+                case 2: { const s16 y = random() % spanY; tryCut(0, y, cw - 1, y + ch - 1, doorMask, doorOff, hubX, hubY); break; }
+                default:{ const s16 y = random() % spanY; tryCut(MAZE_W - cw, y, MAZE_W - 1, y + ch - 1, doorMask, doorOff, hubX, hubY); break; }
+            }
+        }
+        else // a solid island, the old ring
+        {
+            const s16 spanX = MAZE_W - cw - 4;
+            const s16 spanY = MAZE_H - ch - 4;
+
+            if ((spanX <= 0) || (spanY <= 0))
+                continue;
+
+            {
+                const s16 x = 2 + (random() % spanX);
+                const s16 y = 2 + (random() % spanY);
+
+                tryCut(x, y, x + cw - 1, y + ch - 1, doorMask, doorOff, hubX, hubY);
+            }
+        }
+    }
+
+    buildShapeEdge();
 }
 
 s16 Maze_originPxX(void)
@@ -1757,49 +1907,16 @@ u16 Maze_originRow(void)
     return (u16) (MAZE_ORIGIN_ROW + ((MAZE_MAX_H - roomH) / 2));
 }
 
+// Independent of the room's shape again, now that a shape is rolled per
+// room and works around the doors instead of constraining them: 2 clear
+// of each corner, and 2 more at the top end because a door is 2 cells
+// wide and `offset` names its first.
 void Maze_doorOffsetRange(u8 dir, u8 *lo, u8 *hi)
 {
-    // The old fixed range: 2 clear of each corner, and 2 more at the top
-    // end because a door is 2 cells wide and `offset` names its first.
     const bool horiz = (dir == MAZE_DIR_N) || (dir == MAZE_DIR_S);
-    s16 a = 2;
-    s16 b = (horiz ? MAZE_W : MAZE_H) - 4;
-    const s16 cw = roomW / 3;
-    const s16 ch = roomH / 3;
 
-    // Where the shape cuts a corner, that side loses its end: pull the
-    // range in past the cut (plus 1 cell of margin, so the door's own
-    // pocket and the wall cell beside it are both still in the room).
-    switch (roomShape)
-    {
-        case MAZE_SHAPE_L:
-            if (dir == MAZE_DIR_N) b = roomW - cw - 3;
-            if (dir == MAZE_DIR_E) a = ch + 1;
-            break;
-        case MAZE_SHAPE_T:
-            if (dir == MAZE_DIR_S) { a = cw + 1; b = roomW - cw - 3; }
-            if (dir == MAZE_DIR_E) b = roomH - ch - 3;
-            if (dir == MAZE_DIR_W) b = roomH - ch - 3;
-            break;
-        case MAZE_SHAPE_S:
-            if (dir == MAZE_DIR_N) a = cw + 1;
-            if (dir == MAZE_DIR_W) a = ch + 1;
-            if (dir == MAZE_DIR_S) b = roomW - cw - 3;
-            if (dir == MAZE_DIR_E) b = roomH - ch - 3;
-            break;
-        case MAZE_SHAPE_PLUS:
-            if (horiz) { a = cw + 1; b = roomW - cw - 3; }
-            else       { a = ch + 1; b = roomH - ch - 3; }
-            break;
-        default: // RECT and O leave every side whole
-            break;
-    }
-
-    if (b < a)
-        b = a; // degenerate only if a room is near ROOM_MIN_*; one legal spot is enough
-
-    *lo = (u8) a;
-    *hi = (u8) b;
+    *lo = 2;
+    *hi = (u8) ((horiz ? MAZE_W : MAZE_H) - 4);
 }
 
 void Maze_clearRoomCache(void)
@@ -1953,6 +2070,11 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
 
     if (!tomboOk)
     {
+        // Plain box: the last rejected attempt's shape is still sitting in
+        // outsideShape and has no claim on this fallback.
+        memset(outsideShape, FALSE, sizeof(outsideShape));
+        memset(shapeEdge, FALSE, sizeof(shapeEdge));
+
         for (y = 1; y < (MAZE_H - 1); y++)
             for (x = 1; x < (MAZE_W - 1); x++)
                 tomboMark(x, y); // keeps the shape's cut-outs solid even here
@@ -2072,19 +2194,18 @@ static void punchBorderDoor(u8 dir, s16 ax, s16 ay)
 
 void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 menuDoorOffset, u16 roomSeed)
 {
-    // The insertion room is always a plain box, whatever shape the
-    // planet's own rooms have: it is a hand-carved corridor between two
-    // doors (carveLPath below writes the grid directly, with none of
-    // tombo's shape awareness), and it is deliberately the one room that
-    // looks unlike every other. The planet's shape is put back before
-    // returning, since the caller generates grid rooms from the same
-    // state afterwards.
-    const u8 planetShape = roomShape;
+    // The insertion room is always a plain box: it is a hand-carved
+    // corridor between two doors (carveLPath below writes the grid
+    // directly, with none of tombo's shape awareness), and it is
+    // deliberately the one room that looks unlike every other. Nothing to
+    // restore afterwards -- every grid room rolls its own shape when it
+    // generates.
     s16 x, y;
     s16 anchorX, anchorY;
     s16 menuAnchorX, menuAnchorY;
 
-    Maze_setRoomShape(roomW, roomH, MAZE_SHAPE_RECT);
+    memset(outsideShape, FALSE, sizeof(outsideShape));
+    memset(shapeEdge, FALSE, sizeof(shapeEdge));
 
     clearLockedDoorCells(); // this room's doors are never locked, but Maze_draw() always reads this grid
     anchorForDoor(doorDir, doorOffset, &anchorX, &anchorY);
@@ -2149,7 +2270,25 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
     // door whose outcome depends on progress.
     punchBorderDoor(menuDoorDir, menuAnchorX, menuAnchorY);
 
-    Maze_setRoomShape(roomW, roomH, planetShape); // see the top of this function
+    // Draw the corridor's walls and nothing else (user request: "en la
+    // habitacion de inserccion, deja solo los muros, no quiero el bloque
+    // entero tampoco"). This room is solid wall with a 1-cell path cut
+    // through it, so painting every wall cell filled the screen with one
+    // block. Its real shape IS that corridor: marking every non-path cell
+    // as outside it, then taking the silhouette, leaves exactly the wall
+    // lining the path -- the same rule the shaped rooms already draw by,
+    // so Maze_draw needs no special case. Rendering only: Maze_isWall
+    // reads the grid, which is untouched, so the room is as solid as it
+    // ever was.
+    {
+        s16 cx, cy;
+
+        for (cy = 0; cy < MAZE_H; cy++)
+            for (cx = 0; cx < MAZE_W; cx++)
+                outsideShape[cy][cx] = (grid[cy][cx] != PATH);
+
+        buildShapeEdge();
+    }
 }
 
 // The one wall colour every room uses. Rooms used to each pick one of 4
@@ -2245,8 +2384,15 @@ void Maze_draw(void)
 
         for (x = 0; x < MAZE_W; x++)
         {
+            // Cut away by the room's shape and not on its silhouette:
+            // leave the plane's own blank tile there, same as the margin
+            // around a room smaller than the screen.
+            if (outsideShape[y][x] && !shapeEdge[y][x])
+                continue;
+
             // A cell is one VDP tile now, so the tile index IS the cell
             // value offset by the tileset's base.
+            {
             const u16 t = BASE_TILE + grid[y][x];
             // Locked doors (user request) render with PAL3 (yellow, see
             // menu.c's LOCKED_DOOR_INK_INDEX) instead of PAL0 -- same tile,
@@ -2254,6 +2400,7 @@ void Maze_draw(void)
             const u8 pal = lockedDoorCell[y][x] ? PAL3 : PAL0;
 
             row[ox + x] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, t);
+            }
         }
     }
 
