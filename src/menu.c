@@ -314,6 +314,11 @@ void Menu_drawTitle(void)
 static const char *const planetNames[MENU_PLANET_COUNT] = {
     "XENU", "ZARG", "QORG", "NYXX", "VOID", "KLOP", "WURM", "ZYGN"
 };
+const char *Menu_planetName(u8 index)
+{
+    return planetNames[(index < MENU_PLANET_COUNT) ? index : 0];
+}
+
 static const char *const galaxyName = "GALAXIA XR-13";
 static const u8 planetCircleSize[MENU_PLANET_COUNT] = { 0, 0, 0, 0, 1, 1, 2, 2 };
 static const u8 circleRadius[3] = { 3, 5, 7 };

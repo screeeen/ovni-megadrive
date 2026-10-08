@@ -169,6 +169,18 @@ void GuideMap_markEnemyDead(u8 col, u8 row);
 // resumed has to put them back afterwards or its enemies all come back to
 // life -- which no other part of the save would ever reveal, since an
 // enemy leaves nothing else behind when it dies.
+// Which rooms the player has already walked into, so the map they get
+// back after dying still shows the ground they covered (user request:
+// "tiene que ensenar al jugador que vuelve a terminar el planeta su
+// progreso en el mapa"). GuideMap_generate() clears `visited` along with
+// everything else, so like enemyDead it has to travel in the save.
+//
+// One BIT per room rather than one byte: MAX_MAP_COLS is 10, so a row
+// fits in a u16 and a whole planet costs 16 bytes instead of 80 -- this
+// console has little RAM left to spend on a flag.
+void GuideMap_saveVisited(u16 out[MAX_MAP_ROWS]);
+void GuideMap_restoreVisited(const u16 in[MAX_MAP_ROWS]);
+
 void GuideMap_saveEnemyDead(bool out[MAX_MAP_ROWS][MAX_MAP_COLS]);
 void GuideMap_restoreEnemyDead(const bool in[MAX_MAP_ROWS][MAX_MAP_COLS]);
 

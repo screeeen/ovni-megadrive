@@ -37,7 +37,11 @@
 // random()-before-any-press bug; this time the button-wait is the
 // explicit point of the screen, asked for on its own merits, and it
 // actually has to work this time).
-typedef enum { STATE_INTRO, STATE_MENU, STATE_PLAYING, STATE_GAMEOVER } GameState;
+// STATE_SCORES is the high-score table, which the menu alternates with on
+// its own (user request: "haz una tabla high scores que alterne con el
+// menu de los planetas"). Added at the end so the debug view's own
+// stateNames[] keeps lining up with the values before it.
+typedef enum { STATE_INTRO, STATE_MENU, STATE_PLAYING, STATE_GAMEOVER, STATE_SCORES } GameState;
 
 // The ship slides in a straight line until a wall stops it, turning only
 // from a stop -- the only control scheme the room generator's slide-graph
@@ -165,6 +169,17 @@ static const SizePreset sizePresets[] = {
 #define DEBUG_FIRST_PLANET 0
 #define PLANET_SEL_COUNT (SIZE_PRESET_COUNT - DEBUG_FIRST_PLANET)
 
+// How many planets the BOOT cartography screen maps (user request: "carga
+// solo los dos primeros planetas, el resto a demanda cuando se
+// seleccionan"). Deliberately NOT PLANETS_AT_START any more: how many are
+// playable and how many are worth mapping before the menu even appears
+// are different questions, and mapping all eight cost ~2.5x the boot time
+// of mapping two. The rest are mapped the first time the cursor lands on
+// them, through the same one-room-per-frame screen (see the menu's own
+// plantsTotalKnown check), so nothing is ever mapped twice and no planet
+// can be entered uncharted.
+#define BOOT_CARTOGRAPHY_COUNT 2
+
 // playerShip's palette (spec §13bis) is 2 colors: index0 (never rendered
 // -- Genesis sprite hardware always treats palette index0 as transparent)
 // and index1, the ship's actual visible color. mapShip (spec §24, an 8x8
@@ -252,6 +267,14 @@ static bool roomViewerOn;
 static bool sweepOn;
 static u16 mapBlinkTimer;
 static u8 shakeFramesLeft;
+// Squash-on-impact state (see triggerSquash further down). Up here beside
+// the shake's own because loadRoom, which clears it, comes before both.
+// Set when the cartography screen was opened by pressing A rather than
+// by booting: its completion hands straight over to the run instead of
+// going back to the menu.
+static bool cartographyThenPlay;
+static u8 squashFramesLeft;
+static u8 squashDir;
 // BUG FIX (user report: "al golpear el muro se queda permanente"). A ship
 // held into a wall stays blocked (position unchanged) for as long as the
 // player keeps it that way -- NORMAL/INERTIA/TOMB never reset p->dir on a
@@ -494,6 +517,11 @@ typedef struct
     // plant counters -- and GuideMap_generate() wipes the live bits every
     // time a planet is set up, so they have to travel in the save.
     bool enemyDead[MAX_MAP_ROWS][MAX_MAP_COLS];
+    // Rooms already walked into, one bit per room (guidemap.h's
+    // GuideMap_saveVisited). Without this the map came back blank after
+    // dying, so a player returning to finish a planet lost every bit of
+    // the ground they had already covered.
+    u16 visitedMask[MAX_MAP_ROWS];
     u16 plantsTotal;
     bool plantsTotalKnown;
     // How many letters this planet's map COULD actually place. itemCount
@@ -503,11 +531,76 @@ typedef struct
     // constant instead, so such a planet could never be finished and the
     // unlock percentage stalled with it. 0 = not generated yet.
     u8 lettersActual;
+    // Score (user request): one running total per planet, not per visit --
+    // leaving for the menu and coming back carries on where it left off,
+    // so a planet cannot be farmed by restarting it.
+    u32 scoreFrames;  // time spent playing this planet, in frames
+    u16 scoreMoves;   // slides started (a press into a wall is not a move)
+    u8  scoreRooms;   // rooms this planet's map really has, what the start value scales by
+    bool scoreDone;   // objectives met: the clock has stopped
 } PresetSave;
 static PresetSave presetSave[SIZE_PRESET_COUNT];
 
 // The letter target to judge planet i by: what its map really placed,
 // falling back to the preset until that is known.
+// ---------------------------------------------------------------------
+// Score (user request: "empieza por una cifra grande y vete descontando
+// puntos a medida que el player hace movimientos y transcurre el
+// tiempo").
+//
+// The start value scales with the planet's own size because everything
+// else does: measured over 40 generated maps per planet, a room carries
+// ~11.5 plants and exactly 1 enemy, and rooms run from 1 to ~41. A flat
+// start would make the small planets trivial to max and the big ones
+// impossible, so the room is the unit.
+//
+// Two drains, deliberately the same size, so neither strategy dominates:
+// rushing badly costs as much as thinking too long.
+//   score = START*rooms - moves*MOVE - seconds*SECOND   (floored at 0)
+//
+// These three are the tuning knobs -- the numbers below are a starting
+// point from the measured content, not from play, and want one real run
+// to settle.
+#define SCORE_PER_ROOM   2500 // planet 7 (~41 rooms) therefore starts at ~102000
+#define SCORE_PER_MOVE     25
+#define SCORE_PER_SECOND   25
+
+static u32 scoreFor(u8 i)
+{
+    const u32 start = (u32) presetSave[i].scoreRooms * SCORE_PER_ROOM;
+    const u32 spent = ((u32) presetSave[i].scoreMoves * SCORE_PER_MOVE) +
+                      ((presetSave[i].scoreFrames / 60) * SCORE_PER_SECOND);
+
+    return (spent >= start) ? 0 : (start - spent);
+}
+
+// Rooms this planet's map really has (after guidemap's own leaf pruning),
+// and whether every one of their enemies is dead. The enemy count is one
+// per room by construction, so the two walk the same grid.
+static u8 countPlanetRooms(void)
+{
+    u8 col, row, n = 0;
+
+    for (row = 0; row < mapRows; row++)
+        for (col = 0; col < mapCols; col++)
+            if (guideMap[row][col].type == CELL_ROOM)
+                n++;
+
+    return n;
+}
+
+static bool allEnemiesDead(void)
+{
+    u8 col, row;
+
+    for (row = 0; row < mapRows; row++)
+        for (col = 0; col < mapCols; col++)
+            if ((guideMap[row][col].type == CELL_ROOM) && !GuideMap_isEnemyDead(col, row))
+                return FALSE;
+
+    return TRUE;
+}
+
 static u8 lettersFor(u8 i)
 {
     return presetSave[i].lettersActual ? presetSave[i].lettersActual : sizePresets[i].letters;
@@ -659,12 +752,11 @@ static void drawInsertRoomArrow(void)
 #define INSERT_STATUS_ROW 2
 static void drawInsertRoomStatus(bool show)
 {
-    VDP_setTextPriority(1);
-    if (show)
-        VDP_drawTextBG(BG_B, "AUN FALTAN LETRAS", 1, INSERT_STATUS_ROW);
-    else
-        VDP_clearTextLineBG(BG_B, INSERT_STATUS_ROW);
-    VDP_setTextPriority(0);
+    // The "AUN FALTAN LETRAS" message is gone (user request: "quita el
+    // texto... no me gusta"). The line is still cleared, because other
+    // screens write to it and this is what takes it back off.
+    (void) show;
+    VDP_clearTextLineBG(BG_B, INSERT_STATUS_ROW);
 }
 
 // Offset (spec §30) of (col,row)'s door in direction dir -- transparently
@@ -1033,7 +1125,12 @@ static void beginCartography(u8 firstPlanet, u8 limit, bool showGalaxy)
 
 static void introBegin(void)
 {
-    beginCartography(DEBUG_FIRST_PLANET, PLANETS_AT_START, TRUE);
+    u8 limit = (u8) (DEBUG_FIRST_PLANET + BOOT_CARTOGRAPHY_COUNT);
+
+    if (limit > SIZE_PRESET_COUNT)
+        limit = SIZE_PRESET_COUNT;
+
+    beginCartography(DEBUG_FIRST_PLANET, limit, TRUE);
 }
 
 // Processes exactly one cell of introPlanetIndex's grid (a real room, or
@@ -1430,6 +1527,7 @@ static void loadRoom(u8 col, u8 row)
     }
 
     applyRoomDoorLocks(col, row); // final generate + draw (Maze_draw/Items_drawInRoom/Plants_drawInRoom), see its own doc comment
+    squashFramesLeft = 0; // a wall hit does not carry over into the next room
     plantPathDirty = TRUE; // different room, different plants: the cached route is meaningless now
 
     guideMap[row][col].visited = TRUE;
@@ -1528,6 +1626,8 @@ static void newGame(void)
                       sizePresets[sizePresetIndex].rows);
     GuideMap_generate();
     presetSave[sizePresetIndex].lettersActual = itemCount; // generate may have lowered it
+    if (presetSave[sizePresetIndex].scoreRooms == 0)
+        presetSave[sizePresetIndex].scoreRooms = countPlanetRooms(); // what the start value scales by
     // Switches to THIS planet's own room-attempt-cache bank (spec §52) --
     // already fully populated by ensurePlantsTotalKnown()'s scan above
     // (first entry, or an earlier menu browse) or an earlier real entry
@@ -1557,6 +1657,7 @@ static void newGame(void)
     // whose letter A is already in hand shows the real overlay instead of
     // the static, death or no death.
     GuideMap_restoreEnemyDead(save.enemyDead);
+    GuideMap_restoreVisited(save.visitedMask); // the map comes back as the player left it
     GuideMap_recomputeLocks(); // unlocks up through whichever letter is now due (spec §16)
 
 
@@ -1633,6 +1734,96 @@ static void newGame(void)
 // BG_A -- the sun and planets are sprites now (spec §32septies), so they
 // don't need to be redrawn here at all, only the text.
 static void planetCompletedFlags(bool *out);
+
+// How long each screen holds before handing over to the other. A button
+// in the table cuts its turn short and goes straight back (user request);
+// nothing interrupts the menu's own turn, since every button there
+// already means something else.
+#define SCREEN_ALTERNATE_FRAMES (8 * 60)
+static u16 screenAlternateTimer;
+
+// The high-score table. One row per planet, best first.
+//
+// Sorted by score rather than listed in planet order because that is what
+// makes it a scoreboard, and the scores ARE comparable across planets on
+// purpose: the start value scales with each planet's room count (see
+// SCORE_PER_ROOM), so a good run on a small planet can legitimately beat
+// a sloppy one on a big planet. A planet never played has no start value
+// yet and shows as a dash rather than a zero it never earned.
+static void drawMenu(void);       // all three defined below
+static void drawScoreTable(void);
+static void flushSprites(void);
+
+// Menu -> table. The planets, sun and cursor are sprites, so they have to
+// be taken off the table AND flushed, or they stay on screen over it.
+static void enterScoreTable(void)
+{
+    gameState = STATE_SCORES;
+    screenAlternateTimer = 0;
+    Menu_hideSprites();
+    flushSprites();
+    drawScoreTable();
+}
+
+// Table -> menu. Same restore the end of a run does, minus the fade: the
+// two screens swap in place.
+static void leaveScoreTable(void)
+{
+    bool completed[SIZE_PRESET_COUNT];
+
+    gameState = STATE_MENU;
+    screenAlternateTimer = 0;
+    drawMenu();
+    planetCompletedFlags(completed);
+    Menu_fadeInSprites(sizePresetIndex, unlockedPlanets, completed);
+}
+
+static void drawScoreTable(void)
+{
+    u8 order[SIZE_PRESET_COUNT];
+    char buf[40];
+    u8 i, j;
+    int len;
+
+    VDP_clearPlane(BG_A, TRUE);
+    VDP_setTextPalette(PAL0); // the menu leaves it here too, but this screen must not depend on that
+
+    for (i = 0; i < SIZE_PRESET_COUNT; i++)
+        order[i] = i;
+
+    // Insertion sort, descending: 8 entries, so the simplest thing that
+    // is obviously right beats anything cleverer.
+    for (i = 1; i < SIZE_PRESET_COUNT; i++)
+    {
+        const u8 v = order[i];
+
+        for (j = i; (j > 0) && (scoreFor(order[j - 1]) < scoreFor(v)); j--)
+            order[j] = order[j - 1];
+        order[j] = v;
+    }
+
+    len = sprintf(buf, "PUNTUACIONES");
+    VDP_drawText(buf, (u16) ((40 - len) / 2), 4);
+
+    for (i = 0; i < SIZE_PRESET_COUNT; i++)
+    {
+        const u8 p = order[i];
+
+        // A planet with no rooms recorded has never been entered. The
+        // marker is a character, not a colour, so it reads regardless of
+        // how the palette lands.
+        if (presetSave[p].scoreRooms == 0)
+            len = sprintf(buf, "%d  %-6s        ---", i + 1, Menu_planetName(p));
+        else
+            len = sprintf(buf, "%d  %-6s %9lu %s", i + 1, Menu_planetName(p),
+                          scoreFor(p), presetSave[p].scoreDone ? "*" : " ");
+
+        VDP_drawText(buf, 8, (u16) (8 + (i * 2)));
+    }
+
+    VDP_drawText("* PLANETA COMPLETADO", 8, 25);
+    VDP_drawText("PULSA UN BOTON", 13, 27);
+}
 
 static void drawMenu(void)
 {
@@ -1889,12 +2080,14 @@ static void resetToMenu(void)
         presetSave[sizePresetIndex].plantsCollected = Plants_collectedCount(); // spec §51
         Plants_saveMask(presetSave[sizePresetIndex].plantsMask); // bug fix, see PresetSave's own doc comment
         GuideMap_saveEnemyDead(presetSave[sizePresetIndex].enemyDead);
+        GuideMap_saveVisited(presetSave[sizePresetIndex].visitedMask);
     }
 
     updatePlanetUnlocks(); // this run's progress may have opened the next planet
 
     gameState = STATE_MENU;
     mapViewOpen = FALSE;
+    cartographyThenPlay = FALSE; // a reset mid-cartography goes to the menu, not into a run
     roomViewerOn = FALSE; // RESET_COMBO can fire from inside either map-screen tool
     sweepOn = FALSE;
     inInsertRoom = FALSE; // harmless either way -- newGame() sets it back to TRUE when a new run starts
@@ -1937,6 +2130,50 @@ static void resetToMenu(void)
 // this impact -- see slideDistance's own doc comment), unless one is
 // already playing (never restarts/extends an in-progress shake). Call
 // whenever the ship hits a wall or an enemy this frame.
+// Squash-on-impact (user request: "cuando golpea un muro se deforma...
+// el grafico tiene que ser el protagonista estrujado contra la pared").
+// playerShip carries 5 frames: 0 is the ship, 1..4 are it flattened
+// against a wall, ordered to match player.h's DIR_UP/LEFT/DOWN/RIGHT --
+// so the frame is simply 1 + the direction it was travelling when it
+// stopped, which is by definition the wall it hit head-on.
+//
+// Held for as long as the screenshake the same impact triggers, so the
+// two read as one event.
+#define SQUASH_FRAMES SHAKE_DURATION_FRAMES
+
+static void triggerSquash(u8 dir)
+{
+    if (dir == DIR_NONE)
+        return;
+
+    squashDir = dir;
+    squashFramesLeft = SQUASH_FRAMES;
+}
+
+// Pushes the current frame to the sprite, but only when it actually
+// changes: SPR_setFrame re-uploads the frame's tiles, so calling it every
+// frame would be a VRAM transfer per frame for a sprite that is usually
+// not deforming at all.
+static void updateSquash(void)
+{
+    static u8 shown = 0xFF;
+    u8 want;
+
+    if (squashFramesLeft > 0)
+    {
+        squashFramesLeft--;
+        want = (u8) (1 + squashDir);
+    }
+    else
+        want = 0;
+
+    if (want != shown)
+    {
+        shown = want;
+        SPR_setFrame(playerSprite, want);
+    }
+}
+
 static void triggerShake(u16 distance)
 {
     if (shakeFramesLeft == 0)
@@ -3000,6 +3237,39 @@ static void invalidateHudLines(void)
     hudLinesDirty = TRUE;
 }
 
+// Top-right corner (user request: "el indicador de score estara en la
+// derecha arriba, donde estan los FPS en debug"). Same cached-redraw rule
+// the other BG_B lines use -- the number only changes once a second or
+// on a move, so there is no reason to poke glyphs every frame.
+#define SCORE_COL 32 // leaves 8 columns for the number, FPS goes left of it
+
+static void drawScoreHud(void)
+{
+    static u32 prev = 0xFFFFFFFF;
+    const u32 score = scoreFor(sizePresetIndex);
+    char buf[12];
+    int len;
+
+    if (gameState != STATE_PLAYING)
+    {
+        prev = 0xFFFFFFFF; // nothing of ours is on screen any more
+        return;
+    }
+
+    if ((score == prev) && !hudLinesDirty)
+        return;
+
+    prev = score;
+    len = sprintf(buf, "%lu", score);
+
+    VDP_setTextPriority(1);
+    // Right-aligned against the screen edge, padded so a shrinking number
+    // never leaves its old digits behind.
+    VDP_drawTextBG(BG_B, "        ", SCORE_COL, 0);
+    VDP_drawTextBG(BG_B, buf, (u16) (40 - len), 0);
+    VDP_setTextPriority(0);
+}
+
 static void drawRoomIdHud(void)
 {
     static char prev[40];
@@ -3149,7 +3419,7 @@ static void drawDebugView(void)
     VDP_setTextPriority(1);
 
     {
-        static const char *const stateNames[] = { "MENU", "PLAY", "WIN ", "OVER" };
+        static const char *const stateNames[] = { "MENU", "PLAY", "WIN ", "OVER", "SCOR" };
 
         sprintf(buf, "ST:%s", stateNames[gameState]);
         VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW);
@@ -3206,6 +3476,36 @@ static void drawDebugView(void)
     VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 9);
 
     VDP_setTextPriority(0);
+}
+
+// Starts a run on the selected planet. The caller has ALREADY faded to
+// the backdrop -- both entry points do, and one of them (the cartography
+// screen handing over) is already black by the time it gets here.
+static void startSelectedPlanet(void)
+{
+    Menu_hideSprites();
+    flushSprites();    // no planets left in the table BEFORE their palette changes hands
+    gameState = STATE_PLAYING;
+    newGame();
+    // The ship waits outside until the room is all the way in
+    // (user request: "quiero que la nave no aparezca en
+    // pantalla entrando hacia la insertion room hasta que el
+    // fundido haya terminado"). newGame() put it on screen;
+    // take it back off, push that, and only show it once the
+    // fade is done -- the main loop's own SPR_update, at the
+    // end of this very frame, is what puts it there.
+    SPR_setVisibility(playerSprite, HIDDEN);
+    flushSprites();
+    // Dead last, with nothing between it and the fade:
+    // Menu_setVisible puts PAL0's index1 back to the maze's own
+    // wall colour, and newGame() above drew a whole room in it.
+    // Anything that waits for a vblank after this -- and
+    // flushSprites does -- is a frame of that room on screen at
+    // full strength. fadeFromBackdrop flattens CRAM as its
+    // first act, so from here there is no vblank in between.
+    Menu_setVisible(FALSE);
+    fadeFromBackdrop();
+    SPR_setVisibility(playerSprite, VISIBLE);
 }
 
 int main(bool hardReset)
@@ -3283,23 +3583,50 @@ int main(bool hardReset)
                 introFloodStep(); // one glyph per frame, every frame -- see its own doc comment
                 if (introTick()) // one room per frame -- see its own doc comment
                 {
-                    fadeToBackdrop(); // the menu is built below, behind the black
+                    fadeToBackdrop(); // whatever comes next is built behind the black
                     VDP_clearPlane(BG_B, TRUE); // BG_B is HUD/debug territory during real play
                     invalidateHudLines();
                     introGenerating = FALSE;
-                    gameState = STATE_MENU;
-                    Menu_setVisible(TRUE);
-                    Menu_hideSprites(); // same as resetToMenu: the sprites fade in after the screen
-                    drawMenu();
-                    fadeFromBackdrop();
-                    {
-                        bool completed[SIZE_PRESET_COUNT];
 
-                        planetCompletedFlags(completed);
-                        Menu_fadeInSprites(sizePresetIndex, unlockedPlanets, completed);
+                    if (cartographyThenPlay)
+                    {
+                        // Pressing A brought us here: go straight into the
+                        // run the player already committed to, never back
+                        // to the menu they already left.
+                        cartographyThenPlay = FALSE;
+                        startSelectedPlanet();
+                    }
+                    else
+                    {
+                        gameState = STATE_MENU;
+                        Menu_setVisible(TRUE);
+                        Menu_hideSprites(); // same as resetToMenu: the sprites fade in after the screen
+                        drawMenu();
+                        fadeFromBackdrop();
+                        {
+                            bool completed[SIZE_PRESET_COUNT];
+
+                            planetCompletedFlags(completed);
+                            Menu_fadeInSprites(sizePresetIndex, unlockedPlanets, completed);
+                        }
                     }
                 }
             }
+        }
+        else if (gameState == STATE_SCORES)
+        {
+            // Any button at all goes back (user request: "si el usuario
+            // pulsa boton en high scores se va al menu de nuevo"). Edge
+            // detected, so the press that brought us here cannot bounce
+            // straight back out, and the same press is not seen by the
+            // menu either -- prevState carries it into next frame.
+            const u16 anyButton = BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_START |
+                                  BUTTON_UP | BUTTON_DOWN | BUTTON_LEFT | BUTTON_RIGHT;
+
+            if ((state & anyButton) && !(prevState & anyButton))
+                leaveScoreTable();
+            else if (++screenAlternateTimer >= SCREEN_ALTERNATE_FRAMES)
+                leaveScoreTable(); // its turn is over, hand back to the menu
         }
         else if (gameState == STATE_MENU)
         {
@@ -3327,31 +3654,6 @@ int main(bool hardReset)
                     drawMenu();
             }
 
-            // A planet that was still locked when the game booted has
-            // never been mapped (beginCartography only did the first
-            // PLANETS_AT_START). The first time the cursor lands on an
-            // UNLOCKED one, map it through that very same screen, one room
-            // per frame, instead of freezing the menu for however long a
-            // 10x8 grid takes. It comes straight back here when it's done.
-            // A locked planet is left uncharted on purpose: that is work
-            // for somewhere nobody can go yet, and the menu has nothing to
-            // show for it beyond what it still costs to open.
-            if ((sizePresetIndex < unlockedPlanets) && !presetSave[sizePresetIndex].plantsTotalKnown)
-            {
-                fadeToBackdrop();
-                Menu_hideSprites();
-                flushSprites(); // same as the menu->game path below
-                Menu_setVisible(FALSE);
-                gameState = STATE_INTRO;
-                introGenerating = TRUE;
-                beginCartography(sizePresetIndex, (u8) (sizePresetIndex + 1), FALSE);
-                fadeFromBackdrop();
-                prevState = state;
-                SPR_update();
-                SYS_doVBlankProcess();
-                continue;
-            }
-
             Menu_update(sizePresetIndex, unlockedPlanets, completed);
 
             // Every planet can be looked at, locked or not (user request:
@@ -3361,39 +3663,34 @@ int main(bool hardReset)
             if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
             {
                 sizePresetIndex = (u8) (DEBUG_FIRST_PLANET + ((sizePresetIndex - DEBUG_FIRST_PLANET + PLANET_SEL_COUNT - 1) % PLANET_SEL_COUNT));
-                drawMenu(); // an unmapped planet is handled above, by the cartography screen
+                drawMenu();
             }
             if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
             {
                 sizePresetIndex = (u8) (DEBUG_FIRST_PLANET + ((sizePresetIndex - DEBUG_FIRST_PLANET + 1) % PLANET_SEL_COUNT));
-                drawMenu(); // an unmapped planet is handled above, by the cartography screen
+                drawMenu();
             }
             if ((state & BUTTON_A) && !(prevState & BUTTON_A) && (sizePresetIndex < unlockedPlanets))
             {
+                // Map it now if the boot screen did not (user request:
+                // "quiero que cargue el planeta cuando se pulsa A para
+                // entrar, no cuando se selecciona"). Browsing the bar
+                // stays instant; the wait lands on the one planet the
+                // player actually committed to, and only the first time.
                 fadeToBackdrop();  // the whole run is set up below, behind the flat screen
-                Menu_hideSprites();
-                flushSprites();    // no planets left in the table BEFORE their palette changes hands
-                gameState = STATE_PLAYING;
-                newGame();
-                // The ship waits outside until the room is all the way in
-                // (user request: "quiero que la nave no aparezca en
-                // pantalla entrando hacia la insertion room hasta que el
-                // fundido haya terminado"). newGame() put it on screen;
-                // take it back off, push that, and only show it once the
-                // fade is done -- the main loop's own SPR_update, at the
-                // end of this very frame, is what puts it there.
-                SPR_setVisibility(playerSprite, HIDDEN);
-                flushSprites();
-                // Dead last, with nothing between it and the fade:
-                // Menu_setVisible puts PAL0's index1 back to the maze's own
-                // wall colour, and newGame() above drew a whole room in it.
-                // Anything that waits for a vblank after this -- and
-                // flushSprites does -- is a frame of that room on screen at
-                // full strength. fadeFromBackdrop flattens CRAM as its
-                // first act, so from here there is no vblank in between.
-                Menu_setVisible(FALSE);
-                fadeFromBackdrop();
-                SPR_setVisibility(playerSprite, VISIBLE);
+                if (!presetSave[sizePresetIndex].plantsTotalKnown)
+                {
+                    Menu_hideSprites();
+                    flushSprites();
+                    Menu_setVisible(FALSE);
+                    gameState = STATE_INTRO;
+                    introGenerating = TRUE;
+                    cartographyThenPlay = TRUE; // its completion starts the run instead of returning to the menu
+                    beginCartography(sizePresetIndex, (u8) (sizePresetIndex + 1), FALSE);
+                    fadeFromBackdrop();
+                }
+                else
+                    startSelectedPlanet();
             }
             // Sound toggle (spec §47, user request: "activable desde el
             // menu y por defecto apagado") -- BUTTON_C alone, free in the
@@ -3404,6 +3701,19 @@ int main(bool hardReset)
             {
                 Sfx_setEnabled(!Sfx_isEnabled());
                 drawMenu();
+            }
+
+            // Hand over to the high-score table after a while untouched.
+            // Guarded on still being in the menu: pressing A above starts
+            // a run, and this must not then pull the table over it. Any
+            // input at all restarts the wait, so the table never appears
+            // while the planet bar is being browsed.
+            if (gameState == STATE_MENU)
+            {
+                if (state != prevState)
+                    screenAlternateTimer = 0;
+                else if (++screenAlternateTimer >= SCREEN_ALTERNATE_FRAMES)
+                    enterScoreTable();
             }
         }
         else if (gameState == STATE_GAMEOVER) // user request, see its own enum doc comment
@@ -3749,6 +4059,7 @@ int main(bool hardReset)
                         if (!wasWallBlocked)
                         {
                             triggerShake(slideDistance);
+                            triggerSquash(player.dir); // the wall it hit head-on is the way it was going
                             Sfx_playWallHit(slideDistance); // spec §47, user request -- volume proportional to distance, like the shake
                         }
                         slideDistance = 0;
@@ -3859,6 +4170,7 @@ int main(bool hardReset)
                             if (!wasWallBlocked)
                             {
                                 triggerShake(slideDistance);
+                                triggerSquash(player.dir); // the wall it hit head-on is the way it was going
                                 Sfx_playWallHit(slideDistance); // spec §47, user request -- volume proportional to distance, like the shake
                             }
                             slideDistance = 0; // this slide just ended, next one starts fresh
@@ -4025,7 +4337,30 @@ int main(bool hardReset)
             // Did the ship travel this frame? (The steering lock,
             // see tombMoving.) Frozen while the map is open: nothing moves.
             if (!mapViewOpen)
+            {
+                const bool wasMoving = tombMoving;
+
                 tombMoving = (player.x != frameStartX) || (player.y != frameStartY);
+
+                // Score (user request). A MOVE is the start of a slide --
+                // the FALSE->TRUE edge -- not a button press: steering into
+                // a wall never moves the ship and must not cost anything.
+                // Both counters stop for good once the planet's objectives
+                // are met, which is what makes the score a measure of the
+                // run rather than of how long the pad was left idle.
+                if (!presetSave[sizePresetIndex].scoreDone)
+                {
+                    if (tombMoving && !wasMoving)
+                        presetSave[sizePresetIndex].scoreMoves++;
+
+                    presetSave[sizePresetIndex].scoreFrames++;
+
+                    if (Items_allCollected() &&
+                        (Plants_collectedCount() >= presetSave[sizePresetIndex].plantsTotal) &&
+                        allEnemiesDead())
+                        presetSave[sizePresetIndex].scoreDone = TRUE;
+                }
+            }
         }
 
         // FPS debug readout (user request), top-right corner on BG_B --
@@ -4042,6 +4377,10 @@ int main(bool hardReset)
             const u32 fps = SYS_getFPS();
             static u32 prevFps = 0xFFFFFFFF;
 
+            // The score owns the top-right corner now (user request), so
+            // the FPS readout moves left of it rather than over it. Its
+            // own slot is a fixed width so the two never collide whatever
+            // either number does.
             if (!debugInfoOn)
                 prevFps = 0xFFFFFFFF; // so it redraws the moment DATOS comes back on
             else if ((fps != prevFps) || hudLinesDirty)
@@ -4051,10 +4390,13 @@ int main(bool hardReset)
 
                 prevFps = fps;
                 VDP_setTextPriority(1);
-                VDP_drawTextBG(BG_B, buf, 40 - len - 1, 0);
+                VDP_drawTextBG(BG_B, buf, (u16) (SCORE_COL - len - 1), 0);
                 VDP_setTextPriority(0);
             }
         }
+
+        drawScoreHud();
+        updateSquash(); // the ship's own deformation, see triggerSquash
 
         drawRoomIdHud(); // always-on room identity line, STATE_PLAYING only
         hudLinesDirty = FALSE; // both readers above have had their frame

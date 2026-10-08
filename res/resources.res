@@ -6,7 +6,12 @@ TILESET mapTiles "sprite/map_tiles.png" NONE NONE ROW
 # ocupa ni un tile extra. NONE (sin comprimir) a proposito: una tileset
 # comprimida se descomprime en el heap al cargarla, y de heap vamos justos.
 TILESET gameFont "sprite/font.png" NONE NONE ROW
-SPRITE playerShip "sprite/player.png" 1 1 BEST
+# 5 frames de 8x8 en una fila: 0 la nave normal, y 1..4 la nave estrujada
+# contra el muro que acaba de golpear, en el orden DIR_UP/LEFT/DOWN/RIGHT
+# de player.h (asi el frame es 1+dir, sin tabla de por medio).
+# Sin comprimir: son 160 bytes de tiles y comprimida habria que
+# descomprimirla en el heap, que es lo que va justo en esta consola.
+SPRITE playerShip "sprite/player.png" 1 1 NONE
 SPRITE enemyShip "sprite/enemy.png" 1 1 BEST
 SPRITE mapShip "sprite/map_ship.png" 1 1 BEST
 SPRITE planetSmall "sprite/planet_small.png" 1 1 BEST

@@ -35,6 +35,10 @@ void Menu_loadGraphics(void);
 // uploaded once by Menu_loadGraphics.
 void Menu_drawTitle(void);
 
+// This planet's name, for anything outside menu.c that has to label it
+// (main.c's high-score table). Index is a preset index, 0..MENU_PLANET_COUNT-1.
+const char *Menu_planetName(u8 index);
+
 // Shows/hides the planet sprites, the cursor arrow and the sun (spec
 // §31, §32septies) -- call with TRUE when entering the menu, FALSE when
 // leaving it (both ways: starting a game, or the reset combo bringing
