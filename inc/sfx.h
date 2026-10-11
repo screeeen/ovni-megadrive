@@ -68,7 +68,42 @@ void Sfx_playPlantPickup(void);
 // auto-pick a free channel, same as Sfx_playPlantPickup (neither has a
 // per-hit volume, so neither needs to know which channel it landed on).
 // Call on the event's own edge, not every frame of it.
+// Typewriter click, for the text that reveals itself a glyph at a time
+// (main.c's typeStep). Deliberately the quietest thing in the game --
+// volume 2 of 15, where the wall-hit kick runs 6..15 (user request: "un
+// sonido muy muy discreto"). No-op while Sfx_isEnabled() is FALSE.
+//
+// The CALLER decides how often: at 3 glyphs a frame a tick per glyph
+// would be 180 a second, which is a hiss and not a typewriter. main.c
+// fires one every TYPE_TICK_EVERY glyphs instead.
+void Sfx_playTypeTick(void);
+
 void Sfx_playEnemyKill(void);
 void Sfx_playLetterPickup(void);
+
+// Chordslop. Un acorde de cinco sinusoidales (FM, canales 1 a 5 del YM2612)
+// que suena siempre y no cambia de identidad: lo que varia son gestos de
+// pitch bend que salen de la nota y vuelven a ella, con los destinos
+// restringidos a notas del acorde. El modelo es el Chord Slop Lab que paso el
+// usuario como referencia; el porque de cada decision esta en la cabecera de
+// la seccion en sfx.c.
+//
+// Sfx_slop() se llama UNA vez por cruce de habitacion -- loadRoom() en
+// main.c, que es por donde pasan todos. Hace dos cosas: arranca una voz mas
+// (las cinco entran de una en una, una por habitacion) y reparte gestos
+// nuevos a las voces que esten quietas. No-op si Sfx_isEnabled() es FALSE.
+void Sfx_slop(void);
+
+// Calla las cinco voces y rearma el crescendo. Hay que llamarlo al SALIR de
+// la partida (resetToMenu y gameOverBegin lo hacen): la envolvente FM esta
+// puesta para sostener indefinidamente, asi que sin esto el acorde seguiria
+// sonando en el menu. Sfx_setEnabled(FALSE) tambien lo llama.
+void Sfx_slopStop(void);
+
+// Una vez por frame desde el bucle principal, al lado de updateShake(). Esto
+// SI hace trabajo de verdad: el YM2612 no tiene bends ni vibrato, asi que el
+// tono de cada voz se recalcula y se reescribe cada frame. Toma el bus del
+// Z80 una vez por llamada; es un no-op mientras no haya ninguna voz viva.
+void Sfx_update(void);
 
 #endif

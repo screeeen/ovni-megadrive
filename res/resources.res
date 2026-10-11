@@ -6,6 +6,12 @@ TILESET mapTiles "sprite/map_tiles.png" NONE NONE ROW
 # ocupa ni un tile extra. NONE (sin comprimir) a proposito: una tileset
 # comprimida se descomprime en el heap al cargarla, y de heap vamos justos.
 TILESET gameFont "sprite/font.png" NONE NONE ROW
+
+# Segunda fuente, solo para el HUD de juego (peticion del usuario). SGDK
+# carga UNA fuente en TILE_FONT_INDEX y todos los VDP_drawText tiran de
+# ella, asi que tener otra distinta obliga a un tileset propio y a dibujar
+# los tiles a mano: eso es hud.c.
+TILESET hudFont "sprite/font_hud.png" NONE NONE ROW
 # 5 frames de 8x8 en una fila: 0 la nave normal, y 1..4 la nave estrujada
 # contra el muro que acaba de golpear, en el orden DIR_UP/LEFT/DOWN/RIGHT
 # de player.h (asi el frame es 1+dir, sin tabla de por medio).
@@ -35,3 +41,9 @@ WAV hihat3 "sound/hihat3.wav" PCM4
 # variant rotation like the kick/hihat have.
 WAV enemyKill "sound/enemykill0.wav" PCM4
 WAV letterPickup "sound/letter0.wav" PCM4
+
+# Clic del typewriter (peticion del usuario: "un sonido muy muy discreto").
+# 9 ms, el sample mas corto del juego con diferencia: a un tick cada pocos
+# glifos tiene que haber terminado antes del siguiente o se solapan en un
+# siseo continuo.
+WAV typeTick "sound/typetick0.wav" PCM4

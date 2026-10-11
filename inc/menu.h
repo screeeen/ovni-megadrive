@@ -26,6 +26,12 @@
 // on this), and the sun sprite on PAL1 -- a real circular sprite, not a
 // BG-tile fill (spec §32septies), since BG tiles are too coarse (8x8) to
 // read as round at this size. Call once at boot.
+// Cuantos tiles de VRAM ocupa el menu a partir de su base (titulo + barra
+// de planetas). Publicado para que lo que cargue tiles despues -- la
+// fuente del HUD, hud.c -- sepa donde empieza el hueco libre, igual que
+// MAZE_TILE_COUNT ya lo hace para guidemap.
+#define MENU_TILE_COUNT 100
+
 void Menu_loadGraphics(void);
 
 // Stamps the big 16x16-per-letter OVNI into BG_A's top right corner (user
@@ -38,6 +44,16 @@ void Menu_drawTitle(void);
 // This planet's name, for anything outside menu.c that has to label it
 // (main.c's high-score table). Index is a preset index, 0..MENU_PLANET_COUNT-1.
 const char *Menu_planetName(u8 index);
+
+// The galaxy name shown under OVNI, above the planet bar. Published so
+// the cartography screen can label itself with the SAME one (user
+// request: "quiero que el nombre de la galaxia en la pantalla de
+// cartografia sea la misma que debajo de ovni") instead of inventing its
+// own per boot, which is what it used to do.
+const char *Menu_galaxyName(void);
+
+// Set once per session by main.c, as soon as random() is properly seeded.
+void Menu_setGalaxyName(const char *name);
 
 // Shows/hides the planet sprites, the cursor arrow and the sun (spec
 // §31, §32septies) -- call with TRUE when entering the menu, FALSE when

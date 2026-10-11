@@ -1,5 +1,6 @@
 #include "plants.h"
 #include "maze.h"
+#include "hud.h"
 #include "guidemap.h" // MAX_MAP_COLS/MAX_MAP_ROWS
 
 // 3 independent lines per room (user request: "añade dos hileras más de
@@ -303,10 +304,8 @@ void Plants_drawHud(void)
 {
     char buf[20];
 
-    sprintf(buf, "PLANTAS:%d/%d", total, planetTotal);
-    VDP_setTextPriority(1); // draw above BG_A's low-priority maze tiles, same as Items_drawHud
-    VDP_drawTextBG(BG_B, buf, 14, 1);
-    VDP_setTextPriority(0);
+    sprintf(buf, "PLANTS:%d/%d", total, planetTotal);
+    Hud_drawText(buf, 14, 1); // fuente propia del HUD, igual que Items_drawHud
 }
 
 u16 Plants_collectedCount(void)

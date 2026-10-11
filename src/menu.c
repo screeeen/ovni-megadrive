@@ -12,7 +12,11 @@
 // text down (spec §32quat) to free up the extra vertical room these
 // wider orbits need.
 #define SUN_CENTER_X 160
-#define SUN_CENTER_Y 142  // bajado: galaxia + fila de recuadros ocupan arriba
+// Subido 8 px respecto a los 142 que tenia: la orbita mas externa llega a
+// +34 y el planeta mas grande mide 12 de radio, o sea que antes bajaba
+// hasta la fila 23 y dejaba el bloque de texto apelmazado en 24..27. Con
+// 134 acaba en la 22 y el texto cabe en 23/25/27, con aire entre lineas.
+#define SUN_CENTER_Y 134
 
 // menuSun is a real 32x32 (4x4 tile) sprite, not a BG-tile fill (spec
 // §32septies, user request: "por que el bloque del centro no es un
@@ -303,6 +307,7 @@ void Menu_drawTitle(void)
 #define BAR_STRIDE   (BAR_BOX_W + BAR_GAP)
 #define BAR_INSET    2   // el marco se retranquea: deja 4 px de aire entre recuadros
 #define BAR_NAME_Y   (BAR_Y + BAR_BOX_H)
+#define BAR_NAME_LEN 4   // todos los nombres son de 4 letras
 #define BAR_GALAXY_Y (BAR_Y - 1)
 
 #define BAR_TILE_BASE   (TITLE_TILE_BASE + TITLE_TILES)
@@ -319,13 +324,35 @@ const char *Menu_planetName(u8 index)
     return planetNames[(index < MENU_PLANET_COUNT) ? index : 0];
 }
 
-static const char *const galaxyName = "GALAXIA XR-13";
+// Lo rellena main.c una vez por sesion, en cuanto random() esta sembrado
+// de verdad (spec 54: no lo esta hasta la primera pulsacion real). Las dos
+// pantallas que lo muestran -- esta y la de cartografia -- leen de aqui,
+// asi que coinciden por construccion. El valor inicial solo se veria si
+// algo dibujase el menu antes de esa primera pulsacion, cosa que no pasa.
+static char galaxyName[20] = "GALAXY ---";
+
+const char *Menu_galaxyName(void)
+{
+    return galaxyName;
+}
+
+void Menu_setGalaxyName(const char *name)
+{
+    u8 i = 0;
+
+    while (name[i] && (i < (u8) (sizeof(galaxyName) - 1)))
+    {
+        galaxyName[i] = name[i];
+        i++;
+    }
+    galaxyName[i] = '\0';
+}
 static const u8 planetCircleSize[MENU_PLANET_COUNT] = { 0, 0, 0, 0, 1, 1, 2, 2 };
 static const u8 circleRadius[3] = { 3, 5, 7 };
 
 // Indice 2 = el violeta de los planetas, copiado desde PAL3 por
 // Menu_setVisible; indice 1 = el gris de los bloqueados.
-#define BAR_INK_INDEX ((PAL0 * 16) + 2)   // violeta de los planetas
+#define BAR_INK_INDEX ((PAL0 * 16) + 2)   // the planets' violet
 // 0 = blanco, 1 = gris (bloqueado), 2 = violeta (solo el contorno del seleccionado)
 static const u8 circleInk[3] = { 15, 1, 2 };
 static u16 savedBarInk;
@@ -434,9 +461,13 @@ static void loadBarTiles(void)
             }
 }
 
-static void barPutTile(u16 tileIndex, u16 x, u16 y)
+// pal: PAL0 normalmente. Un planeta superado se pinta con NAME_PAL_DONE,
+// donde el indice 15 es amarillo (Menu_setVisible lo deja ahi) -- o sea
+// que los MISMOS tiles de tinta 0, que usan ese indice, salen amarillos
+// sin necesidad de duplicar el arte.
+static void barPutTile(u16 tileIndex, u16 x, u16 y, u16 pal)
 {
-    VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, tileIndex), x, y);
+    VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tileIndex), x, y);
 }
 
 void Menu_drawPlanetBar(u8 selectedIndex, u8 unlockedCount, const bool *completed)
@@ -450,41 +481,64 @@ void Menu_drawPlanetBar(u8 selectedIndex, u8 unlockedCount, const bool *complete
         const u16 bx    = (u16) (BAR_X + (i * BAR_STRIDE));
         const bool bloqueado = (i >= unlockedCount);
         const bool elegido   = (i == selectedIndex);
+        // Superado: el recuadro y el planeta salen amarillos igual que el
+        // nombre (user request: "cuando un planeta esta completado, su
+        // nombre sale en amarillo, quiero que el cuadrado y el planeta
+        // tambien"). No hay tiles nuevos: se pintan los de tinta 0, que
+        // usan el indice 15, con la paleta cuyo 15 es amarillo.
+        const bool superado  = !bloqueado && (completed != NULL) && completed[i];
+        const u16 pal   = (u16) (superado ? NAME_PAL_DONE : PAL0);
         const u8  ink   = (u8) (bloqueado ? 1 : 0);                       // circulo y marco normal
-        const u8  fink  = (u8) (elegido ? (bloqueado ? 1 : 2) : ink);     // violeta solo al elegido
+        // El violeta del elegido cederia al amarillo del superado, asi que
+        // un planeta superado conserva el amarillo y la seleccion se lee
+        // por el GROSOR del marco, que es un canal aparte del color.
+        const u8  fink  = (u8) (elegido ? (bloqueado ? 1 : (superado ? 0 : 2)) : ink);
         const u16 frame = (u16) (BAR_TILE_BASE
                                  + ((((u16) fink * 2) + (elegido ? 1u : 0u)) * BAR_FRAME_SET));
         const u16 circ  = (u16) (BAR_CIRCLE_BASE + (((planetCircleSize[i] * 3) + ink) * 4));
 
-        barPutTile((u16) (frame + 0), bx,             BAR_Y);
-        barPutTile((u16) (frame + 1), (u16) (bx + 1), BAR_Y);
-        barPutTile((u16) (frame + 1), (u16) (bx + 2), BAR_Y);
-        barPutTile((u16) (frame + 2), (u16) (bx + 3), BAR_Y);
+        barPutTile((u16) (frame + 0), bx, BAR_Y, pal);
+        barPutTile((u16) (frame + 1), (u16) (bx + 1), BAR_Y, pal);
+        barPutTile((u16) (frame + 1), (u16) (bx + 2), BAR_Y, pal);
+        barPutTile((u16) (frame + 2), (u16) (bx + 3), BAR_Y, pal);
 
-        barPutTile((u16) (frame + 3), bx,             (u16) (BAR_Y + 1));
-        barPutTile((u16) (circ  + 0), (u16) (bx + 1), (u16) (BAR_Y + 1));
-        barPutTile((u16) (circ  + 1), (u16) (bx + 2), (u16) (BAR_Y + 1));
-        barPutTile((u16) (frame + 4), (u16) (bx + 3), (u16) (BAR_Y + 1));
+        barPutTile((u16) (frame + 3), bx, (u16) (BAR_Y + 1), pal);
+        barPutTile((u16) (circ  + 0), (u16) (bx + 1), (u16) (BAR_Y + 1), pal);
+        barPutTile((u16) (circ  + 1), (u16) (bx + 2), (u16) (BAR_Y + 1), pal);
+        barPutTile((u16) (frame + 4), (u16) (bx + 3), (u16) (BAR_Y + 1), pal);
 
-        barPutTile((u16) (frame + 3), bx,             (u16) (BAR_Y + 2));
-        barPutTile((u16) (circ  + 2), (u16) (bx + 1), (u16) (BAR_Y + 2));
-        barPutTile((u16) (circ  + 3), (u16) (bx + 2), (u16) (BAR_Y + 2));
-        barPutTile((u16) (frame + 4), (u16) (bx + 3), (u16) (BAR_Y + 2));
+        barPutTile((u16) (frame + 3), bx, (u16) (BAR_Y + 2), pal);
+        barPutTile((u16) (circ  + 2), (u16) (bx + 1), (u16) (BAR_Y + 2), pal);
+        barPutTile((u16) (circ  + 3), (u16) (bx + 2), (u16) (BAR_Y + 2), pal);
+        barPutTile((u16) (frame + 4), (u16) (bx + 3), (u16) (BAR_Y + 2), pal);
 
-        barPutTile((u16) (frame + 5), bx,             (u16) (BAR_Y + 3));
-        barPutTile((u16) (frame + 6), (u16) (bx + 1), (u16) (BAR_Y + 3));
-        barPutTile((u16) (frame + 6), (u16) (bx + 2), (u16) (BAR_Y + 3));
-        barPutTile((u16) (frame + 7), (u16) (bx + 3), (u16) (BAR_Y + 3));
+        barPutTile((u16) (frame + 5), bx, (u16) (BAR_Y + 3), pal);
+        barPutTile((u16) (frame + 6), (u16) (bx + 1), (u16) (BAR_Y + 3), pal);
+        barPutTile((u16) (frame + 6), (u16) (bx + 2), (u16) (BAR_Y + 3), pal);
+        barPutTile((u16) (frame + 7), (u16) (bx + 3), (u16) (BAR_Y + 3), pal);
 
-        if (bloqueado)                                VDP_setTextPalette(NAME_PAL_LOCKED);
-        else if (elegido)                             VDP_setTextPalette(NAME_PAL_OPEN);
-        else if (completed != NULL && completed[i])   VDP_setTextPalette(NAME_PAL_DONE);
-        else                                          VDP_setTextPalette(PAL0);
-
-        VDP_drawText(planetNames[i], bx, BAR_NAME_Y);
     }
 
-    VDP_setTextPalette(PAL0);   // el resto del menu vuelve a blanco
+    // Solo el nombre del planeta bajo el cursor, y debajo de su propio
+    // recuadro (user request). Los 8 a la vez ocupaban 32 de las 40
+    // columnas y no dejaban sitio para separarlos sin comerse los
+    // margenes: 8 x 4 letras + 7 huecos son 39. Con uno solo no hay nada
+    // que separar, y la barra conserva sus 4 columnas de margen.
+    {
+        const bool bloqueado = (selectedIndex >= unlockedCount);
+        const bool superado  = !bloqueado && (completed != NULL) && completed[selectedIndex];
+
+        if (bloqueado)      VDP_setTextPalette(NAME_PAL_LOCKED);
+        else if (superado)  VDP_setTextPalette(NAME_PAL_DONE);
+        else                VDP_setTextPalette(NAME_PAL_OPEN);
+
+        // Debajo de SU recuadro, no centrado en pantalla (user request):
+        // el nombre tiene que señalar a cual pertenece.
+        VDP_drawText(planetNames[selectedIndex],
+                     (u16) (BAR_X + (selectedIndex * BAR_STRIDE)), BAR_NAME_Y);
+    }
+
+    VDP_setTextPalette(PAL0);   // the rest of the menu goes back to white
 }
 
 void Menu_loadGraphics(void)

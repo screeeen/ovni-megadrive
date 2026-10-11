@@ -1,6 +1,7 @@
 #include "items.h"
 #include "guidemap.h"
 #include "maze.h"
+#include "hud.h"
 
 static bool collected[ITEM_COUNT];
 static u8 nextIndex; // index of the next item that CAN be collected (order enforced)
@@ -144,7 +145,5 @@ void Items_drawHud(void)
     }
     line[(2 * itemCount) - 1] = '\0'; // drop the trailing space
 
-    VDP_setTextPriority(1); // draw above BG_A's low-priority maze tiles
-    VDP_drawTextBG(BG_B, line, 1, 1);
-    VDP_setTextPriority(0); // restore default for any other text draw (menu, guide map, item letters)
+    Hud_drawText(line, 1, 1); // fuente propia del HUD, ya con prioridad alta
 }

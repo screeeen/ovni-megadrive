@@ -5,6 +5,7 @@
 #include "guidemap.h"
 #include "items.h"
 #include "menu.h"
+#include "hud.h"
 #include "enemy.h"
 #include "sfx.h"
 #include "plants.h"
@@ -589,6 +590,18 @@ static u8 countPlanetRooms(void)
     return n;
 }
 
+static u8 countDeadEnemies(void)
+{
+    u8 col, row, n = 0;
+
+    for (row = 0; row < mapRows; row++)
+        for (col = 0; col < mapCols; col++)
+            if ((guideMap[row][col].type == CELL_ROOM) && GuideMap_isEnemyDead(col, row))
+                n++;
+
+    return n;
+}
+
 static bool allEnemiesDead(void)
 {
     u8 col, row;
@@ -969,7 +982,7 @@ static void ensurePlantsTotalKnown(u8 presetIndex)
         presetSave[presetIndex].hasSave = TRUE;
     }
 
-    VDP_drawText("CARGANDO...", 14, 13);
+    VDP_drawText("LOADING...", 15, 13);
     presetSave[presetIndex].plantsTotal = scanPlanetPlantTotal(presetIndex);
     presetSave[presetIndex].plantsTotalKnown = TRUE;
     VDP_clearPlane(BG_A, TRUE);
@@ -999,33 +1012,136 @@ static u16 introTextX(u16 len)
 // primera pantalla del enlace subespacial tiene que tener margen
 // tambien") -- which meant breaking the two long lines in two, since
 // neither fits in the 24 columns that leaves.
+// ---------------------------------------------------------------------
+// Typewriter: text that reveals itself a few glyphs per frame instead of
+// appearing all at once (user request, extended afterwards to "el resto
+// tambien, quiero que los textos aparezcan asi").
+//
+// A screen queues its lines with typeLine() and then calls typeStep()
+// once per frame; the reveal walks every queued line in order as if they
+// were one long string. Lines are COPIED in, so a caller can queue a
+// sprintf buffer and let it go out of scope.
+//
+// Only used on screens that appear and then sit there. The planet menu
+// is deliberately left alone: it redraws on every cursor move, so typing
+// it out would stutter the whole bar while browsing.
+// ---------------------------------------------------------------------
+#define TYPE_CHARS_PER_FRAME 3   // 60fps -> 180 glyphs a second
+#define TYPE_MAX_LINES      12   // the high-score table is the longest, at 11
+#define TYPE_MAX_LEN        40   // one full screen row
+
+// One tick every this many glyphs. At 3 glyphs a frame that is a click
+// about 15 times a second -- a typewriter. One per glyph would be 180,
+// which is a hiss.
+#define TYPE_TICK_EVERY     12
+
+static char typeText[TYPE_MAX_LINES][TYPE_MAX_LEN + 1];
+static u8   typeX[TYPE_MAX_LINES];
+static u8   typeRow[TYPE_MAX_LINES];
+static u8   typeLen[TYPE_MAX_LINES];
+static u8   typeCount;
+static u16  typeCursor;   // glyphs already on screen, across every line
+static u16  typeSinceTick;
+
+// Throws away whatever was queued. The screen itself is the caller's to
+// clear -- this only forgets what it was going to type.
+static void typeReset(void)
+{
+    typeCount = 0;
+    typeCursor = 0;
+    typeSinceTick = 0;
+}
+
+static void typeLine(const char *text, u16 x, u16 row)
+{
+    u8 n = 0;
+
+    if (typeCount >= TYPE_MAX_LINES)
+        return;
+
+    while (text[n] && (n < TYPE_MAX_LEN))
+    {
+        typeText[typeCount][n] = text[n];
+        n++;
+    }
+    typeText[typeCount][n] = '\0';
+
+    typeX[typeCount] = (u8) x;
+    typeRow[typeCount] = (u8) row;
+    typeLen[typeCount] = n;
+    typeCount++;
+}
+
+// Puts the next single glyph up. FALSE once every queued line is out.
+static bool typeOne(void)
+{
+    u16 seen = 0;
+    u8 i;
+
+    for (i = 0; i < typeCount; i++)
+    {
+        if (typeCursor < (u16) (seen + typeLen[i]))
+        {
+            const u16 n = (u16) (typeCursor - seen);
+            char ch[2];
+
+            ch[0] = typeText[i][n];
+            ch[1] = '\0';
+            VDP_drawText(ch, (u16) (typeX[i] + n), typeRow[i]);
+            typeCursor++;
+            return TRUE;
+        }
+
+        seen = (u16) (seen + typeLen[i]);
+    }
+
+    return FALSE;
+}
+
+// Call once per frame while the screen is up. A no-op once the text is
+// all out, so it costs nothing while it waits for input.
+static void typeStep(void)
+{
+    u8 n;
+
+    for (n = 0; n < TYPE_CHARS_PER_FRAME; n++)
+    {
+        if (!typeOne())
+            return;
+
+        if (++typeSinceTick >= TYPE_TICK_EVERY)
+        {
+            typeSinceTick = 0;
+            Sfx_playTypeTick();
+        }
+    }
+}
+
+// TRUE once there is nothing left to reveal.
+static bool typeDone(void)
+{
+    u16 total = 0;
+    u8 i;
+
+    for (i = 0; i < typeCount; i++)
+        total = (u16) (total + typeLen[i]);
+
+    return typeCursor >= total;
+}
+
+// The boot terminal, queued rather than drawn.
 static void drawIntroPrompt(void)
 {
     VDP_clearPlane(BG_A, TRUE);
-    VDP_drawText("OVNI-TERM MK.VII", introTextX(16), 10);
-    VDP_drawText("----------------", introTextX(16), 11);
-    VDP_drawText("ENLACE SUBESPACIAL", introTextX(18), 13);
-    VDP_drawText("INACTIVO", introTextX(8), 14);
-    VDP_drawText("PULSA UN BOTON PARA", introTextX(19), 17);
-    VDP_drawText("ESTABLECER CONEXION", introTextX(19), 18);
+    typeReset();
+    typeLine("OVNI-TERM MK.VII",     introTextX(16), 9);
+    typeLine("----------------",     introTextX(16), 10); // subrayado: pegado a proposito
+    typeLine("SUBSPACE LINK",        introTextX(13), 13);
+    typeLine("OFFLINE",              introTextX(7),  15);
+    typeLine("PRESS ANY BUTTON TO",  introTextX(19), 19);
+    typeLine("ESTABLISH CONNECTION", introTextX(20), 21);
 }
 
-// Invents a galaxy name from the shared random() stream -- 2 syllables
-// plus a sector digit, e.g. "XENYN-4". Called from introBegin(), right
-// after the player's first real button press of the session (same spec
-// §54 safety the menu's own LEFT/RIGHT navigation already relies on:
-// random() isn't properly seeded until SGDK's joypad driver sees a real
-// press, and this is it).
-static void pickGalaxyName(char *out)
-{
-    static const char *const pre[] = { "XEN", "VOR", "KRYL", "THAL", "NEBU", "QUAS", "ZOR", "HELI", "MYRA", "OBEX" };
-    static const char *const suf[] = { "ON", "AR", "IS", "OS", "YN", "UX", "EX", "IA", "OTH", "ERA" };
-    const u8 i = (u8) (random() % 10);
-    const u8 j = (u8) (random() % 10);
-    const u8 n = (u8) (1 + (random() % 9));
-
-    sprintf(out, "%s%s-%d", pre[i], suf[j], n);
-}
 
 // Frame-chunked planet precompute, STATE_INTRO only (user request:
 // "empieza a soltar numeros y caracteres raros que puedes sacar del
@@ -1102,20 +1218,55 @@ static void introFloodReset(void); // defined below, next to introFloodStep -- i
 // later is not a journey anywhere (user request: "cuando cargas un nuevo
 // planeta, no indiques que viajas a esa galaxia, solo cartografiando"),
 // so that line is left off and only the work itself is announced.
+// Invents a galaxy name from the shared random() stream -- 2 syllables
+// plus a sector digit, e.g. "XENYN-4".
+static void pickGalaxyName(char *out)
+{
+    static const char *const pre[] = { "XEN", "VOR", "KRY", "ZAL", "MYR", "TAU", "ORI", "CYG" };
+    static const char *const suf[] = { "YN", "AX", "OR", "IS", "UM", "EL", "AR", "OS" };
+    const u16 i = random() & 7;
+    const u16 j = random() & 7;
+    const u16 n = 1 + (random() % 9);
+
+    sprintf(out, "%s%s-%d", pre[i], suf[j], n);
+}
+
+// Decides this session's galaxy name, once. Both screens that show it
+// read it back from menu.c afterwards.
+static bool galaxyNamePicked;
+
+static void ensureGalaxyName(void)
+{
+    char galaxy[20];
+
+    if (galaxyNamePicked)
+        return;
+
+    pickGalaxyName(galaxy);
+    Menu_setGalaxyName(galaxy);
+    galaxyNamePicked = TRUE;
+}
+
 static void beginCartography(u8 firstPlanet, u8 limit, bool showGalaxy)
 {
     char buf[40];
-    char galaxy[16];
     int len;
 
     VDP_clearPlane(BG_A, TRUE);
+    typeReset(); // olvida lo que escribio la terminal de arranque
     if (showGalaxy)
     {
-        pickGalaxyName(galaxy);
-        len = sprintf(buf, "GALAXIA %s", galaxy);
-        VDP_drawText(buf, introTextX(len), 2);
+        // Se inventa UNA vez por sesion y se guarda en menu.c, para que
+        // esta pantalla y la barra de planetas muestren la misma (user
+        // request: "que coincidan, no que siempre sea el mismo"). Antes
+        // cada una tenia la suya y se contradecian. Aqui es seguro
+        // sortearla: beginCartography solo corre despues de la primera
+        // pulsacion real, que es cuando random() queda sembrado (spec 54).
+        ensureGalaxyName();
+        len = sprintf(buf, "%s", Menu_galaxyName());
+        typeLine(buf, introTextX(len), 2);
     }
-    VDP_drawText("CARTOGRAFIANDO...", introTextX(17), 4);
+    typeLine("MAPPING...", introTextX(10), 5);
 
     introPlanetIndex = firstPlanet;
     introPlanetLimit = limit;
@@ -1557,6 +1708,8 @@ static void loadRoom(u8 col, u8 row)
         // open cell on a door trajectory) gets none -- see Enemy_spawnForRoom.
         SPR_setVisibility(enemySprite, enemy.alive ? VISIBLE : HIDDEN);
     }
+
+    Sfx_slop(); // una nota del acorde por habitacion, ver su doc en sfx.h
 }
 
 // Room transition (spec §7): move to the neighboring cell, regenerate its
@@ -1750,7 +1903,93 @@ static u16 screenAlternateTimer;
 // SCORE_PER_ROOM), so a good run on a small planet can legitimately beat
 // a sloppy one on a big planet. A planet never played has no start value
 // yet and shows as a dash rather than a zero it never earned.
+// Las tres unicas lineas que caben bajo la orbita con aire entre ellas.
+// La orbita mas externa acaba en la fila 22 (ver SUN_CENTER_Y en menu.c),
+// y la pantalla acaba en la 27: tres renglones de dos en dos.
+#define MENU_ROW_A 23   // cuanto falta para abrir el siguiente planeta
+#define MENU_ROW_B 25   // lo recogido, o "- LOCKED -"
+#define MENU_ROW_C 27   // "PRESS A TO START", o lo que cuesta abrirlo
+
 static void drawMenu(void);       // all three defined below
+// ---------------------------------------------------------------------
+// Game over: resumen de lo recogido y un marcador que cae hacia atras,
+// como los arcades (user request: "quiero el resumen de lo colectado y un
+// contador de score que corre hacia atras").
+//
+// Cae desde la puntuacion de salida del planeta hasta la que queda, que
+// es justo lo que el jugador se ha gastado en tiempo y movimientos --
+// ver SCORE_PER_ROOM. Arranca cuando el texto ha terminado de escribirse,
+// no antes, para que las dos cosas no compitan.
+// ---------------------------------------------------------------------
+#define GAMEOVER_COUNT_FRAMES 90   // 1,5 s de bajada, sea cual sea el salto
+#define GAMEOVER_TICK_EVERY    4   // un clic cada 4 frames mientras baja
+#define GAMEOVER_SCORE_ROW    21
+#define GAMEOVER_SCORE_RIGHT  30   // el numero se alinea a la derecha aqui
+
+static u32 goShown, goTarget, goStep;
+static bool goSettled;
+static u8 goTick;
+
+static void gameOverBegin(void)
+{
+    Sfx_slopStop(); // el drone se corta en seco al morir
+
+    const u8 p = sizePresetIndex;
+    const u32 start = (u32) presetSave[p].scoreRooms * SCORE_PER_ROOM;
+    char buf[40];
+
+    VDP_clearPlane(BG_A, TRUE);
+    typeReset();
+    typeLine("GAME OVER", 15, 8);
+
+    sprintf(buf, "PLANTS  %3d OF %3d", Plants_collectedCount(), presetSave[p].plantsTotal);
+    typeLine(buf, 11, 13);
+    sprintf(buf, "LETTERS %3d OF %3d", Items_collectedCount(), lettersFor(p));
+    typeLine(buf, 11, 15);
+    sprintf(buf, "ENEMIES %3d OF %3d", countDeadEnemies(), presetSave[p].scoreRooms);
+    typeLine(buf, 11, 17);
+    typeLine("SCORE", 11, GAMEOVER_SCORE_ROW);
+
+    goTarget = scoreFor(p);
+    goShown = start;
+    // +1 para que nunca sea 0: con un salto pequeno la division se iria a
+    // cero y el marcador no bajaria nunca.
+    goStep = ((start - goTarget) / GAMEOVER_COUNT_FRAMES) + 1;
+    goSettled = FALSE;
+    goTick = 0;
+}
+
+// Una vez por frame mientras la pantalla esta puesta.
+static void gameOverStep(void)
+{
+    char buf[12];
+    int len;
+
+    typeStep();
+    if (!typeDone())
+        return;        // el marcador espera a que acabe el texto
+
+    if (goSettled)
+        return;
+
+    if (goShown > goTarget)
+    {
+        goShown = ((goShown - goTarget) > goStep) ? (goShown - goStep) : goTarget;
+
+        if (++goTick >= GAMEOVER_TICK_EVERY)
+        {
+            goTick = 0;
+            Sfx_playTypeTick();
+        }
+    }
+    else
+        goSettled = TRUE;   // un ultimo repintado con el valor final, y para
+
+    len = sprintf(buf, "%lu", goShown);
+    VDP_drawText("        ", (u16) (GAMEOVER_SCORE_RIGHT - 7), GAMEOVER_SCORE_ROW);
+    VDP_drawText(buf, (u16) (GAMEOVER_SCORE_RIGHT - len + 1), GAMEOVER_SCORE_ROW);
+}
+
 static void drawScoreTable(void);
 static void flushSprites(void);
 
@@ -1802,8 +2041,10 @@ static void drawScoreTable(void)
         order[j] = v;
     }
 
-    len = sprintf(buf, "PUNTUACIONES");
-    VDP_drawText(buf, (u16) ((40 - len) / 2), 4);
+    typeReset();
+
+    len = sprintf(buf, "HIGH SCORES");
+    typeLine(buf, (u16) ((40 - len) / 2), 4);
 
     for (i = 0; i < SIZE_PRESET_COUNT; i++)
     {
@@ -1818,16 +2059,16 @@ static void drawScoreTable(void)
             len = sprintf(buf, "%d  %-6s %9lu %s", i + 1, Menu_planetName(p),
                           scoreFor(p), presetSave[p].scoreDone ? "*" : " ");
 
-        VDP_drawText(buf, 8, (u16) (8 + (i * 2)));
+        typeLine(buf, 8, (u16) (8 + (i * 2)));
     }
 
-    VDP_drawText("* PLANETA COMPLETADO", 8, 25);
-    VDP_drawText("PULSA UN BOTON", 13, 27);
+    typeLine("* PLANET COMPLETED", 8, 25);
+    typeLine("PRESS ANY BUTTON", 12, 27);
 }
 
 static void drawMenu(void)
 {
-    char buf[40]; // a full screen line: the longest sprintf here is the locked planet's "RECOGE n OBJETOS MAS PARA ABRIRLO"
+    char buf[40]; // a full screen line: the longest sprintf here is the locked planet's "COLLECT n MORE ITEMS TO OPEN IT"
     int len;
     const u8 letters = lettersFor(sizePresetIndex);
     // Saved progress for the selected planet (spec §35) -- 0 only when
@@ -1877,33 +2118,31 @@ static void drawMenu(void)
     {
         u16 percent, missing;
 
-        VDP_drawText("- BLOQUEADO -", (40 - 13) / 2, 25);
+        VDP_drawText("- LOCKED -", (40 - 10) / 2, MENU_ROW_B);
 
         if (planetUnlockProgress(&percent, &missing))
-            len = sprintf(buf, "RECOGE %d OBJETOS MAS PARA ABRIRLO", missing);
+            len = sprintf(buf, "COLLECT %d MORE ITEMS TO OPEN IT", missing);
         else
-            len = sprintf(buf, "VISITA LOS PLANETAS YA ABIERTOS");
+            len = sprintf(buf, "VISIT THE PLANETS ALREADY OPEN");
 
-        VDP_drawText(buf, (40 - len) / 2, 26);
+        VDP_drawText(buf, (40 - len) / 2, MENU_ROW_C);
     }
     else
     {
+    // Plantas y letras en UNA linea. Eran dos seguidas, y entre la orbita
+    // y el borde de pantalla solo hay tres renglones con aire (ver
+    // MENU_ROW_A/B/C): juntarlas es lo que permite separarlas del resto
+    // en vez de apilar cuatro lineas pegadas.
     if (presetSave[sizePresetIndex].plantsTotalKnown)
-    {
-        len = sprintf(buf, "%d DE %d PLANTAS", presetSave[sizePresetIndex].plantsCollected,
-                      presetSave[sizePresetIndex].plantsTotal);
-        VDP_drawText(buf, (40 - len) / 2, 25);
-    }
+        len = sprintf(buf, "%d/%d PLANTS   %d/%d LETTERS",
+                      presetSave[sizePresetIndex].plantsCollected,
+                      presetSave[sizePresetIndex].plantsTotal, collected, letters);
+    else
+        len = sprintf(buf, "%d/%d LETTERS", collected, letters);
 
-    // Letters (spec §33/§35): collected/faltan del planeta seleccionado --
-    // progress is per-planet and survives leaving mid-run (see
-    // presetSave), so this reflects that saved state, not the live game.
-    // Replaces the old 2-line "N LETRAS" + "N DE N RECOGIDAS" pair with
-    // one line matching the plants line's own "collected DE total" shape.
-    len = sprintf(buf, "%d DE %d LETRAS", collected, letters);
-    VDP_drawText(buf, (40 - len) / 2, 26);
+    VDP_drawText(buf, (40 - len) / 2, MENU_ROW_B);
 
-    VDP_drawText("PULSA A PARA EMPEZAR", 10, 27);
+    VDP_drawText("PRESS A TO START", 12, MENU_ROW_C);
     }
 
     // How close the next planet is to opening (user request: the rest of
@@ -1916,11 +2155,11 @@ static void drawMenu(void)
         u16 percent, missing;
 
         if (planetUnlockProgress(&percent, &missing))
-            len = sprintf(buf, "PROXIMO PLANETA: %d%% DE %d%%", percent, PLANET_UNLOCK_PERCENT);
+            len = sprintf(buf, "NEXT PLANET: %d%% OF %d%%", percent, PLANET_UNLOCK_PERCENT);
         else
-            len = sprintf(buf, "CARTOGRAFIA INCOMPLETA");
+            len = sprintf(buf, "MAPPING INCOMPLETE");
 
-        VDP_drawText(buf, (40 - len) / 2, 24);
+        VDP_drawText(buf, (40 - len) / 2, MENU_ROW_A);
     }
 }
 
@@ -2053,6 +2292,8 @@ static void planetCompletedFlags(bool *out)
 
 static void resetToMenu(void)
 {
+    Sfx_slopStop(); // el acorde del chordslop no debe seguir sonando en el menu
+
     const GameState previousState = gameState; // capture before overwriting below
 
     fadeToBackdrop(); // the menu is built below, behind the black
@@ -2930,11 +3171,11 @@ static void drawRoomViewer(void)
         markPlantPathCell(sx, sy, 4);
     }
 
-    len = sprintf(buf, "VISOR %02d,%02d S:%04X %c%c%c%c E:%c B:SAL", rvCol, rvRow,
+    len = sprintf(buf, "VIEWER %02d,%02d S:%04X %c%c%c%c E:%c B:EXIT", rvCol, rvRow,
                   roomSeedFor(rvCol, rvRow),
                   doorStateChar(rvCol, rvRow, DOOR_N), doorStateChar(rvCol, rvRow, DOOR_E),
                   doorStateChar(rvCol, rvRow, DOOR_S), doorStateChar(rvCol, rvRow, DOOR_W),
-                  "NESO"[rvEntryDir]);
+                  "NESW"[rvEntryDir]);
     while (len < 39)
         buf[len++] = ' ';
     buf[len] = 0;
@@ -3047,8 +3288,8 @@ static void enterSweep(void)
     VDP_clearPlane(BG_A, TRUE);
     VDP_clearPlane(BG_B, TRUE);
     invalidateHudLines();
-    VDP_drawText("BARRIDO DE RUTAS", 12, 2);
-    VDP_drawText("PLANTAS QUE ALGUNA ENTRADA NO ALCANZA", 2, 3);
+    VDP_drawText("ROUTE SWEEP", 14, 2);
+    VDP_drawText("PLANTS SOME ENTRANCE CANNOT REACH", 3, 3);
 }
 
 // The ship arrives through door `dir` still moving, so its first resting
@@ -3119,11 +3360,11 @@ static void sweepStep(void)
 
     if (sweepCursor >= cellCount)
     {
-        sprintf(buf, "FIN. SALAS:%d  SALAS CON FALLO:%d", sweepRooms, sweepBadRooms);
+        sprintf(buf, "DONE. ROOMS:%d  FAILED:%d", sweepRooms, sweepBadRooms);
         VDP_drawText(buf, 2, 5);
-        sprintf(buf, "PLANTAS SIN RUTA:%d", sweepBadPlants);
+        sprintf(buf, "PLANTS WITH NO ROUTE:%d", sweepBadPlants);
         VDP_drawText(buf, 2, 26);
-        VDP_drawText("PULSA B PARA VOLVER", 2, 27);
+        VDP_drawText("PRESS B TO GO BACK", 2, 27);
         sweepDone = TRUE;
         return;
     }
@@ -3136,7 +3377,7 @@ static void sweepStep(void)
         return;
     }
 
-    sprintf(buf, "SALA %02d,%02d  PUERTA %c  (%d/%d)", col, row, "NESO"[sweepDoor],
+    sprintf(buf, "ROOM %02d,%02d  DOOR %c  (%d/%d)", col, row, "NESW"[sweepDoor],
             sweepCursor + 1, cellCount);
     VDP_drawText(buf, 2, 5);
 
@@ -3195,7 +3436,7 @@ static void sweepStep(void)
             sweepBadRooms++;
             if (sweepReportRow <= SWEEP_LAST_REPORT_ROW)
             {
-                sprintf(buf, "R%02d,%02d: %d PLANTAS SIN RUTA", col, row, missing);
+                sprintf(buf, "R%02d,%02d: %d PLANTS NO ROUTE", col, row, missing);
                 VDP_drawText(buf, 2, sweepReportRow);
                 sweepReportRow++;
             }
@@ -3241,7 +3482,9 @@ static void invalidateHudLines(void)
 // derecha arriba, donde estan los FPS en debug"). Same cached-redraw rule
 // the other BG_B lines use -- the number only changes once a second or
 // on a move, so there is no reason to poke glyphs every frame.
-#define SCORE_COL 32 // leaves 8 columns for the number, FPS goes left of it
+#define SCORE_COL   30 // leaves 8 columns for the number, FPS goes left of it
+#define SCORE_RIGHT 37 // ultima columna que ocupa el numero: deja 2 de margen
+                       // contra el borde, que pegado se leia apretado
 
 static void drawScoreHud(void)
 {
@@ -3262,12 +3505,10 @@ static void drawScoreHud(void)
     prev = score;
     len = sprintf(buf, "%lu", score);
 
-    VDP_setTextPriority(1);
-    // Right-aligned against the screen edge, padded so a shrinking number
-    // never leaves its old digits behind.
-    VDP_drawTextBG(BG_B, "        ", SCORE_COL, 0);
-    VDP_drawTextBG(BG_B, buf, (u16) (40 - len), 0);
-    VDP_setTextPriority(0);
+    // Alineado a la derecha, con relleno para que un numero que encoge no
+    // deje sus digitos viejos detras.
+    Hud_drawText("        ", SCORE_COL, 0);
+    Hud_drawText(buf, (u16) (SCORE_RIGHT - len + 1), 0);
 }
 
 static void drawRoomIdHud(void)
@@ -3518,6 +3759,7 @@ int main(bool hardReset)
     // the game picks it up with nothing else to change. Must happen
     // before anything draws text.
     VDP_loadFont(&gameFont, DMA);
+    Hud_loadFont(); // la segunda fuente, solo para el HUD (hud.h)
 
     SPR_init();
     initPlantCacheSlots(); // before any cartography pass fills the cache
@@ -3566,11 +3808,17 @@ int main(bool hardReset)
         {
             if (!introGenerating)
             {
+                typeStep(); // the terminal types itself out, see its own doc comment
+
                 // Any real button -- same "first press reseeds random()"
                 // moment spec §54 already relies on elsewhere, which is
                 // exactly why this screen exists (introBegin/introTick's
                 // own doc comment): introBegin() below draws on that
                 // safely.
+                //
+                // Deliberately NOT gated on the text having finished: the
+                // reveal is under half a second, and a player who presses
+                // through it wanted to skip it.
                 if ((state & (BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_START)) &&
                     !(prevState & (BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_START)))
                 {
@@ -3580,6 +3828,7 @@ int main(bool hardReset)
             }
             else
             {
+                typeStep();       // las cabeceras, que se escriben solas
                 introFloodStep(); // one glyph per frame, every frame -- see its own doc comment
                 if (introTick()) // one room per frame -- see its own doc comment
                 {
@@ -3622,6 +3871,8 @@ int main(bool hardReset)
             // menu either -- prevState carries it into next frame.
             const u16 anyButton = BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_START |
                                   BUTTON_UP | BUTTON_DOWN | BUTTON_LEFT | BUTTON_RIGHT;
+
+            typeStep(); // la tabla se escribe sola
 
             if ((state & anyButton) && !(prevState & anyButton))
                 leaveScoreTable();
@@ -3718,6 +3969,10 @@ int main(bool hardReset)
         }
         else if (gameState == STATE_GAMEOVER) // user request, see its own enum doc comment
         {
+            gameOverStep(); // escribe el resumen y baja el marcador
+
+            // A sigue volviendo al menu aunque ya no se anuncie (user
+            // request: quitar el "PRESS A TO RETURN").
             if ((state & BUTTON_A) && !(prevState & BUTTON_A))
                 resetToMenu();
         }
@@ -4292,9 +4547,7 @@ int main(bool hardReset)
                     SPR_setVisibility(enemySprite, HIDDEN);
                     drawInsertRoomStatus(FALSE);
 
-                    VDP_clearPlane(BG_A, TRUE);
-                    VDP_drawText("GAME OVER", 15, 12);
-                    VDP_drawText("PULSA A PARA VOLVER AL MENU", 6, 15);
+                    gameOverBegin();
                 }
                 else if (exitDir != EXIT_NONE)
                 {
@@ -4407,6 +4660,7 @@ int main(bool hardReset)
 
         prevState = state;
 
+        Sfx_update(); // dispara la nota del chordslop cuando vence su retardo
         updateShake();
         SPR_update();
 
