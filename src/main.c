@@ -2011,6 +2011,7 @@ static void leaveScoreTable(void)
     bool completed[SIZE_PRESET_COUNT];
 
     gameState = STATE_MENU;
+    Sfx_ambScene(TRUE); // no-op si ya estaba: la tabla no cambia de ambiente
     screenAlternateTimer = 0;
     drawMenu();
     planetCompletedFlags(completed);
@@ -2292,7 +2293,7 @@ static void planetCompletedFlags(bool *out)
 
 static void resetToMenu(void)
 {
-    Sfx_slopStop(); // el acorde del chordslop no debe seguir sonando en el menu
+    Sfx_slopStop(); // el acorde de la partida no sigue sonando en el menu
 
     const GameState previousState = gameState; // capture before overwriting below
 
@@ -2327,6 +2328,10 @@ static void resetToMenu(void)
     updatePlanetUnlocks(); // this run's progress may have opened the next planet
 
     gameState = STATE_MENU;
+    // El menu suena a sala de maquinas y la partida suena melodica. El zumbido
+    // entra ya; las otras tres capas las mete el jugador paseando por la barra.
+    Sfx_ambScene(TRUE);
+    Sfx_slop();
     mapViewOpen = FALSE;
     cartographyThenPlay = FALSE; // a reset mid-cartography goes to the menu, not into a run
     roomViewerOn = FALSE; // RESET_COMBO can fire from inside either map-screen tool
@@ -3122,6 +3127,7 @@ static void beginDebugScreen(void)
     if (mapShowingNoise)
     {
         PSG_setEnvelope(3, PSG_ENVELOPE_MIN); // the static's own hiss, silenced the same way releasing A does
+        Sfx_ambNoise(TRUE); // and the ambience gets the noise channel back
         VDP_clearTextLineBG(BG_B, NO_MAP_SIGNAL_ROW);
     }
 
@@ -3727,6 +3733,7 @@ static void startSelectedPlanet(void)
     Menu_hideSprites();
     flushSprites();    // no planets left in the table BEFORE their palette changes hands
     gameState = STATE_PLAYING;
+    Sfx_ambScene(FALSE); // el chordslop; loadRoom le sube el crescendo por cruce
     newGame();
     // The ship waits outside until the room is all the way in
     // (user request: "quiero que la nave no aparezca en
@@ -3848,6 +3855,8 @@ int main(bool hardReset)
                     else
                     {
                         gameState = STATE_MENU;
+                        Sfx_ambScene(TRUE); // la sala de maquinas del menu
+                        Sfx_slop();
                         Menu_setVisible(TRUE);
                         Menu_hideSprites(); // same as resetToMenu: the sprites fade in after the screen
                         drawMenu();
@@ -3914,11 +3923,13 @@ int main(bool hardReset)
             if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
             {
                 sizePresetIndex = (u8) (DEBUG_FIRST_PLANET + ((sizePresetIndex - DEBUG_FIRST_PLANET + PLANET_SEL_COUNT - 1) % PLANET_SEL_COUNT));
+                Sfx_slop(); // una capa mas del ambiente del menu
                 drawMenu();
             }
             if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
             {
                 sizePresetIndex = (u8) (DEBUG_FIRST_PLANET + ((sizePresetIndex - DEBUG_FIRST_PLANET + 1) % PLANET_SEL_COUNT));
+                Sfx_slop(); // una capa mas del ambiente del menu
                 drawMenu();
             }
             if ((state & BUTTON_A) && !(prevState & BUTTON_A) && (sizePresetIndex < unlockedPlanets))
@@ -4120,6 +4131,7 @@ int main(bool hardReset)
                             SPR_setVisibility(mapShipSprite, HIDDEN);
                             SPR_setVisibility(enemySprite, HIDDEN);
                             PAL_setColor(PLAYER_SHIP_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF));
+                            Sfx_ambNoise(FALSE); // el ambiente suelta el canal de ruido
                             PSG_setNoise(PSG_NOISE_TYPE_WHITE, PSG_NOISE_FREQ_CLOCK2);
                             PSG_setEnvelope(3, 0); // 0 = loudest (PSG_ENVELOPE_MAX)
                         }
@@ -4211,6 +4223,7 @@ int main(bool hardReset)
                     if (mapShowingNoise)
                     {
                         PSG_setEnvelope(3, PSG_ENVELOPE_MIN); // silence
+                        Sfx_ambNoise(TRUE); // the ambience gets the noise channel back
                         VDP_clearTextLineBG(BG_B, NO_MAP_SIGNAL_ROW); // the banner above
                     }
 

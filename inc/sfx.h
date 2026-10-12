@@ -81,29 +81,72 @@ void Sfx_playTypeTick(void);
 void Sfx_playEnemyKill(void);
 void Sfx_playLetterPickup(void);
 
-// Chordslop. Un acorde de cinco sinusoidales (FM, canales 1 a 5 del YM2612)
-// que suena siempre y no cambia de identidad: lo que varia son gestos de
-// pitch bend que salen de la nota y vuelven a ella, con los destinos
-// restringidos a notas del acorde. El modelo es el Chord Slop Lab que paso el
-// usuario como referencia; el porque de cada decision esta en la cabecera de
-// la seccion en sfx.c.
+// Ambiente de fondo. Hay DOS modalidades y las dos estan vivas: el MENU suena
+// a sala de maquinas y la PARTIDA suena melodica. Se cambia con Sfx_ambScene.
+// El motor (bus, rampas de volumen, deslizamiento de tono, deriva, crescendo)
+// es comun a las dos; de ahi para arriba no comparten nada.
 //
-// Sfx_slop() se llama UNA vez por cruce de habitacion -- loadRoom() en
-// main.c, que es por donde pasan todos. Hace dos cosas: arranca una voz mas
-// (las cinco entran de una en una, una por habitacion) y reparte gestos
-// nuevos a las voces que esten quietas. No-op si Sfx_isEnabled() es FALSE.
+//  MAQUINAS (el menu) -- sala de maquinas, por una referencia concreta del
+//    usuario: "International Electromatics Headquarters Exterior", de Brian
+//    Hodgson para The Invasion (Doctor Who, 1968). Sin melodia y sin acordes.
+//    Cinco canales FM: dos A#1 separadas 18 centesimas que baten a 0,6 Hz (el
+//    zumbido), un E3 flojo a tritono (la disonancia), un golpe que cae de tono
+//    y un clanc metalico. Mas el ruido del PSG enganchado al divisor del canal
+//    de tono 2, que es lo que permite BARRERLO: ese es el siseo que gira.
+//    Cada capa va en un bucle de longitud prima -- 47, 157, 541 y 379 frames --
+//    asi que la combinacion no se repite. En el menu entra con el zumbido (dos
+//    voces, que sin las dos no hay batido) y suma una capa por planeta que se
+//    selecciona: disonancia, golpe y clanc.
+//
+//  MELODICO (la partida) -- el chordslop: pad de dos voces con una progresion
+//    de ocho acordes en Do menor que cambia cada ocho segundos y una melodia
+//    encima con su propio ritmo. Tres canales FM, A#1 (58 Hz) a F3 (175 Hz).
+//    Las tres voces suenan desde la primera habitacion: un acorde a medias no
+//    es un acorde. Lo que crece por cruce es el VOLUMEN, no el numero de voces.
+//
+// El porque de cada decision esta en la cabecera de la seccion en sfx.c, y ahi
+// esta tambien lo que hay que saber antes de tocar esto: el contrato con el
+// driver PCM4, que escribe sus muestras como datos sin direccion sobre el
+// mismo puerto, y que obliga a tomar el bus del Z80 y a devolver el latch de
+// la parte 0 a $2A en cada rafaga de escrituras.
+//
+// Elige la escena, y con ella la modalidad: TRUE el menu (sala de maquinas),
+// FALSE la partida (melodico). Calla lo que estuviera sonando, rehace timbre y
+// tonos, y deja el ambiente para volver a entrar por capas. Pedir la que ya
+// esta puesta NO hace nada, asi que se puede llamar sin mirar.
+void Sfx_ambScene(bool menu);
+
+// Una capa mas y un paso de crescendo, en la modalidad que este puesta. En la
+// partida se llama UNA vez por cruce de habitacion (loadRoom(), por donde
+// pasan todos) y ahi solo mueve el crescendo, porque la melodica ya entra con
+// sus tres voces; en el menu, una por planeta que se selecciona, y ahi SI mete
+// capa (peticion del usuario: "las capas se superponen cuando se seleccionan
+// los planetas").
+// NO cambia el acorde ni dispara nada: de eso se ocupa el reloj de
+// Sfx_update. No-op si Sfx_isEnabled() es FALSE.
 void Sfx_slop(void);
 
-// Calla las cinco voces y rearma el crescendo. Hay que llamarlo al SALIR de
+// Desvanece las voces y rearma el crescendo. Hay que llamarlo al SALIR de
 // la partida (resetToMenu y gameOverBegin lo hacen): la envolvente FM esta
 // puesta para sostener indefinidamente, asi que sin esto el acorde seguiria
 // sonando en el menu. Sfx_setEnabled(FALSE) tambien lo llama.
 void Sfx_slopStop(void);
 
+// Quien manda en el canal de RUIDO del PSG. El visor de mapa lo usa para su
+// estatica y la sala de maquinas para su siseo, asi que el visor lo pide al
+// abrirse (FALSE) y lo devuelve al cerrarse (TRUE). Con la sala en el menu los
+// dos ya no coinciden nunca -- el visor es pantalla de partida y la partida
+// suena melodica, que no toca el PSG -- asi que hoy no arbitra nada. Se queda
+// porque no cuesta y vuelve a hacer falta si las escenas se intercambian.
+void Sfx_ambNoise(bool own);
+
 // Una vez por frame desde el bucle principal, al lado de updateShake(). Esto
-// SI hace trabajo de verdad: el YM2612 no tiene bends ni vibrato, asi que el
-// tono de cada voz se recalcula y se reescribe cada frame. Toma el bus del
-// Z80 una vez por llamada; es un no-op mientras no haya ninguna voz viva.
+// SI hace trabajo de verdad: lleva el pulso (medio segundo, 16 por compas) del
+// que cuelgan el cambio de acorde y las notas de la melodia, y recalcula el
+// tono y el volumen de cada voz (la envolvente del chip esta puesta para
+// sostener; el volumen lo lleva este codigo escribiendo TL). Escribe solo lo
+// que ha cambiado, y cuando hay algo que escribir toma el bus del Z80 una vez
+// por llamada. Es un no-op mientras no haya ninguna voz viva.
 void Sfx_update(void);
 
 #endif
