@@ -62,12 +62,48 @@ static bool shapeEdge[MAZE_MAX_H][MAZE_MAX_W];
 // keep each variant's silhouette instead of its weave.
 #define BASE_TILE       TILE_USER_INDEX
 
-// PAL0 index5 (see Maze_loadGraphics/Maze_drawDebugBackdrop): never used by
-// the dither art (only 0-4 are), free for the debug panel's solid box.
-#define DEBUG_BOX_PAL_INDEX 5
+// El recuadro solido del panel de depuracion. Va al 10, el primero de los
+// que el tileset deja libres, puesto a negro por Maze_loadGraphics.
+#define DEBUG_BOX_PAL_INDEX 10
 
 #define PATH 0
-#define WALL_VARIANTS 9 // 9 dither patterns
+
+// --- EL TILEADO ---
+//
+// El aspecto de un muro no se sortea: lo decide su situacion. La regla sale
+// del propio arte, leyendo por adyacencia el mapa del que salen los tiles:
+// una masa lleva el filo claro en el lado por el que se la ve desde el suelo.
+// Medido sobre el mapa original, las casillas bien muestreadas lo cumplen al
+// 100% (el tramo horizontal es la pieza de filo en 47 de 47).
+//
+// Solo hacen falta tres piezas de muro, y entre las tres gastan tres colores:
+// el CUERPO (el relleno), la SOMBRA (la columna derecha del canto y la fila
+// de abajo del filo) y el BRILLO (la linea clara). Por eso el muro se puede
+// tintar entero moviendo dos entradas de paleta -- ver Maze_setPlanetTint.
+// Los TILE_* y los *_VAR_* los trae maze_tiles_gen.h via maze.h.
+
+// La variante de cada celda sale de DONDE esta y de la semilla del cuarto, no
+// de un sorteo guardado: no cuesta RAM (los catorce arrays de 40x24 ya aprietan)
+// y sale igual en cada redibujado, asi que el suelo no parpadea.
+static u16 tileSeed = 0;
+
+static u8 cellVariant(s16 x, s16 y, u8 count)
+{
+    u16 h = (u16) ((x * 73) + (y * 151) + tileSeed);
+
+    h ^= (u16) (h >> 7);
+    h = (u16) (h * 0x2545);
+    h ^= (u16) (h >> 9);
+    return (u8) ((h >> 3) % count);
+}
+
+// La pieza a mano y las del arte entran en el mismo sorteo.
+static u8 wallVariant(s16 x, s16 y, u8 base, u8 varBase, u8 varCount)
+{
+    const u8 k = cellVariant(x, y, (u8) (varCount + 1));
+
+    return (k == 0) ? base : (u8) (varBase + k - 1);
+}
 
 static u8 grid[MAZE_MAX_H][MAZE_MAX_W];
 
@@ -93,9 +129,46 @@ static void clearLockedDoorCells(void)
             lockedDoorCell[y][x] = FALSE;
 }
 
+// Valor con el que se marca una celda de muro MIENTRAS se genera. Cualquier
+// valor distinto de PATH vale: applyAutotile() lo sustituye al final por el
+// tile que toque. Se queda en el relleno del material por si algo dibujase
+// antes de esa pasada.
 static u8 randomWallVariant(void)
 {
-    return 1 + (random() % WALL_VARIANTS);
+    return TILE_LISO;
+}
+
+// Si la celda se DIBUJA como muro. No basta con mirar el grid: Maze_draw deja
+// en blanco lo que la forma de la habitacion recorta (outsideShape sin
+// shapeEdge), asi que para el filo eso cuenta como suelo. Fuera del cuarto
+// cuenta como muro, para que el borde no se perfile contra la nada.
+static bool drawnWall(s16 x, s16 y)
+{
+    if (x < 0 || y < 0 || x >= MAZE_W || y >= MAZE_H)
+        return TRUE;
+    if (outsideShape[y][x] && !shapeEdge[y][x])
+        return FALSE;
+    return grid[y][x] != PATH;
+}
+
+// La regla, en orden: si por debajo se ve suelo manda el filo; si no, si se
+// ve suelo a la derecha, el canto; si no, el relleno.
+static void applyAutotile(void)
+{
+    s16 x, y;
+
+    for (y = 0; y < MAZE_H; y++)
+        for (x = 0; x < MAZE_W; x++)
+        {
+            if (grid[y][x] == PATH)
+                continue;
+            if (!drawnWall(x, y + 1))
+                grid[y][x] = wallVariant(x, y, TILE_FILO, FILO_VAR_BASE, FILO_VAR_COUNT);
+            else if (!drawnWall(x + 1, y))
+                grid[y][x] = wallVariant(x, y, TILE_CANTO, CANTO_VAR_BASE, CANTO_VAR_COUNT);
+            else
+                grid[y][x] = TILE_LISO;
+        }
 }
 
 // The room's own hub doubles as the player's spawn point in the very
@@ -2045,6 +2118,8 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
     u8 doorMask;
     bool tomboOk;
 
+    tileSeed = roomSeed; // de que variantes se viste ESTE cuarto
+
     anchorForDoor(MAZE_DIR_N, doorOffsets[MAZE_DIR_N], &anchorX[MAZE_DIR_N], &anchorY[MAZE_DIR_N]);
     anchorForDoor(MAZE_DIR_E, doorOffsets[MAZE_DIR_E], &anchorX[MAZE_DIR_E], &anchorY[MAZE_DIR_E]);
     anchorForDoor(MAZE_DIR_S, doorOffsets[MAZE_DIR_S], &anchorX[MAZE_DIR_S], &anchorY[MAZE_DIR_S]);
@@ -2149,6 +2224,8 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
     if (tomboOk)
         tomboRebuildGraph(doorMask, doorOffsets, ROOM_SEED_COL, ROOM_SEED_ROW, FALSE);
 
+    applyAutotile();
+
     // Maze_isPlantSafe's inputs changed; it recomputes on the next query.
     plantSafeDirty = TRUE;
     plantSafeDoorMask = doorMask;
@@ -2163,7 +2240,7 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
 // room a uniform, deliberately distinct look. Never re-coloured
 // (spec §18 doesn't apply -- this room lives outside the grid/tree
 // entirely, so wallHueBase is left untouched here).
-#define INSERT_WALL_VARIANT 1
+#define INSERT_WALL_VARIANT TILE_LISO
 
 // Punches a room's 2-cell-wide door open on grid border dir, at anchor
 // (ax,ay) -- shared by both of the insertion room's doors (spec §36) so
@@ -2297,21 +2374,65 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
 // the dither art now always renders through this single palette entry.
 #define WALL_COLOR_RGB 0x987DFA
 
+// --- EL TINTE DE CADA PLANETA ---
+//
+// Cada planeta tine sus muros con un par de colores: el CUERPO y su SOMBRA.
+// El BRILLO no entra en el par porque en el arte original es el mismo en los
+// dos materiales que traia, asi que es uno solo para todo el juego.
+//
+// Tintar es mover dos entradas de CRAM, no cambiar arte: las tres piezas de
+// muro se dibujan con estos indices y nada mas. Por eso ocho planetas de ocho
+// colores cuestan exactamente lo mismo que uno.
+//
+// Los valores los elige el usuario. Ojo: el VDP solo tiene 8 niveles por
+// componente (00 24 48 6D 91 B6 DA FF), y RGB24_TO_VDPCOLOR redondea a ellos,
+// asi que un color de fuera de esa rejilla se mueve solo. Estos ya estan en
+// ella, de modo que lo que se lee aqui es lo que sale en pantalla.
+#define PAL_SUELO   2
+#define PAL_CUERPO  3
+#define PAL_SOMBRA  4
+#define PAL_BRILLO  5
+
+
+// Cada planeta es UN tono en tres escalones de valor: el suelo abajo y el muro
+// arriba (peticion del usuario: "el color del suelo tiene que ser el mismo que
+// los muros pero mas oscuro"). Lo que separa muro de suelo es el BRILLO y no el
+// color, que es lo que hace falta para leer la pantalla.
+//
+// Los escalones no son inventados: son los que el VDP de verdad tiene sobre el
+// rayo de cada tono, con 3 bits por canal.
+static const u32 planetTint[MAZE_MAP_SLOTS][4] = {
+    //  cuerpo     sombra     brillo     suelo
+    { 0x6DB648, 0x484824, 0x91DA6D, 0x242400 },   // 0  verde      (el del arte original)
+    { 0x489191, 0x244848, 0x6DDADA, 0x002449 },   // 1  agua       (el otro del arte original)
+    { 0xB66D24, 0x6D4824, 0xDA9124, 0x482400 },   // 2  ambar
+    { 0xDA6D24, 0x6D4824, 0xFF9148, 0x482424 },   // 3  carmesi
+    { 0xB66DDA, 0x48486D, 0xB691FF, 0x242448 },   // 4  violeta
+    { 0x249191, 0x004848, 0x24DADA, 0x002449 },   // 5  turquesa
+    { 0xB6B66D, 0x484848, 0xDADA91, 0x242424 },   // 6  hueso
+    { 0x4891B6, 0x24486D, 0x6D91DA, 0x242449 },   // 7  anil
+};
+
+void Maze_setPlanetTint(u8 planet)
+{
+    const u32 *const t = planetTint[(planet < MAZE_MAP_SLOTS) ? planet : 0];
+
+    PAL_setColor(PAL_CUERPO, RGB24_TO_VDPCOLOR(t[0]));
+    PAL_setColor(PAL_SOMBRA, RGB24_TO_VDPCOLOR(t[1]));
+    PAL_setColor(PAL_BRILLO, RGB24_TO_VDPCOLOR(t[2]));
+    PAL_setColor(PAL_SUELO, RGB24_TO_VDPCOLOR(t[3]));
+}
+
 void Maze_loadGraphics(void)
 {
-    // index0/1: exact colors from ovni's src/image_edit.png (dither wall
-    // art) -- hue 0, unchanged, also what the guide map overlay always
-    // uses (spec §18). index2-4: the 3 extra section hues, new palette
-    // slots (never touched before), so this can't affect anything that
-    // already relied on index0/1 -- text (VDP_drawText's default palette)
-    // included. Order/index assignment verified against the compiled
-    // out/release/res/resources.s after rebuilding, same as the index0
-    // gotcha noted in guidemap.c.
+    // El 0 se queda en el fondo del juego y el 1 en la tinta de los textos:
+    // los tiles de fuente de SGDK llevan el color 1 grabado dentro, no se
+    // puede mover de sitio. El 15 es el blanco de los circulos del menu.
     PAL_setColor(0, RGB24_TO_VDPCOLOR(MAZE_BG_COLOR));
     PAL_setColor(1, RGB24_TO_VDPCOLOR(WALL_COLOR_RGB));
 
-    // index5: never touched by the dither art above (only 0-4 are), so
-    // free for Maze_drawDebugBackdrop's solid box -- see its own comment.
+    Maze_setPlanetTint(0);   // hasta que main.c diga el planeta
+
     PAL_setColor(DEBUG_BOX_PAL_INDEX, RGB24_TO_VDPCOLOR(0x000000));
 
     VDP_loadTileSet(&mazeTiles, BASE_TILE, DMA);
@@ -2393,13 +2514,18 @@ void Maze_draw(void)
             // A cell is one VDP tile now, so the tile index IS the cell
             // value offset by the tileset's base.
             {
-            const u16 t = BASE_TILE + grid[y][x];
+            const u8 cell = grid[y][x];
+            // Las de canto son reborde IZQUIERDO del arte: el volteo es un bit
+            // del mapa de la plana, no una tesela mas en VRAM.
+            const bool volteada = (cell >= CANTO_VAR_BASE) &&
+                                  (cell < (CANTO_VAR_BASE + CANTO_VAR_COUNT));
+            const u16 t = (u16) (BASE_TILE + cell);
             // Locked doors (user request) render with PAL3 (yellow, see
             // menu.c's LOCKED_DOOR_INK_INDEX) instead of PAL0 -- same tile,
             // same dither shape, just a different palette slot.
             const u8 pal = lockedDoorCell[y][x] ? PAL3 : PAL0;
 
-            row[ox + x] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, t);
+            row[ox + x] = TILE_ATTR_FULL(pal, 0, FALSE, volteada, t);
             }
         }
     }
@@ -2531,9 +2657,9 @@ static void loadDebugBoxTile(void)
 {
     if (!debugBoxTileLoaded)
     {
-        // Every nibble (pixel) = DEBUG_BOX_PAL_INDEX (5): 0x5 repeated 8x.
-        static const u32 tileData[8] = { 0x55555555, 0x55555555, 0x55555555, 0x55555555,
-                                          0x55555555, 0x55555555, 0x55555555, 0x55555555 };
+        // Cada nibble (pixel) = DEBUG_BOX_PAL_INDEX, repetido 8 veces.
+        static const u32 tileData[8] = { 0xAAAAAAAA, 0xAAAAAAAA, 0xAAAAAAAA, 0xAAAAAAAA,
+                                          0xAAAAAAAA, 0xAAAAAAAA, 0xAAAAAAAA, 0xAAAAAAAA };
 
         VDP_loadTileData(tileData, DEBUG_BOX_TILE_INDEX, 1, DMA);
         debugBoxTileLoaded = TRUE;

@@ -10,11 +10,12 @@
 // plantas"), both activable from the menu as one single toggle, default
 // OFF ("por defecto apagado" -- see Sfx_isEnabled's own doc comment).
 // Uses the Z80_DRIVER_PCM4 sound driver (4 channels, 8 bit, fixed 16 KHz
-// mix rate) rather than XGM -- this game has no music, so the simplest
-// PCM driver capable of layering a few short one-shots over each other
-// (a wall hit and a plant pickup landing the same frame, or rapid
-// repeats of either) is enough; XGM would only matter if a music track
-// needed to keep playing underneath.
+// mix rate) fuera de la partida, y el XGM dentro, que es donde suena la
+// musica: los dos no conviven, asi que se cambia de driver en cada cambio
+// de escena. Lo que cuesta el cambio esta en la seccion de la musica en
+// sfx.c, y lo que cuesta de verdad es el volumen por canal, que el XGM no
+// tiene: con la musica puesta el nivel va cocido en el wav (los
+// res/sound/kick_xgm*.wav) y el bombo ya no suena mas fuerte cuanto mas lejos.
 
 // Loads the Z80_DRIVER_PCM4 driver. Call once at boot, same place as
 // Menu_loadGraphics()/Maze_loadGraphics().
@@ -81,72 +82,139 @@ void Sfx_playTypeTick(void);
 void Sfx_playEnemyKill(void);
 void Sfx_playLetterPickup(void);
 
-// Ambiente de fondo. Hay DOS modalidades y las dos estan vivas: el MENU suena
-// a sala de maquinas y la PARTIDA suena melodica. Se cambia con Sfx_ambScene.
-// El motor (bus, rampas de volumen, deslizamiento de tono, deriva, crescendo)
-// es comun a las dos; de ahi para arriba no comparten nada.
+// LA MUSICA. La partida suena a musica: una cancion por planeta (res/music,
+// siete para ocho, el ultimo repite la primera) por el driver XGM del Z80, que
+// se lleva el chip entero mientras dura. El menu va sin fondo: solo efectos.
 //
-//  MAQUINAS (el menu) -- sala de maquinas, por una referencia concreta del
-//    usuario: "International Electromatics Headquarters Exterior", de Brian
-//    Hodgson para The Invasion (Doctor Who, 1968). Sin melodia y sin acordes.
-//    Cinco canales FM: dos A#1 separadas 18 centesimas que baten a 0,6 Hz (el
-//    zumbido), un E3 flojo a tritono (la disonancia), un golpe que cae de tono
-//    y un clanc metalico. Mas el ruido del PSG enganchado al divisor del canal
-//    de tono 2, que es lo que permite BARRERLO: ese es el siseo que gira.
-//    Cada capa va en un bucle de longitud prima -- 47, 157, 541 y 379 frames --
-//    asi que la combinacion no se repite. En el menu entra con el zumbido (dos
-//    voces, que sin las dos no hay batido) y suma una capa por planeta que se
-//    selecciona: disonancia, golpe y clanc.
+// El XGM no convive con el PCM4, que es quien dispara las muestras fuera de la
+// partida, asi que cada cambio de escena reinstala el driver que toca -- ver
+// musicStart/musicStop en sfx.c. Ese cambio RESETEA los dos chips de sonido,
+// y por eso importa el orden en todo lo que escriba el YM alrededor.
 //
-//  MELODICO (la partida) -- el chordslop: pad de dos voces con una progresion
-//    de ocho acordes en Do menor que cambia cada ocho segundos y una melodia
-//    encima con su propio ritmo. Tres canales FM, A#1 (58 Hz) a F3 (175 Hz).
-//    Las tres voces suenan desde la primera habitacion: un acorde a medias no
-//    es un acorde. Lo que crece por cruce es el VOLUMEN, no el numero de voces.
+// Aqui hubo dos motores de ambiente procedural, uno de sala de maquinas para
+// el menu y un pad de acordes con melodia para la partida. Se fueron enteros
+// (peticion del usuario): con la musica puesta el de la partida ya no llegaba
+// a sonar nunca.
+
+// Elige la escena: TRUE el menu (calla la cancion), FALSE la partida (la
+// arranca desde el principio; volver a entrar la relanza).
 //
-// El porque de cada decision esta en la cabecera de la seccion en sfx.c, y ahi
-// esta tambien lo que hay que saber antes de tocar esto: el contrato con el
-// driver PCM4, que escribe sus muestras como datos sin direccion sobre el
-// mismo puerto, y que obliga a tomar el bus del Z80 y a devolver el latch de
-// la parte 0 a $2A en cada rafaga de escrituras.
+// Suena la cancion del planeta que Sfx_setPlanet dejo apuntado, asi que el
+// orden importa: primero se elige el planeta y luego se cambia de escena.
+void Sfx_musicScene(bool menu);
+
+// Apunta de que planeta es la cancion. El indice es el del preset,
+// 0..MENU_PLANET_COUNT-1, y va por numero de planeta y no por fila sorteada:
+// los nombres y los efectos del menu se rebarajan en cada vuelta, pero el
+// planeta 3 suena siempre igual.
 //
-// Elige la escena, y con ella la modalidad: TRUE el menu (sala de maquinas),
-// FALSE la partida (melodico). Calla lo que estuviera sonando, rehace timbre y
-// tonos, y deja el ambiente para volver a entrar por capas. Pedir la que ya
-// esta puesta NO hace nada, asi que se puede llamar sin mirar.
-void Sfx_ambScene(bool menu);
+// main.c lo llama en cada movimiento del cursor del menu, asi que cuando
+// Sfx_musicScene(FALSE) arranca la musica el planeta ya es el bueno y no hace
+// falta pasarselo. Se apunta SIEMPRE, aunque el sonido este apagado ahora:
+// la partida lo lee al cambiar de escena y puede encenderse despues.
+void Sfx_setPlanet(u8 planet);
 
-// Una capa mas y un paso de crescendo, en la modalidad que este puesta. En la
-// partida se llama UNA vez por cruce de habitacion (loadRoom(), por donde
-// pasan todos) y ahi solo mueve el crescendo, porque la melodica ya entra con
-// sus tres voces; en el menu, una por planeta que se selecciona, y ahi SI mete
-// capa (peticion del usuario: "las capas se superponen cuando se seleccionan
-// los planetas").
-// NO cambia el acorde ni dispara nada: de eso se ocupa el reloj de
-// Sfx_update. No-op si Sfx_isEnabled() es FALSE.
-void Sfx_slop(void);
+// Calla la cancion y corta en seco el jazz del game over. Hay que llamarlo al
+// SALIR de la partida -- resetToMenu y gameOverBegin lo hacen -- y lo llama
+// tambien Sfx_setEnabled(FALSE).
+void Sfx_musicStop(void);
 
-// Desvanece las voces y rearma el crescendo. Hay que llamarlo al SALIR de
-// la partida (resetToMenu y gameOverBegin lo hacen): la envolvente FM esta
-// puesta para sostener indefinidamente, asi que sin esto el acorde seguiria
-// sonando en el menu. Sfx_setEnabled(FALSE) tambien lo llama.
-void Sfx_slopStop(void);
-
-// Quien manda en el canal de RUIDO del PSG. El visor de mapa lo usa para su
-// estatica y la sala de maquinas para su siseo, asi que el visor lo pide al
-// abrirse (FALSE) y lo devuelve al cerrarse (TRUE). Con la sala en el menu los
-// dos ya no coinciden nunca -- el visor es pantalla de partida y la partida
-// suena melodica, que no toca el PSG -- asi que hoy no arbitra nada. Se queda
-// porque no cuesta y vuelve a hacer falta si las escenas se intercambian.
-void Sfx_ambNoise(bool own);
-
-// Una vez por frame desde el bucle principal, al lado de updateShake(). Esto
-// SI hace trabajo de verdad: lleva el pulso (medio segundo, 16 por compas) del
-// que cuelgan el cambio de acorde y las notas de la melodia, y recalcula el
-// tono y el volumen de cada voz (la envolvente del chip esta puesta para
-// sostener; el volumen lo lleva este codigo escribiendo TL). Escribe solo lo
-// que ha cambiado, y cuando hay algo que escribir toma el bus del Z80 una vez
-// por llamada. Es un no-op mientras no haya ninguna voz viva.
+// Una vez por frame desde el bucle principal, al lado de updateShake(). Hace
+// poco: baja la cuenta atras con la que el visor sabe que muestra sigue
+// sonando, y lleva el jazz del game over mientras dura. La cancion la lleva el
+// Z80 por su cuenta y no pide nada por frame.
 void Sfx_update(void);
+
+
+// --- EL INVENTARIO DE SONIDOS ----------------------------------------------
+//
+// Todos los sonidos que el juego puede emitir, cada uno con su CODENAME
+// (peticion del usuario: "quiero que identifiques cada sonido en pantalla,
+// escribe su codename para que podamos hablar de ello"). De aqui en adelante
+// se les llama asi, en el codigo y al hablar. La tabla de nombres esta en
+// sfx.c y el visor la lee de ahi, asi que no pueden separarse.
+//
+//   0 KICK    bombo 909 al chocar con un muro      4 variantes que rotan
+//   1 HAT     hi-hat cerrado al coger una planta   4 variantes
+//   2 KILL    matar un enemigo                     PLACEHOLDER
+//   3 LETTER  coger una letra                      PLACEHOLDER
+//   4 TYPE    clic del typewriter                  lo mas flojo del juego
+//
+//   5 JAZZ    la cadencia del game over            sus cuatro voces como una
+//   6 BRUSH   el cepillo del jazz                  el ruido a contratiempo
+//
+//   7 MUSIC   la cancion del planeta               res/music, driver XGM
+//
+// Los 0..4 son MUESTRAS y los demas son FM o PSG. Los cinco primeros son los
+// que se disparan, de ahi SFX_ID_SHOTS.
+
+#define SFX_ID_KICK   0
+#define SFX_ID_HAT    1
+#define SFX_ID_KILL   2
+#define SFX_ID_LETTER 3
+#define SFX_ID_TYPE   4
+#define SFX_ID_JAZZ   5
+#define SFX_ID_BRUSH  6
+#define SFX_ID_MUSIC  7
+#define SFX_ID_COUNT  8
+#define SFX_ID_SHOTS  5    // los que se disparan: 0..4
+#define SFX_ID_NONE  0xFF
+
+// El nombre y la linea de "que es", para el visor. Nunca NULL.
+const char *Sfx_debugName(u8 id);
+const char *Sfx_debugWhat(u8 id);
+
+// Cuanto suena AHORA mismo, de 0 (nada) a 15.
+//
+// Para las VOCES FM y el siseo es el nivel de verdad, leido de lo que se le ha
+// escrito al chip. Para las MUESTRAS no: el driver PCM4 no sabe decir si una
+// muestra sigue, asi que es una cuenta atras armada al dispararlas, con un
+// suelo de 0,2 s para que TYPE (18 ms, un solo frame) llegue a verse. O sea
+// que ahi la barra dice "acaba de sonar", no "esta sonando".
+u8 Sfx_debugLevel(u8 id);
+
+// Si ese sonido puede sonar en la escena que hay puesta. Una voz FM de la
+// partida no existe en el menu y al reves, y la partida tiene 3 o 4 segun si
+// el planeta lleva firma.
+bool Sfx_debugExists(u8 id);
+
+// Deja sonando SOLO ese, callando el resto del ambiente, que es lo que hace
+// falta para decidir cual sobra. SFX_ID_NONE lo quita y todo vuelve.
+void Sfx_debugSolo(u8 id);
+
+// QUE FILA del reparto esta sonando, de 0 a 7, o 0xFF si no hay ninguna (la
+// sala de maquinas entera). NO es el numero de planeta: el reparto
+// planeta->sonido es una permutacion que se rehace en cada arranque, asi que
+// el planeta 3 no suena igual de una partida a otra -- de ahi el "a veces".
+// La fila es lo unico que identifica un sonido de forma estable, y es el
+// numero con el que hay que nombrarlos al pedir un cambio.
+
+
+// La nota de reposo de esa fila, en decimas de Hz. 0 si no hay fila.
+
+
+// --- EL JAZZ DEL GAME OVER -------------------------------------------------
+//
+// Peticion del usuario: "quiero que suene jazz en game over", luego "lo quiero
+// mas largo, con algo de percusion" y luego "con una octava, que sea mas
+// upbeat". Trece acordes en Do menor en tres frases, CINCO voces FM (bajo
+// andando, tres de acorde conducidas nota a nota y la melodia doblada una
+// octava arriba) y unos ONCE segundos: 11,2 a 60 Hz, de los cuales los 4
+// ultimos son la cola del acorde final.
+//
+// Y percusion, con lo que ya habia: el hi-hat hace de plato con el patron
+// spang-a-lang (un golpe por pulso mas una corchea swing a dos tercios), el
+// bombo marca el cambio de acorde y nada mas, y el cepillo del contratiempo
+// sale del canal de ruido del PSG. Todo cuelga del mismo reloj de pulso que
+// el bajo, asi que va a tiempo con el. El canal 4 del PCM4 se deja libre a
+// proposito: en esta pantalla el marcador suelta un TYPE cada 4 frames.
+//
+// No es una modalidad del ambiente: es un corte con principio y fin que se
+// muere solo, y mientras dura es lo unico que escribe el chip.
+//
+// Lo llama gameOverBegin EN LUGAR de Sfx_slopStop -- lo hace el por dentro.
+// Se corta con Sfx_slopStop (o sea, al volver al menu, o al apagar el sonido),
+// y no hace nada si el sonido esta apagado.
+void Sfx_jazzGameOver(void);
 
 #endif

@@ -315,13 +315,33 @@ void Menu_drawTitle(void)
 #define BAR_CIRCLE_BASE (BAR_TILE_BASE + 48)   // 48 de marco: 3 tintas x 2 grosores x 8
 #define BAR_TILES       (48 + (3 * 3 * 4))
 
-// Editables. Cuatro letras por planeta, mismo orden que sizePresets[].
-static const char *const planetNames[MENU_PLANET_COUNT] = {
+// Cuatro letras por planeta, mismo orden que sizePresets[]. Ya no son
+// constantes: main.c los sortea de nuevo en cada vuelta al menu (peticion del
+// usuario: "que los nombres y los sonidos sean siempre aleatorios para cada
+// partida"). Estos valores solo se verian si algo dibujase el menu antes del
+// primer sorteo, igual que con galaxyName.
+static char planetNames[MENU_PLANET_COUNT][BAR_NAME_LEN + 1] = {
     "XENU", "ZARG", "QORG", "NYXX", "VOID", "KLOP", "WURM", "ZYGN"
 };
+
 const char *Menu_planetName(u8 index)
 {
     return planetNames[(index < MENU_PLANET_COUNT) ? index : 0];
+}
+
+// Cuatro letras exactas: la barra coloca cada nombre debajo de SU recuadro con
+// BAR_STRIDE de paso, asi que uno mas largo se metaria en el de al lado.
+void Menu_setPlanetName(u8 index, const char *name)
+{
+    u8 i;
+
+    if (index >= MENU_PLANET_COUNT)
+        return;
+    for (i = 0; (i < BAR_NAME_LEN) && name[i]; i++)
+        planetNames[index][i] = name[i];
+    while (i < BAR_NAME_LEN)
+        planetNames[index][i++] = ' ';
+    planetNames[index][BAR_NAME_LEN] = '\0';
 }
 
 // Lo rellena main.c una vez por sesion, en cuanto random() esta sembrado

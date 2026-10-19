@@ -328,8 +328,9 @@ static bool debugViewOn;
 // "HITBOX" debug mode (named per the same "give it a name" request RUTAS
 // got) -- draws the two different collision shapes player.c/enemy.c
 // actually test, user request: "pinte los gizmos de las colisiones".
-// B+C+START: same B+C family as the other debug combos, but START (never
-// used anywhere else in this game, not even a pause menu) instead of a
+// B+C+START: same B+C family as the other debug combos, but START (not
+// steering, and at the time not used anywhere else at all -- SONIDO has
+// since taken a lone START, which is why this one is in its mask) instead of a
 // direction -- same "no interferir en el movimiento" reasoning that moved
 // RUTAS off B+C+LEFT, just solved by picking a button that was never
 // steering input in the first place instead of dropping the direction
@@ -351,6 +352,53 @@ static bool debugViewOn;
 // Off by default: both readouts are developer information.
 #define DEBUG_INFO_COMBO (BUTTON_B | BUTTON_C | BUTTON_RIGHT)
 static bool debugInfoOn;
+
+// "SONIDO", el inventario de sonidos con su codename y una barra de lo que
+// esta sonando ahora mismo (peticion del usuario: "quiero que identifiques
+// cada sonido en pantalla, escribe su codename para que podamos hablar de
+// ello... hay algunos que quiero eliminar"). Nacio en B+C+LEFT, la ultima
+// direccion libre de la familia B+C, y hoy es una START suelta -- ver el
+// define mas abajo.
+//
+// Es una SUPERPOSICION y no una pantalla aparte, a proposito y por dos
+// razones. La primera es que tiene que funcionar en el menu Y en la partida:
+// MOTOR, BEAT, TRI, PUMP y CLANK solo existen en el menu, asi que un visor
+// que solo abriese dentro de la partida no podria ensenar la mitad del
+// inventario. La segunda es que lo que se pedia es ver QUE SUENA mientras
+// suena, y para eso hay que dejar el juego corriendo debajo.
+//
+// Por lo mismo no se come ningun boton mas que el suyo: si tomase el D-pad
+// o la A para pasear por la lista, habria que congelar el juego o la nave se
+// movería sola, y entonces ya no se oiría lo que se está mirando.
+//
+// START A SECAS, no un acorde (peticion del usuario: "cambia el acorde, que
+// sea START en el menu para poder ver sonido"). START estaba libre como
+// pulsacion suelta en los dos estados que importan: en el menu no lo usa nada
+// (A entra, C enciende el sonido, IZQUIERDA/DERECHA pasan planetas) y en la
+// partida solo vale como MODIFICADOR mantenido dentro del mapa, con la A
+// pulsada (START+B el visor de salas, START+C el barrido).
+//
+// De ahi la mascara: la A tapa los dos del mapa, y la B y la C tapan
+// DEBUG_HITBOX_COMBO (B+C+START), que es el unico acorde sin mascara propia.
+// Y el cambio sale gratis en lo que se estaba haciendo: al soltar la IZQUIERDA
+// se pueden pasar planetas con el panel abierto, que es justo para lo que es.
+#define SOUND_VIEW_COMBO   (BUTTON_START)
+#define SOUND_VIEW_EXCLUDE (BUTTON_A | BUTTON_B | BUTTON_C)
+static bool soundViewOn;
+#define SOUND_VIEW_FIRST_ROW 4
+#define SOUND_VIEW_ROWS (SFX_ID_COUNT + 2) // el titulo y la linea de la fila
+
+// Que sonido esta AISLADO: 0 ninguno, y de 1 en adelante el identificador mas
+// uno. Se mueve con ARRIBA/ABAJO mientras el panel esta abierto -- peticion
+// del usuario: "hay un sonido de MOTOR que a veces es muy molesto y quiero
+// identificarlo", y oirlo solo es la unica forma de estar seguro.
+//
+// No gasta un boton nuevo: el cursor ES el aislamiento, asi que no hay que
+// confirmar nada, y la posicion 0 es "todo". En el menu ARRIBA y ABAJO no los
+// usa nadie; dentro de la partida mueven tambien la nave, que es el mismo
+// trato que VISOR y DATOS ya hacen con sus direcciones.
+static u8 soundSolo = 0;
+#define SOUND_VIEW_WIDTH 38   // se pinta en la columna 2, o sea hasta la 39
 
 // "PLANTA", the route to the nearest plant (user request: "haz un debug
 // que pinte la trayectoria que hay que tomar a la planta mas cercana").
@@ -906,6 +954,7 @@ static u16 scanPlanetPlantTotal(u8 presetIndex)
     // room generated afterwards is carved at this size.
     Maze_setRoomSize(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
                      sizePresets[presetIndex].variety);
+    Maze_setPlanetTint(presetIndex);   // el color de los muros de este planeta
     GuideMap_setShape(sizePresets[presetIndex].map, sizePresets[presetIndex].cols,
                       sizePresets[presetIndex].rows);
     GuideMap_generate();
@@ -1045,11 +1094,18 @@ static u16  typeSinceTick;
 
 // Throws away whatever was queued. The screen itself is the caller's to
 // clear -- this only forgets what it was going to type.
+// Si esta pantalla escribe EN SILENCIO. Peticion del usuario: la terminal de
+// arranque (OVNI-TERM MK.VII) no lleva sonido de fondo, y sus clics eran lo
+// unico que quedaba sonando ahi. typeReset lo apaga, asi que una pantalla
+// nueva suena por defecto y solo la que lo pida calla.
+static bool typeSilent = FALSE;
+
 static void typeReset(void)
 {
     typeCount = 0;
     typeCursor = 0;
     typeSinceTick = 0;
+    typeSilent = FALSE;
 }
 
 static void typeLine(const char *text, u16 x, u16 row)
@@ -1109,7 +1165,7 @@ static void typeStep(void)
         if (!typeOne())
             return;
 
-        if (++typeSinceTick >= TYPE_TICK_EVERY)
+        if (!typeSilent && (++typeSinceTick >= TYPE_TICK_EVERY))
         {
             typeSinceTick = 0;
             Sfx_playTypeTick();
@@ -1134,6 +1190,7 @@ static void drawIntroPrompt(void)
 {
     VDP_clearPlane(BG_A, TRUE);
     typeReset();
+    typeSilent = TRUE;   // esta pantalla escribe sin sonido (peticion del usuario)
     typeLine("OVNI-TERM MK.VII",     introTextX(16), 9);
     typeLine("----------------",     introTextX(16), 10); // subrayado: pegado a proposito
     typeLine("SUBSPACE LINK",        introTextX(13), 13);
@@ -1198,6 +1255,7 @@ static void introSetUpPlanet(u8 presetIndex)
     // room generated afterwards is carved at this size.
     Maze_setRoomSize(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
                      sizePresets[presetIndex].variety);
+    Maze_setPlanetTint(presetIndex);   // el color de los muros de este planeta
     GuideMap_setShape(sizePresets[presetIndex].map, sizePresets[presetIndex].cols,
                       sizePresets[presetIndex].rows);
     GuideMap_generate();
@@ -1229,6 +1287,73 @@ static void pickGalaxyName(char *out)
     const u16 n = 1 + (random() % 9);
 
     sprintf(out, "%s%s-%d", pre[i], suf[j], n);
+}
+
+// Se inventa un nombre de planeta de CUATRO letras, que es lo que cabe debajo
+// de su recuadro en la barra. Dos formas, CVCC y el grupo inicial de dos
+// consonantes: las dos se leen, y con una sola forma los ocho se notan
+// plantilla. Misma corriente de random() que pickGalaxyName.
+static void pickPlanetName(char *out)
+{
+    static const char ini[] = "XZQKVNWTMGPRSJB";
+    static const char voc[] = "AEIOUY";
+    static const char con[] = "XZKNRMGPTD";
+    static const char *const duo[12] = { "KL","ZY","TR","VR","GR","KR",
+                                         "ST","BR","DR","PL","SN","TH" };
+    static const char *const fin[12] = { "RG","XX","RM","GN","NK","LT",
+                                         "ND","ST","RK","MP","LD","SK" };
+
+    if (random() & 1)
+    {
+        const char *f = fin[random() % 12];
+
+        out[0] = ini[random() % (sizeof(ini) - 1)];
+        out[1] = voc[random() % (sizeof(voc) - 1)];
+        out[2] = f[0];
+        out[3] = f[1];
+    }
+    else
+    {
+        const char *d = duo[random() % 12];
+
+        out[0] = d[0];
+        out[1] = d[1];
+        out[2] = voc[random() % (sizeof(voc) - 1)];
+        out[3] = con[random() % (sizeof(con) - 1)];
+    }
+    out[4] = '\0';
+}
+
+// Nombres y sonidos nuevos para los ocho planetas (peticion del usuario: "que
+// los nombres y los sonidos sean siempre aleatorios para cada partida"). Se
+// llama al ENTRAR en el menu y no al arrancar: random() no esta sembrado hasta
+// la primera pulsacion real (spec 54), y antes de eso saldria lo mismo siempre.
+static void rerollPlanets(void)
+{
+    u8 i, j;
+
+    for (i = 0; i < MENU_PLANET_COUNT; i++)
+    {
+        char name[8];
+        u8 tries = 0;
+
+        // Sin repetidos: dos planetas con el mismo nombre no se distinguen.
+        do
+        {
+            pickPlanetName(name);
+            for (j = 0; j < i; j++)
+            {
+                const char *otro = Menu_planetName(j);
+
+                if ((otro[0] == name[0]) && (otro[1] == name[1])
+                    && (otro[2] == name[2]) && (otro[3] == name[3]))
+                    break;
+            }
+        }
+        while ((j < i) && (++tries < 20));
+
+        Menu_setPlanetName(i, name);
+    }
 }
 
 // Decides this session's galaxy name, once. Both screens that show it
@@ -1709,7 +1834,6 @@ static void loadRoom(u8 col, u8 row)
         SPR_setVisibility(enemySprite, enemy.alive ? VISIBLE : HIDDEN);
     }
 
-    Sfx_slop(); // una nota del acorde por habitacion, ver su doc en sfx.h
 }
 
 // Room transition (spec §7): move to the neighboring cell, regenerate its
@@ -1932,7 +2056,10 @@ static u8 goTick;
 
 static void gameOverBegin(void)
 {
-    Sfx_slopStop(); // el drone se corta en seco al morir
+    // La cadencia de jazz (peticion del usuario: "quiero que suene jazz en
+    // game over"). Corta el ambiente ella misma, asi que sustituye al
+    // Sfx_slopStop que habia aqui en vez de ir detras.
+    Sfx_jazzGameOver();
 
     const u8 p = sizePresetIndex;
     const u32 start = (u32) presetSave[p].scoreRooms * SCORE_PER_ROOM;
@@ -2011,7 +2138,7 @@ static void leaveScoreTable(void)
     bool completed[SIZE_PRESET_COUNT];
 
     gameState = STATE_MENU;
-    Sfx_ambScene(TRUE); // no-op si ya estaba: la tabla no cambia de ambiente
+    Sfx_musicScene(TRUE); // calla la cancion al volver al menu
     screenAlternateTimer = 0;
     drawMenu();
     planetCompletedFlags(completed);
@@ -2293,7 +2420,7 @@ static void planetCompletedFlags(bool *out)
 
 static void resetToMenu(void)
 {
-    Sfx_slopStop(); // el acorde de la partida no sigue sonando en el menu
+    Sfx_musicStop(); // la cancion de la partida no sigue sonando en el menu
 
     const GameState previousState = gameState; // capture before overwriting below
 
@@ -2328,10 +2455,11 @@ static void resetToMenu(void)
     updatePlanetUnlocks(); // this run's progress may have opened the next planet
 
     gameState = STATE_MENU;
-    // El menu suena a sala de maquinas y la partida suena melodica. El zumbido
-    // entra ya; las otras tres capas las mete el jugador paseando por la barra.
-    Sfx_ambScene(TRUE);
-    Sfx_slop();
+    rerollPlanets(); // nombres y sonidos nuevos para esta vuelta al menu
+    // El menu suena a sala de maquinas y la partida suena melodica. En el menu
+    // cada planeta tiene SU sonido y no se solapan: suena el del seleccionado.
+    Sfx_musicScene(TRUE);
+    Sfx_setPlanet(sizePresetIndex);
     mapViewOpen = FALSE;
     cartographyThenPlay = FALSE; // a reset mid-cartography goes to the menu, not into a run
     roomViewerOn = FALSE; // RESET_COMBO can fire from inside either map-screen tool
@@ -3127,7 +3255,6 @@ static void beginDebugScreen(void)
     if (mapShowingNoise)
     {
         PSG_setEnvelope(3, PSG_ENVELOPE_MIN); // the static's own hiss, silenced the same way releasing A does
-        Sfx_ambNoise(TRUE); // and the ambience gets the noise channel back
         VDP_clearTextLineBG(BG_B, NO_MAP_SIGNAL_ROW);
     }
 
@@ -3517,6 +3644,10 @@ static void drawScoreHud(void)
     Hud_drawText(buf, (u16) (SCORE_RIGHT - len + 1), 0);
 }
 
+// TRUE mientras el recuadro de INFO esta puesto en BG_A, para saber si hay
+// algo que deshacer al apagarlo o al salirse de la partida.
+static bool infoBoxOn = FALSE;
+
 static void drawRoomIdHud(void)
 {
     static char prev[40];
@@ -3527,8 +3658,29 @@ static void drawRoomIdHud(void)
     if (!debugInfoOn || (gameState != STATE_PLAYING))
     {
         prevValid = FALSE; // nothing of ours is on screen any more
+        if (infoBoxOn)
+        {
+            // El recuadro vive en BG_A, asi que apagarlo no es borrar texto:
+            // hay que devolver esos tiles al 0, que es lo que Maze_draw deja
+            // ahi (la banda del HUD nunca lleva laberinto).
+            VDP_clearTileMapRect(BG_A, 0, 0, 40, 1);
+            infoBoxOn = FALSE;
+        }
         return;
     }
+
+    // EL FONDO PLANO (peticion del usuario: "hazle un background plano a INFO
+    // para poder leer bien"). Va en BG_A y el texto en BG_B con prioridad 1,
+    // o sea detras, igual que el recuadro de VISOR y el de SONIDO.
+    //
+    // Se repinta CADA frame y no solo al encender, y eso no es por vago:
+    // Maze_draw() limpia la banda entera del HUD (las filas 0..MAZE_ORIGIN_ROW-1)
+    // a tile 0, y corre en cada cambio de sala Y en cada recogida de planta o
+    // letra. Pintado una sola vez, el recuadro duraria hasta la primera planta.
+    // Son 40 tiles por frame, que al lado de los 40x28 que mueve Maze_draw en
+    // cada sala no es nada.
+    Maze_drawDebugBackdrop(0, 1);
+    infoBoxOn = TRUE;
 
     if (inInsertRoom)
         len = sprintf(buf, "P%d M:%04X INS", sizePresetIndex, mapSeed);
@@ -3555,6 +3707,188 @@ static void drawRoomIdHud(void)
     VDP_setTextPriority(1);
     VDP_drawTextBG(BG_B, buf, 0, 0);
     VDP_setTextPriority(0);
+}
+
+// EL VISOR DE SONIDO. Una linea por sonido del inventario de sfx.h, con su
+// codename, lo que es y una barra de cuanto suena AHORA. La columna de la
+// izquierda dice el estado con una FORMA y no con un color (el usuario es
+// daltonico): '>' suena, ' ' existe y esta callado, '-' no existe en esta
+// escena. El HISS y el STATIC se reparten el mismo canal de ruido del PSG,
+// asi que nunca pueden estar los dos a la vez.
+static bool soundBoxOn = FALSE;
+static void clearSoundView(void);
+
+// Donde puede vivir el panel: solo donde BG_A se puede repintar a voluntad,
+// que es el menu (drawMenu) y la partida (Maze_draw). La intro, la tabla de
+// puntuaciones y el resumen final se escriben SOLOS glifo a glifo (typeStep,
+// gameOverStep) y no hay forma de volver a pintarlos -- el fondo del panel se
+// iria comiendo lo ya escrito, y al cerrarlo Maze_draw() les plantaria encima
+// el laberinto de la ultima sala. Los dos submodos del mapa (el visor de salas
+// y el barrido) siguen siendo STATE_PLAYING, asi que entran.
+static bool soundViewStateOk(void)
+{
+    return (bool) ((gameState == STATE_MENU) || (gameState == STATE_PLAYING));
+}
+
+static void drawSoundView(void)
+{
+    // Lo ultimo pintado en cada fila, para no reescribir 16 lineas de 40
+    // caracteres cada frame: eso son 640 escrituras al VDP por frame y el
+    // juego esta corriendo debajo.
+    static char prev[SFX_ID_COUNT][40];
+    static bool prevValid = FALSE;
+    static u8 prevGameState = 0xFF;
+    u8 id;
+
+    if (!soundViewOn)
+    {
+        prevValid = FALSE;
+        return;
+    }
+
+    // Si el juego se ha ido a una pantalla que se escribe sola, el panel se
+    // cierra el mismo (ver soundViewStateOk). Pasa de verdad y sin tocar nada:
+    // basta con dejar el panel abierto y quieto en el menu para que salte la
+    // tabla de puntuaciones.
+    if (!soundViewStateOk())
+    {
+        clearSoundView();
+        soundViewOn = FALSE;
+        prevValid = FALSE;
+        return;
+    }
+
+    // El panel vive en BG_B y BG_A se lo lleva entero quien mande en cada
+    // estado, asi que un cambio de estado deja el texto caducado.
+    if (prevGameState != (u8) gameState)
+    {
+        prevGameState = (u8) gameState;
+        prevValid = FALSE;
+    }
+
+    // EL FONDO. Va en BG_A, debajo del texto, y se repinta CADA frame en vez
+    // de una sola vez al abrir: tanto drawMenu() como Maze_draw() borran BG_A
+    // entero y corren solos (al mover el cursor del menu, al cambiar de sala,
+    // al coger una planta). Pintado una vez, el fondo duraria hasta el primer
+    // repintado de quien sea.
+    Maze_drawDebugBackdrop(SOUND_VIEW_FIRST_ROW, SOUND_VIEW_ROWS);
+    soundBoxOn = TRUE;
+
+    // Y en el menu, los planetas fuera. Son SPRITES, o sea que van por encima
+    // de los dos planos y el recuadro no los tapa: con ellos puestos el panel
+    // es ilegible, que es exactamente lo que se veia. Hay que hacerlo cada
+    // frame porque Menu_update los vuelve a poner visibles en cada uno, y esto
+    // corre despues que el. Al cerrar el panel los devuelve el solo.
+    if (gameState == STATE_MENU)
+        Menu_hideSprites();
+
+    VDP_setTextPriority(1);
+
+    // El encabezado lleva el PLANETA, y no es adorno: el panel oculta los
+    // sprites del menu, o sea el cursor, y lo que se va a hacer aqui es pasar
+    // planetas para oir cual es cual. Sin esto no se sabe de cual se habla.
+    //
+    // Y lleva si el sonido esta ENCENDIDO, que es lo primero que hay que
+    // descartar aqui: por defecto esta apagado (se enciende con la C en el
+    // menu) y apagado Sfx_debugLevel devuelve 0 para todo, o sea que el panel
+    // se veria entero a cero sin decir por que. En letra y no en color.
+    {
+        static char prevHead[40];
+        char head[40];
+
+        sprintf(head, " SONIDO    QUE ES      SUENA  P%d %s",
+                sizePresetIndex, Sfx_isEnabled() ? "ON" : "OFF");
+        if (!prevValid || strcmp(head, prevHead))
+        {
+            strcpy(prevHead, head);
+            VDP_drawTextBG(BG_B, head, 2, SOUND_VIEW_FIRST_ROW);
+        }
+    }
+
+    for (id = 0; id < SFX_ID_COUNT; id++)
+    {
+        const u8 level = Sfx_debugLevel(id);
+        const bool there = Sfx_debugExists(id);
+        char buf[40];
+        u8 n = 0, i;
+
+        buf[n++] = there ? (level ? '>' : ' ') : '-';
+        buf[n++] = ' ';
+        for (i = 0; Sfx_debugName(id)[i] && (i < 6); i++)
+            buf[n++] = Sfx_debugName(id)[i];
+        while (n < 9) buf[n++] = ' ';
+        for (i = 0; Sfx_debugWhat(id)[i] && (i < 10); i++)
+            buf[n++] = Sfx_debugWhat(id)[i];
+        while (n < 20) buf[n++] = ' ';
+        // La barra: 12 pasos de los 15 que da Sfx_debugLevel. El canal es
+        // el punto, asi que una barra vacia sigue viendose como barra.
+        for (i = 0; i < 12; i++)
+            buf[n++] = (i < ((level * 12u) / 15u)) ? '#' : '.';
+        // El aislado se marca con la palabra y no con un color (el usuario es
+        // daltonico), y a la derecha para que no mueva ninguna columna.
+        if (soundSolo == (u8) (id + 1))
+        {
+            const char *const tag = "  SOLO";
+
+            for (i = 0; tag[i]; i++)
+                buf[n++] = tag[i];
+        }
+        // Rellenada hasta el ancho fijo: VDP_drawTextBG no borra la cola, asi
+        // que sin esto la marca se quedaria pegada en la fila que la tenia.
+        while (n < SOUND_VIEW_WIDTH) buf[n++] = ' ';
+        buf[n] = '\0';
+
+        if (prevValid && !strcmp(buf, prev[id]))
+            continue;
+        strcpy(prev[id], buf);
+        VDP_drawTextBG(BG_B, buf, 2, (u8) (SOUND_VIEW_FIRST_ROW + 1 + id));
+    }
+    // LA FILA. Es lo que de verdad identifica un sonido: el reparto
+    // planeta->sonido es una permutacion que se rehace en cada arranque, asi
+    // que "el planeta 3" suena distinto en cada partida -- de ahi que un
+    // MOTOR sea molesto "a veces". Con la fila y su nota se puede nombrar.
+    {
+        static char prevRow[40];
+        const char *const pie = " ARR/ABA AISLA  ";
+
+        if (!prevValid || strcmp(pie, prevRow))
+        {
+            strcpy(prevRow, pie);
+            VDP_drawTextBG(BG_B, pie, 2,
+                           (u8) (SOUND_VIEW_FIRST_ROW + SOUND_VIEW_ROWS - 1));
+        }
+    }
+
+    VDP_setTextPriority(0);
+    prevValid = TRUE;
+}
+
+static void clearSoundView(void)
+{
+    u8 row;
+
+    for (row = SOUND_VIEW_FIRST_ROW;
+         row < (SOUND_VIEW_FIRST_ROW + SOUND_VIEW_ROWS); row++)
+        VDP_clearTextLineBG(BG_B, row);
+
+    // El recuadro es de BG_A, asi que deshacerlo es devolverle BG_A a quien lo
+    // tenga en este estado. No vale uno solo para los dos: en la partida lo
+    // tiene el laberinto y en el menu el menu, y Maze_draw() sobre el menu lo
+    // pisaria con el laberinto que quedase en grid[] de la ultima sala.
+    if (!soundBoxOn)
+        return;
+    soundBoxOn = FALSE;
+    if (gameState == STATE_MENU)
+        drawMenu(); // repinta BG_A entero, planetas y textos incluidos
+    else if (gameState == STATE_PLAYING)
+    {
+        Maze_draw();
+        Items_drawInRoom(currentCol, currentRow);
+        Plants_drawInRoom(currentCol, currentRow);
+    }
+    // En cualquier otro estado no se devuelve nada a mano: ahi se llega porque
+    // el juego acaba de cambiar de pantalla, y el que entra ya ha hecho su
+    // VDP_clearPlane(BG_A) antes de que esto corra.
 }
 
 // Toggled by the debug combo (Konami-style sequence, see debugCombo's own
@@ -3607,6 +3941,44 @@ static void updateDebugCombo(u16 state, u16 prevState)
             clearDebugView();
     }
 
+    // Como SOUND_VIEW_COMBO es un boton suelto, la mascara va en los DOS
+    // lados: sin ella, soltar la B de B+C+START (HITBOX) con la START todavia
+    // pulsada daria el flanco y abriria tambien el panel.
+    //
+    // Solo donde el panel puede vivir (ver soundViewStateOk). De paso eso saca
+    // a STATE_INTRO, donde la START es uno de los "pulsa algo" que arrancan la
+    // intro y abrir el panel seria un doble disparo.
+    if (soundViewStateOk()
+        && ((state & (SOUND_VIEW_COMBO | SOUND_VIEW_EXCLUDE)) == SOUND_VIEW_COMBO)
+        && ((prevState & (SOUND_VIEW_COMBO | SOUND_VIEW_EXCLUDE)) != SOUND_VIEW_COMBO))
+    {
+        soundViewOn = !soundViewOn;
+        if (soundViewOn)
+            drawSoundView(); // el pinta su propio fondo, y en todos los estados
+        else
+        {
+            soundSolo = 0;        // cerrar el panel devuelve el ambiente entero
+            Sfx_debugSolo(SFX_ID_NONE);
+            clearSoundView();
+        }
+    }
+
+    // ARRIBA/ABAJO mueven el aislamiento, y solo con el panel puesto: fuera de
+    // el las dos direcciones son del juego. Ver soundSolo.
+    if (soundViewOn)
+    {
+        const u8 before = soundSolo;
+
+        if ((state & BUTTON_DOWN) && !(prevState & BUTTON_DOWN)
+            && !(state & (BUTTON_B | BUTTON_C))) // B+C+ABAJO es VISOR
+            soundSolo = (u8) ((soundSolo >= SFX_ID_COUNT) ? 0 : (soundSolo + 1));
+        if ((state & BUTTON_UP) && !(prevState & BUTTON_UP)
+            && !(state & (BUTTON_A | BUTTON_B | BUTTON_C))) // A+B+C+ARRIBA es el reset
+            soundSolo = (u8) ((soundSolo == 0) ? SFX_ID_COUNT : (soundSolo - 1));
+        if (soundSolo != before)
+            Sfx_debugSolo((u8) (soundSolo ? (soundSolo - 1) : SFX_ID_NONE));
+    }
+
     // DEBUG_EDGES_COMBO (plain B+C) is a subset of DEBUG_VIEW_COMBO/
     // RESET_COMBO above -- the exclude mask confirms
     // no direction/A is ALSO held, so this only fires for B+C alone, not
@@ -3645,7 +4017,14 @@ static void updateDebugCombo(u16 state, u16 prevState)
         if (debugInfoOn)
             invalidateHudLines(); // both readouts share row 0: put them straight back
         else
+        {
             VDP_clearTextLineBG(BG_B, 0); // neither will run again to clear itself
+            if (infoBoxOn)
+            {
+                VDP_clearTileMapRect(BG_A, 0, 0, 40, 1); // y su fondo, que es de BG_A
+                infoBoxOn = FALSE;
+            }
+        }
     }
 }
 
@@ -3733,7 +4112,7 @@ static void startSelectedPlanet(void)
     Menu_hideSprites();
     flushSprites();    // no planets left in the table BEFORE their palette changes hands
     gameState = STATE_PLAYING;
-    Sfx_ambScene(FALSE); // el chordslop; loadRoom le sube el crescendo por cruce
+    Sfx_musicScene(FALSE); // arranca la cancion de este planeta
     newGame();
     // The ship waits outside until the room is all the way in
     // (user request: "quiero que la nave no aparezca en
@@ -3759,6 +4138,11 @@ static void startSelectedPlanet(void)
 int main(bool hardReset)
 {
     u16 prevState = 0;
+
+    // El heap son 14 KB y DMA_init reserva 8 de ellos para el buffer de copia
+    // del DMA (DMA_QUEUE_COPY), que este juego no usa: sin esto SPR_init se
+    // queda sin sitio para su region de VRAM y todos los sprites salen NULL.
+    DMA_setBufferSize(DMA_BUFFER_SIZE_MIN);
 
     VDP_setPlaneSize(64, 32, TRUE);
     // Our own font, over the one SGDK loaded during its own VDP init:
@@ -3855,8 +4239,9 @@ int main(bool hardReset)
                     else
                     {
                         gameState = STATE_MENU;
-                        Sfx_ambScene(TRUE); // la sala de maquinas del menu
-                        Sfx_slop();
+                        rerollPlanets(); // la primera tirada de la sesion
+                        Sfx_musicScene(TRUE); // el menu va sin musica
+                        Sfx_setPlanet(sizePresetIndex);
                         Menu_setVisible(TRUE);
                         Menu_hideSprites(); // same as resetToMenu: the sprites fade in after the screen
                         drawMenu();
@@ -3923,13 +4308,13 @@ int main(bool hardReset)
             if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
             {
                 sizePresetIndex = (u8) (DEBUG_FIRST_PLANET + ((sizePresetIndex - DEBUG_FIRST_PLANET + PLANET_SEL_COUNT - 1) % PLANET_SEL_COUNT));
-                Sfx_slop(); // una capa mas del ambiente del menu
+                Sfx_setPlanet(sizePresetIndex); // el sonido de ESTE planeta
                 drawMenu();
             }
             if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
             {
                 sizePresetIndex = (u8) (DEBUG_FIRST_PLANET + ((sizePresetIndex - DEBUG_FIRST_PLANET + 1) % PLANET_SEL_COUNT));
-                Sfx_slop(); // una capa mas del ambiente del menu
+                Sfx_setPlanet(sizePresetIndex); // el sonido de ESTE planeta
                 drawMenu();
             }
             if ((state & BUTTON_A) && !(prevState & BUTTON_A) && (sizePresetIndex < unlockedPlanets))
@@ -4131,7 +4516,6 @@ int main(bool hardReset)
                             SPR_setVisibility(mapShipSprite, HIDDEN);
                             SPR_setVisibility(enemySprite, HIDDEN);
                             PAL_setColor(PLAYER_SHIP_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF));
-                            Sfx_ambNoise(FALSE); // el ambiente suelta el canal de ruido
                             PSG_setNoise(PSG_NOISE_TYPE_WHITE, PSG_NOISE_FREQ_CLOCK2);
                             PSG_setEnvelope(3, 0); // 0 = loudest (PSG_ENVELOPE_MAX)
                         }
@@ -4223,7 +4607,6 @@ int main(bool hardReset)
                     if (mapShowingNoise)
                     {
                         PSG_setEnvelope(3, PSG_ENVELOPE_MIN); // silence
-                        Sfx_ambNoise(TRUE); // the ambience gets the noise channel back
                         VDP_clearTextLineBG(BG_B, NO_MAP_SIGNAL_ROW); // the banner above
                     }
 
@@ -4667,13 +5050,14 @@ int main(bool hardReset)
         drawRoomIdHud(); // always-on room identity line, STATE_PLAYING only
         hudLinesDirty = FALSE; // both readers above have had their frame
         drawDebugView(); // no-op unless the debug combo turned it on
+        drawSoundView(); // idem, el inventario de sonidos (START)
         drawCollisionGizmos(); // no-op unless HITBOX is on and gameState is STATE_PLAYING
         drawPlantPath(); // no-op unless PLANTA is on and gameState is STATE_PLAYING
         drawReturnToInsertHint(); // no-op until every letter is in hand
 
         prevState = state;
 
-        Sfx_update(); // dispara la nota del chordslop cuando vence su retardo
+        Sfx_update(); // la cuenta atras del visor y el jazz del game over
         updateShake();
         SPR_update();
 

@@ -1,4 +1,4 @@
-TILESET mazeTiles "sprite/maze_tiles.png" NONE NONE ROW
+TILESET mazeTiles "sprite/maze_tiles_auto.png" NONE NONE ROW
 TILESET mapTiles "sprite/map_tiles.png" NONE NONE ROW
 # La fuente del juego: 128x48 px = 16 columnas x 6 filas de caracteres de
 # 8x8, en orden ASCII desde el espacio (0x20). Dos colores: indice 0 el
@@ -47,3 +47,27 @@ WAV letterPickup "sound/letter0.wav" PCM4
 # glifos tiene que haber terminado antes del siguiente o se solapan en un
 # siseo continuo.
 WAV typeTick "sound/typetick0.wav" PCM4
+
+# La musica: una cancion por planeta, siete para ocho planetas (el ultimo repite
+# la primera). Todas cierran en bucle, ver tools/xgm_loop.py. Necesitan xgmtool.
+XGM musPattern  "music/pattern.xgm"
+XGM musAventura "music/aventura.xgm"
+XGM musHouse1   "music/house1.xgm"
+XGM musHouse2   "music/house2.xgm"
+XGM musHouse3   "music/house3.xgm"
+XGM musHouse4   "music/house4.xgm"
+XGM musHouse5   "music/house5.xgm"
+
+# Las mismas muestras para el driver XGM, que es el que suena con la musica
+# puesta: 14 kHz en vez de 16 y sin volumen por canal, asi que el nivel del
+# bombo (11 de 15, su suelo en la partida) va cocido en el fichero.
+WAV xgmKick0 "sound/kick_xgm0.wav" XGM
+WAV xgmKick1 "sound/kick_xgm1.wav" XGM
+WAV xgmKick2 "sound/kick_xgm2.wav" XGM
+WAV xgmKick3 "sound/kick_xgm3.wav" XGM
+WAV xgmHihat0 "sound/hihat0.wav" XGM
+WAV xgmHihat1 "sound/hihat1.wav" XGM
+WAV xgmHihat2 "sound/hihat2.wav" XGM
+WAV xgmHihat3 "sound/hihat3.wav" XGM
+WAV xgmEnemyKill "sound/enemykill0.wav" XGM
+WAV xgmLetterPickup "sound/letter0.wav" XGM

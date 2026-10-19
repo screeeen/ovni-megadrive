@@ -46,13 +46,6 @@ static bool collideDown(s16 newY, s16 x)
     return wallAt(x, newY + BOX) || wallAt(x + BOX, newY + BOX);
 }
 
-void Player_spawnAtRoomCenter(Player *p)
-{
-    p->x = MAZE_DOOR_COL * MAZE_TILE_PX;
-    p->y = MAZE_DOOR_ROW * MAZE_TILE_PX;
-    p->dir = DIR_DOWN;
-}
-
 // Moves one px along p->dir, unless the next px is a wall -- then the ship
 // simply stays where it is (it stops against the wall until steered away
 // or the wall opens). DIR_NONE matches no case, so the ship doesn't move.

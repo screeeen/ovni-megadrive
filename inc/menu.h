@@ -45,6 +45,12 @@ void Menu_drawTitle(void);
 // (main.c's high-score table). Index is a preset index, 0..MENU_PLANET_COUNT-1.
 const char *Menu_planetName(u8 index);
 
+// Cambia el nombre de un planeta. main.c los sortea en cada vuelta al menu
+// (peticion del usuario), asi que estos nombres son decorado y no identidad:
+// lo que identifica un planeta sigue siendo su indice de preset. Se recorta a
+// cuatro letras, que es lo que cabe debajo de su recuadro en la barra.
+void Menu_setPlanetName(u8 index, const char *name);
+
 // The galaxy name shown under OVNI, above the planet bar. Published so
 // the cartography screen can label itself with the SAME one (user
 // request: "quiero que el nombre de la galaxia en la pantalla de

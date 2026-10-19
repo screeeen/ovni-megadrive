@@ -1,0 +1,101 @@
+# Clasificacion de los 91 tiles de maze_tiles_90.png
+#
+# Cambia la palabra de la 2a columna donde me haya equivocado. Valores:
+#   MURO   -> te para el deslizamiento
+#   SUELO  -> se pasa por encima
+#   FUERA  -> decoracion, no la usamos
+#
+# Lo de la derecha (#) es informacion, no hace falta tocarlo.
+# Ordenado por cuanto sale en el mapa: lo de arriba es lo que importa.
+#
+3   MURO   #  260 celdas, 1 color(es) #191716                      la masa negra, 20% del mapa
+11  SUELO  #   68 celdas, 1 color(es) #76446E                      campo morado plano
+1   SUELO  #   62 celdas, 5 color(es) #72B245 #347750 #538947      
+74  SUELO  #   58 celdas, 3 color(es) #DCEFF8 #29472D #9CC6D9      
+28  MURO   #   50 celdas, 4 color(es) #191716 #1E2431 #29472D      reborde superior (90% con la masa debajo)
+54  SUELO  #   46 celdas, 1 color(es) #9CC6D9                      campo azul claro plano
+51  SUELO  #   43 celdas, 1 color(es) #245168                      campo azul plano
+75  MURO   #   38 celdas, 4 color(es) #191716 #1E2431 #35291D      reborde superior
+8   MURO   #   30 celdas, 3 color(es) #191716 #1E2431 #29472D      reborde izquierdo
+6   SUELO  #   29 celdas, 3 color(es) #552E41 #1E2431 #35291D      
+2   SUELO  #   28 celdas, 2 color(es) #72B245 #347750              
+52  SUELO  #   28 celdas, 3 color(es) #72B245 #37969B #245168      
+53  SUELO  #   28 celdas, 2 color(es) #37969B #245168              
+12  SUELO  #   25 celdas, 1 color(es) #347750                      verde plano
+80  SUELO  #   22 celdas, 3 color(es) #35291D #29472D #523C20      
+0   SUELO  #   20 celdas, 1 color(es) #72B245                      verde plano
+4   SUELO  #   20 celdas, 3 color(es) #552E41 #1E2431 #35291D      
+81  SUELO  #   20 celdas, 4 color(es) #347750 #35291D #29472D      
+62  SUELO  #   19 celdas, 1 color(es) #37969B                      turquesa plano
+56  SUELO  #   18 celdas, 2 color(es) #552E41 #245168              
+64  SUELO  #   18 celdas, 3 color(es) #191716 #1E2431 #35291D      
+59  SUELO  #   17 celdas, 2 color(es) #347750 #245168              
+29  SUELO  #   15 celdas, 6 color(es) #347750 #538947 #552E41      
+77  MURO   #   15 celdas, 2 color(es) #191716 #1E2431              reborde izquierdo
+13  SUELO  #   14 celdas, 2 color(es) #76446E #CFBE5B              
+16  SUELO  #   14 celdas, 3 color(es) #347750 #538947 #76446E      
+57  SUELO  #   13 celdas, 1 color(es) #552E41                      vinoso plano
+61  SUELO  #   13 celdas, 2 color(es) #347750 #245168              
+63  SUELO  #   13 celdas, 3 color(es) #347750 #37969B #245168      
+72  SUELO  #   12 celdas, 4 color(es) #347750 #552E41 #29472D      
+76  MURO   #   12 celdas, 3 color(es) #191716 #1E2431 #245168      reborde superior
+45  MURO   #   11 celdas, 3 color(es) #191716 #1E2431 #29472D      relleno de masa
+9   SUELO  #   10 celdas, 2 color(es) #552E41 #76446E              
+14  SUELO  #   10 celdas, 2 color(es) #76446E #794122              
+60  SUELO  #   10 celdas, 2 color(es) #347750 #245168              
+36  SUELO  #    9 celdas, 3 color(es) #552E41 #76446E #245168      
+68  SUELO  #    9 celdas, 3 color(es) #347750 #552E41 #245168      
+82  SUELO  #    9 celdas, 5 color(es) #347750 #35291D #29472D      
+10  SUELO  #    8 celdas, 2 color(es) #552E41 #76446E              
+37  SUELO  #    8 celdas, 3 color(es) #552E41 #76446E #245168      
+65  SUELO  #    8 celdas, 2 color(es) #191716 #1E2431              
+69  SUELO  #    8 celdas, 3 color(es) #191716 #1E2431 #35291D      
+17  SUELO  #    7 celdas, 5 color(es) #347750 #552E41 #76446E      
+49  SUELO  #    7 celdas, 2 color(es) #76446E #D2391C              
+39  SUELO  #    6 celdas, 4 color(es) #347750 #538947 #552E41      
+7   SUELO  #    5 celdas, 7 color(es) #552E41 #76446E #1E2431      
+79  SUELO  #    5 celdas, 4 color(es) #347750 #35291D #29472D      
+5   SUELO  #    4 celdas, 7 color(es) #552E41 #76446E #35291D      
+15  SUELO  #    4 celdas, 2 color(es) #347750 #538947              
+20  SUELO  #    4 celdas, 1 color(es) #35291D                      marron plano
+41  SUELO  #    4 celdas, 2 color(es) #76446E #245168              
+55  SUELO  #    4 celdas, 6 color(es) #347750 #DCEFF8 #29472D      
+58  SUELO  #    4 celdas, 6 color(es) #72B245 #29472D #9D7DAE      
+67  SUELO  #    4 celdas, 3 color(es) #347750 #35291D #29472D      
+85  SUELO  #    4 celdas, 1 color(es) #40D58E                      menta plano
+18  SUELO  #    3 celdas, 4 color(es) #35291D #29472D #9D7DAE      
+24  SUELO  #    3 celdas, 7 color(es) #72B245 #538947 #DCEFF8      
+33  SUELO  #    3 celdas, 5 color(es) #552E41 #35291D #794122      
+50  SUELO  #    3 celdas, 1 color(es) #D2391C                      rojo plano
+73  SUELO  #    3 celdas, 6 color(es) #347750 #DCEFF8 #29472D      
+78  SUELO  #    3 celdas, 3 color(es) #347750 #35291D #29472D      
+84  SUELO  #    3 celdas, 4 color(es) #40D58E #C4D7A4 #29472D      
+23  FUERA  #    2 celdas, 5 color(es) #347750 #552E41 #76446E      
+25  FUERA  #    2 celdas, 7 color(es) #72B245 #538947 #DCEFF8      
+26  FUERA  #    2 celdas, 7 color(es) #538947 #DCEFF8 #552E41      
+27  FUERA  #    2 celdas, 5 color(es) #72B245 #347750 #538947      
+35  FUERA  #    2 celdas, 4 color(es) #347750 #552E41 #794122      
+38  FUERA  #    2 celdas, 5 color(es) #72B245 #347750 #538947      
+40  FUERA  #    2 celdas, 6 color(es) #347750 #538947 #552E41      
+42  FUERA  #    2 celdas, 4 color(es) #552E41 #76446E #35291D      
+43  FUERA  #    2 celdas, 4 color(es) #347750 #76446E #37969B      
+46  FUERA  #    2 celdas, 7 color(es) #347750 #538947 #552E41      
+47  FUERA  #    2 celdas, 6 color(es) #347750 #538947 #552E41      
+48  FUERA  #    2 celdas, 6 color(es) #347750 #552E41 #1E2431      
+66  FUERA  #    2 celdas, 6 color(es) #347750 #538947 #29472D      
+70  FUERA  #    2 celdas, 5 color(es) #347750 #DCEFF8 #37969B      
+71  FUERA  #    2 celdas, 4 color(es) #347750 #35291D #29472D      
+83  FUERA  #    2 celdas, 10 color(es) #347750 #76446E #1E2431      
+19  FUERA  #    1 celdas, 5 color(es) #347750 #191716 #538947      
+21  FUERA  #    1 celdas, 3 color(es) #35291D #29472D #245168      
+22  FUERA  #    1 celdas, 5 color(es) #347750 #191716 #538947      
+30  FUERA  #    1 celdas, 7 color(es) #552E41 #1E2431 #35291D      
+31  FUERA  #    1 celdas, 7 color(es) #552E41 #1E2431 #35291D      
+32  FUERA  #    1 celdas, 8 color(es) #347750 #538947 #552E41      
+34  FUERA  #    1 celdas, 4 color(es) #538947 #552E41 #76446E      
+44  FUERA  #    1 celdas, 9 color(es) #347750 #538947 #DCEFF8      
+86  FUERA  #    1 celdas, 2 color(es) #40D58E #C4D7A4              
+87  FUERA  #    1 celdas, 11 color(es) #72B245 #538947 #DCEFF8      
+88  FUERA  #    1 celdas, 8 color(es) #DCEFF8 #76446E #1E2431      
+89  FUERA  #    1 celdas, 8 color(es) #72B245 #538947 #552E41      
+90  FUERA  #    1 celdas, 8 color(es) #72B245 #DCEFF8 #552E41      

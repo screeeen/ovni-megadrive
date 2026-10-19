@@ -33,17 +33,6 @@ typedef struct
     u8  dir;
 } Player;
 
-// Places the player at the room's own hub/center (MAZE_DOOR_COL/ROW,
-// maze.h), facing DIR_DOWN. Not currently called anywhere -- the very
-// first spawn of a run used to land here (before an incoming door
-// existed to align with), but that depended on the center always being
-// on the insertion room's own path, which wasn't guaranteed and let the
-// ship spawn embedded in a wall; main.c's newGame() now spawns at the
-// mission door itself instead (positionPlayerEnteringViaDoorDir), the
-// same guaranteed-open cell every later re-entry already uses. Kept
-// around as a plain utility in case some other spawn context wants it.
-void Player_spawnAtRoomCenter(Player *p);
-
 // Advances the player through the CURRENT room (spec §7): doorN/E/S/W flag
 // which borders are open. Reaching an inactive border just stops the ship
 // in place; reaching an active one, aligned with its 2-cell span, returns

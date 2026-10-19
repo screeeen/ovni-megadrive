@@ -128,14 +128,14 @@ u16 Maze_originRow(void);
 void Maze_doorOffsetRange(u8 dir, u8 *lo, u8 *hi);
 
 // mazeTiles occupies this many contiguous VRAM tiles starting at
-// TILE_USER_INDEX: 10 logical cells (floor plus the 9 wall dither
-// variants) and, now that a cell is 8x8, exactly one VDP tile each --
-// it used to be 40, 4 subtiles per 16x16 cell. No separate locked-door
-// cell (spec §19: a sealed door reuses an ordinary wall cell, drawn
-// through a different palette). Anything else built on TILE_USER_INDEX
-// (e.g. guidemap.c's overlay tiles) must start after this to avoid
-// overlapping maze.c's tileset in VRAM.
-#define MAZE_TILE_COUNT 10
+// TILE_USER_INDEX, one VDP tile per logical cell. Tiene que coincidir
+// EXACTAMENTE con los tiles que trae maze_tiles_auto.png: VDP_loadTileSet
+// carga los que diga el recurso, no los que diga esta constante, asi que
+// quedarse corto escribe encima de quien venga detras, asi que la cuenta la
+// genera tools/maze_tiles.py a la vez que el propio PNG y no se escribe a mano.
+// No separate locked-door cell (spec §19: a sealed door reuses an
+// ordinary wall cell, drawn through a different palette).
+#include "maze_tiles_gen.h"   // MAZE_TILE_COUNT, TILE_*, FILO_VAR_*, CANTO_VAR_*
 
 // What maze.c claims in VRAM BEYOND those: the 24-tile pool
 // Maze_drawNoiseFrame rewrites every call, plus the single solid tile the
@@ -209,6 +209,13 @@ void Maze_restoreTextColor(void);
 // particular planet's rooms (main.c's boot-time precompute loop, and
 // newGame() picking the one the player is actually about to play).
 void Maze_setActiveMapSlot(u8 slot);
+
+// El color con el que se dibujan los muros de ESTE planeta. Cambia dos
+// entradas de paleta, no el arte, asi que es instantaneo y no gasta tiles.
+// Llamar al preparar el planeta que se va a jugar (junto a
+// Maze_setRoomSize), no en el precalculo de arranque: ahi pasan los ocho y
+// mandaria el ultimo. La tabla de colores esta en maze.c, EL TINTE.
+void Maze_setPlanetTint(u8 planet);
 
 // Forgets every cached attempt in the CURRENTLY ACTIVE bank (see
 // Maze_setActiveMapSlot) -- every other bank is untouched. Call only

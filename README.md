@@ -9,6 +9,9 @@ Bootstrap generado a partir de la plantilla [mega-drive-hello-world](../mega-dri
 - [SGDK](https://github.com/Stephane-D/SGDK), con la variable `GDK` apuntando a la carpeta clonada (p. ej. en `~/.zshrc`: `export GDK="$HOME/dev/sgdk"`)
 - `m68k-elf-gcc` / `m68k-elf-binutils` (Homebrew)
 - Java (para las herramientas `rescomp`/`sizebnd` de SGDK)
+- `xgmtool` nativo en `$GDK/bin/xgmtool`, que es lo que compila la musica
+  (`chop.xgm`). SGDK solo trae el `.exe`; se construye del fuente con
+  `clang -O2 -w -I$GDK/tools/xgmtool/inc $GDK/tools/xgmtool/src/*.c -lm -o $GDK/bin/xgmtool`
 - Make
 - [BlastEm](https://www.retrodev.com/blastem/) para probar el ROM
 
