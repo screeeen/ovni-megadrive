@@ -4,6 +4,12 @@
 #include <genesis.h>
 
 // Clears all collected flags -- call once per newGame() (spec §13).
+// Los primeros objetos tienen icono propio de 16x16 en vez de letra: el 0 un
+// mapa y el 1 una brujula (res/sprite/item_icons.png, un frame por objeto, en
+// este mismo orden). Lo dibuja main.c con un sprite, asi que Items_drawInRoom
+// no pinta su letra. Del ITEM_ICON_COUNT en adelante siguen siendo letras.
+#define ITEM_ICON_COUNT 2
+
 void Items_reset(void);
 
 // True (and fills *outLetter with 'A'..'A'+itemCount-1) if room (col,row)

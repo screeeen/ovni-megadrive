@@ -121,6 +121,9 @@ void Items_drawInRoom(u8 col, u8 row)
     {
         char s[2];
 
+        if ((u8) (letter - 'A') < ITEM_ICON_COUNT)
+            return; // lo tapa el sprite del icono, ver items.h
+
         s[0] = letter;
         s[1] = '\0';
         // Default text colour: the player is physically standing in this

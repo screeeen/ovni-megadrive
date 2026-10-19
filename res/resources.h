@@ -39,6 +39,7 @@ extern const SpriteDefinition playerShip;
 extern const SpriteDefinition enemyShip;
 extern const SpriteDefinition playerShip16;
 extern const SpriteDefinition enemyShip16;
+extern const SpriteDefinition itemIcons;
 extern const SpriteDefinition mapShip;
 extern const SpriteDefinition planetSmall;
 extern const SpriteDefinition planetMedium;

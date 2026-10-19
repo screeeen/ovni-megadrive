@@ -12,6 +12,7 @@ TILESET gameFont "sprite/font.png" NONE NONE ROW
 # ella, asi que tener otra distinta obliga a un tileset propio y a dibujar
 # los tiles a mano: eso es hud.c.
 TILESET hudFont "sprite/font_hud.png" NONE NONE ROW
+
 # 5 frames de 8x8 en una fila: 0 la nave normal, y 1..4 la nave estrujada
 # contra el muro que acaba de golpear, en el orden DIR_UP/LEFT/DOWN/RIGHT
 # de player.h (asi el frame es 1+dir, sin tabla de por medio).
@@ -25,6 +26,9 @@ SPRITE enemyShip "sprite/enemy.png" 1 1 BEST
 # sigue siendo la celda (player.c, BOX): esto solo cambia el dibujo.
 SPRITE playerShip16 "sprite/player16.png" 2 2 NONE
 SPRITE enemyShip16 "sprite/enemy16.png" 2 2 BEST
+# Los iconos de los objetos, 16x16 (tools/item_icons.py). Van con las tintas
+# de las plantas, asi que el sprite se pinta con PAL0 y no gasta linea.
+SPRITE itemIcons "sprite/item_icons.png" 2 2 NONE
 SPRITE mapShip "sprite/map_ship.png" 1 1 BEST
 SPRITE planetSmall "sprite/planet_small.png" 1 1 BEST
 SPRITE planetMedium "sprite/planet_medium.png" 2 2 BEST

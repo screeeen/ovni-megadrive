@@ -229,6 +229,7 @@ static const SizePreset sizePresets[] = {
 static Player player;
 static Sprite *playerSprite;
 static Sprite *mapShipSprite;
+static Sprite *itemIconSprite;   // el icono 16x16 del objeto de esta sala, ver updateItemIcon
 static Enemy enemy;
 static Sprite *enemySprite;
 // Que fotograma esta puesto. A fichero y no dentro de updateSquash porque
@@ -245,6 +246,16 @@ static u8 squashShown = 0xFF;
 // Lo que se resta al pintar: la de 16x16 va centrada en la celda de 8, o sea
 // que sobresale 4 px por lado.
 static s16 shipDrawOffset = 0;
+
+#define IDLE_BOB_FRAMES 9
+static const s8 idleBob[6] = { 0, -1, -1, 0, 1, 1 };
+static u8 idleStep = 0;
+static u8 idleTick = 0;
+
+static s16 shipBob(void)
+{
+    return (s16) idleBob[idleStep];
+}
 
 static void setShipArt(u8 preset)
 {
@@ -1021,7 +1032,7 @@ static u16 scanPlanetPlantTotal(u8 presetIndex)
 
             Maze_generateRoom(doorN, doorE, doorS, doorW, doorN, doorE, doorS, doorW,
                                doorOffsets, seed, (u8) ((row * MAX_MAP_COLS) + col));
-            Plants_spawnForRoom(seed);
+            Plants_spawnForRoom(seed, plantCacheSlot(presetIndex, col, row));
             // Keep what this pass already computed instead of throwing it
             // away: that is what spares the room its first-visit flood.
             Plants_cacheCurrentRoom(plantCacheSlot(presetIndex, col, row));
@@ -1264,6 +1275,10 @@ static u8 introPlanetIndex;
 // single planet, the moment one that just unlocked is first looked at in
 // the menu: introPlanetIndex is that planet and this is one past it.
 static u8 introPlanetLimit = PLANETS_AT_START;
+// Las celdas de todos los planetas de esta tanda y las ya hechas: lo que mide
+// la barra. Son cols*filas del preset, que se sabe sin generar nada.
+static u16 introCellsTotal;
+static u16 introCellsDone;
 static u16 introRoomCursor; // flattened row*mapCols+col into introPlanetIndex's own grid
 static u16 introPlanetTotal;
 // FALSE while still waiting for the prompt's first press; TRUE from
@@ -1406,6 +1421,18 @@ static void ensureGalaxyName(void)
     galaxyNamePicked = TRUE;
 }
 
+// Lo que se ve mientras mapea (peticion del usuario: una barra, no los
+// numeros de cada habitacion). Fila 6, el ancho entero de la banda de texto.
+#define INTRO_BAR_ROW 6
+
+static void introDrawBar(void)
+{
+    const u16 llenas = introCellsTotal
+        ? (u16) (((u32) introCellsDone * INTRO_TEXT_COLS) / introCellsTotal) : 0;
+
+    Maze_drawProgressBar(INTRO_MARGIN_COLS, INTRO_BAR_ROW, INTRO_TEXT_COLS, llenas);
+}
+
 static void beginCartography(u8 firstPlanet, u8 limit, bool showGalaxy)
 {
     char buf[40];
@@ -1429,6 +1456,16 @@ static void beginCartography(u8 firstPlanet, u8 limit, bool showGalaxy)
 
     introPlanetIndex = firstPlanet;
     introPlanetLimit = limit;
+    introCellsDone = 0;
+    introCellsTotal = 0;
+    {
+        u8 p;
+
+        for (p = firstPlanet; p < limit; p++)
+            introCellsTotal = (u16) (introCellsTotal +
+                                     (sizePresets[p].cols * sizePresets[p].rows));
+    }
+    introDrawBar();
     introSetUpPlanet(firstPlanet);
     introFloodReset();
 }
@@ -1485,25 +1522,20 @@ static bool introTick(void)
             };
             const u16 seed = roomSeedFor(col, row);
             u16 roomPlants;
-            char buf[40];
-            int len;
 
             Maze_generateRoom(doorN, doorE, doorS, doorW, doorN, doorE, doorS, doorW,
                                doorOffsets, seed, (u8) ((row * MAX_MAP_COLS) + col));
-            Plants_spawnForRoom(seed);
+            Plants_spawnForRoom(seed, plantCacheSlot(introPlanetIndex, col, row));
             Plants_cacheCurrentRoom(plantCacheSlot(introPlanetIndex, col, row)); // same reason as the scan above
             roomPlants = Plants_lastRoomCount();
             introPlanetTotal = (u16) (introPlanetTotal + roomPlants);
 
-            // Trimmed to fit the margins: the same four numbers, shorter
-            // labels. Room, seed, slide-graph nodes, plants.
-            len = sprintf(buf, "R%02d,%02d S:%04X N:%02X P:%X",
-                          col, row, seed, Maze_slideNodeCount(), roomPlants);
-            VDP_drawText(buf, introTextX((u16) len), 6);
         }
     }
 
     introRoomCursor++;
+    introCellsDone++;
+    introDrawBar();
     return FALSE;
 }
 
@@ -1832,7 +1864,7 @@ static void loadRoom(u8 col, u8 row)
     {
         Maze_generateRoom(doorN, doorE, doorS, doorW, doorN, doorE, doorS, doorW, doorOffsets, seed,
                            (u8) ((row * MAX_MAP_COLS) + col));
-        Plants_spawnForRoom(seed); // spec §48 -- own line per room, same roomSeed as the layout itself
+        Plants_spawnForRoom(seed, plantCacheSlot(sizePresetIndex, col, row)); // spec §48 -- own line per room, same roomSeed as the layout itself
         Plants_cacheCurrentRoom(plantCacheSlot(sizePresetIndex, col, row)); // never again for this room, this session
     }
 
@@ -2035,7 +2067,7 @@ static void newGame(void)
         default:     player.dir = DIR_RIGHT; break; // DOOR_W
     }
     SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
-                    player.y + Maze_originPxY() + shipDrawOffset); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+                    player.y + Maze_originPxY() + shipDrawOffset + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
     SPR_setVisibility(playerSprite, VISIBLE);
     SPR_setVisibility(enemySprite, HIDDEN); // no enemy in the insertion room (spec §27)
 }
@@ -2561,6 +2593,35 @@ static void triggerSquash(u8 dir)
     squashFramesLeft = SQUASH_FRAMES;
 }
 
+// LA NAVE FLOTA cuando esta parada (peticion del usuario). Va por POSICION y
+// no por fotogramas a proposito: SPR_setFrame reescribe los tiles del sprite
+// en VRAM, asi que un vaiven por fotogramas seria una transferencia por paso y
+// para siempre. Asi no cuesta ni un byte de VRAM y vale igual para la nave de
+// 8x8 y para la de 16x16.
+//
+// Seis pasos con parada arriba y abajo, que es lo que lo hace leer a flotar y
+// no a temblar. Empieza y acaba en cero, y al moverse vuelve a cero, para que
+// arrancar no de un tiron de un pixel.
+static void updateIdle(void)
+{
+    // Ni moviendose ni recien estrellada: el aplastado ya es su propio gesto.
+    if ((player.dir != DIR_NONE) || (squashFramesLeft > 0))
+    {
+        idleStep = 0;
+        idleTick = 0;
+        return;
+    }
+
+    idleTick++;
+    if (idleTick >= IDLE_BOB_FRAMES)
+    {
+        idleTick = 0;
+        idleStep++;
+        if (idleStep >= 6)
+            idleStep = 0;
+    }
+}
+
 // Pushes the current frame to the sprite, but only when it actually
 // changes: SPR_setFrame re-uploads the frame's tiles, so calling it every
 // frame would be a VRAM transfer per frame for a sprite that is usually
@@ -3046,6 +3107,36 @@ static void drawPlantPath(void)
 // invisible against the backdrop, so between pulses there is simply
 // nothing there, and the pulse itself fades in and out instead of
 // snapping on.
+// El icono de 16x16 del objeto que aun esta en esta sala, centrado en su celda
+// de 8 (de ahi el -4, igual que shipDrawOffset con la nave grande). Una sola
+// llamada por frame decide si se ve: asi no hay que acordarse de esconderlo en
+// cada pantalla que tapa la partida.
+static void updateItemIcon(void)
+{
+    static u16 frameShown = 0xFFFF;
+    char letter;
+    const bool want = (gameState == STATE_PLAYING) && !mapViewOpen && !roomViewerOn &&
+                      !sweepOn && !inInsertRoom &&
+                      Items_uncollectedAt(currentCol, currentRow, &letter) &&
+                      ((u8) (letter - 'A') < ITEM_ICON_COUNT);
+
+    if (!want)
+    {
+        SPR_setVisibility(itemIconSprite, HIDDEN);
+        return;
+    }
+
+    if (frameShown != (u16) (letter - 'A'))
+    {
+        frameShown = (u16) (letter - 'A');
+        SPR_setFrame(itemIconSprite, frameShown); // resube sus teselas: solo al cambiar
+    }
+    SPR_setPosition(itemIconSprite,
+                    (s16) ((MAZE_DOOR_COL * MAZE_TILE_PX) + Maze_originPxX() - 4),
+                    (s16) ((MAZE_DOOR_ROW * MAZE_TILE_PX) + Maze_originPxY() - 4));
+    SPR_setVisibility(itemIconSprite, VISIBLE);
+}
+
 static void drawReturnToInsertHint(void)
 {
     static const u32 ramp[8] = { 0x000000, 0x242424, 0x484848, 0x6D6D6D,
@@ -3219,7 +3310,7 @@ static void buildRoomForInspection(u8 col, u8 row, u8 lockMode)
     Maze_generateRoom(rb.door[DOOR_N], rb.door[DOOR_E], rb.door[DOOR_S], rb.door[DOOR_W],
                        rb.door[DOOR_N], rb.door[DOOR_E], rb.door[DOOR_S], rb.door[DOOR_W],
                        rb.off, rb.seed, rb.slot);
-    Plants_spawnForRoom(rb.seed);
+    Plants_spawnForRoom(rb.seed, plantCacheSlot(sizePresetIndex, col, row));
     Maze_generateRoom(rb.door[DOOR_N], rb.door[DOOR_E], rb.door[DOOR_S], rb.door[DOOR_W],
                        rb.locked[DOOR_N], rb.locked[DOOR_E], rb.locked[DOOR_S], rb.locked[DOOR_W],
                        rb.off, rb.seed, rb.slot);
@@ -4194,6 +4285,7 @@ int main(bool hardReset)
     Maze_loadGraphics();
     GuideMap_loadGraphics();
     Menu_loadGraphics(); // spec §31 -- must come after both above, its tiles stack right after theirs in VRAM
+    Plants_loadGraphics(); // detras del menu y de la fuente del HUD en VRAM
     Sfx_loadDriver(); // spec §47/§49 -- PCM4 driver for the kick and plant hi-hat, independent of VRAM layout
 
     PAL_setPalette(PAL1, playerShip.palette->data, DMA);
@@ -4203,6 +4295,10 @@ int main(bool hardReset)
     // separate palette load -- just a smaller (1 tile, 8x8) silhouette
     // shown instead of playerShip while the guide map is open.
     mapShipSprite = SPR_addSprite(&mapShip, 0, 0, TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
+    // PAL0: el arte ya viene con las tintas de las plantas (11/12/13), asi que
+    // no hace falta linea de paleta propia -- no queda ninguna libre.
+    itemIconSprite = SPR_addSprite(&itemIcons, 0, 0, TILE_ATTR(PAL0, TRUE, FALSE, FALSE));
+    SPR_setVisibility(itemIconSprite, HIDDEN);
 
     // PAL2 is enemyShip's own palette (also reused by the menu's
     // "completed planet" yellow -- ENEMY_INK_INDEX's own doc comment).
@@ -4795,7 +4891,7 @@ int main(bool hardReset)
                 }
 
                 SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
-                    player.y + Maze_originPxY() + shipDrawOffset); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+                    player.y + Maze_originPxY() + shipDrawOffset + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
             }
             else
             {
@@ -5019,7 +5115,7 @@ int main(bool hardReset)
                 }
 
                 SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
-                    player.y + Maze_originPxY() + shipDrawOffset); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+                    player.y + Maze_originPxY() + shipDrawOffset + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
             }
 
             // Did the ship travel this frame? (The steering lock,
@@ -5084,12 +5180,14 @@ int main(bool hardReset)
         }
 
         drawScoreHud();
+        updateIdle();   // el vaiven de estar parada, ver shipBob
         updateSquash(); // the ship's own deformation, see triggerSquash
 
         drawRoomIdHud(); // always-on room identity line, STATE_PLAYING only
         hudLinesDirty = FALSE; // both readers above have had their frame
         drawDebugView(); // no-op unless the debug combo turned it on
         drawSoundView(); // idem, el inventario de sonidos (START)
+        updateItemIcon(); // el icono del objeto de la sala, ver su propio comentario
         drawCollisionGizmos(); // no-op unless HITBOX is on and gameState is STATE_PLAYING
         drawPlantPath(); // no-op unless PLANTA is on and gameState is STATE_PLAYING
         drawReturnToInsertHint(); // no-op until every letter is in hand

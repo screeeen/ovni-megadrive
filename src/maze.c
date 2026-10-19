@@ -2388,10 +2388,6 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
 // componente (00 24 48 6D 91 B6 DA FF), y RGB24_TO_VDPCOLOR redondea a ellos,
 // asi que un color de fuera de esa rejilla se mueve solo. Estos ya estan en
 // ella, de modo que lo que se lee aqui es lo que sale en pantalla.
-#define PAL_SUELO   2
-#define PAL_CUERPO  3
-#define PAL_SOMBRA  4
-#define PAL_BRILLO  5
 
 
 // Cada planeta es UN tono en tres escalones de valor: el suelo abajo y el muro
@@ -2436,6 +2432,18 @@ void Maze_loadGraphics(void)
     PAL_setColor(DEBUG_BOX_PAL_INDEX, RGB24_TO_VDPCOLOR(0x000000));
 
     VDP_loadTileSet(&mazeTiles, BASE_TILE, DMA);
+}
+
+// Una barra de w teselas en (x,y): las `filled` primeras con el muro y el
+// resto con el suelo, o sea los dos colores del planeta que haya puesto.
+void Maze_drawProgressBar(u16 x, u16 y, u16 w, u16 filled)
+{
+    u16 i;
+
+    for (i = 0; i < w; i++)
+        VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE,
+                                              (u16) (BASE_TILE + ((i < filled) ? TILE_LISO : TILE_SUELO))),
+                         (u16) (x + i), y);
 }
 
 // Absolute CRAM index of PAL0's index1 -- the shared default every text

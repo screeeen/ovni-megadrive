@@ -4,12 +4,12 @@
 #include <genesis.h>
 #include "guidemap.h" // MAX_MAP_COLS/MAX_MAP_ROWS, for Plants_saveMask/restoreMask's array type
 
-// Placeholder collectible plants (user request): "un tipo de planta que
-// quepa en 1 tile... cuando la nave pasa por ellas las recoge y suma un
-// contador... distribúyelas en líneas dentro del path del grafo... se
-// colocan en grupos de varias en línea." A plant is one maze cell, drawn
-// as a plain text glyph -- explicitly a placeholder, no real art, same
-// "reuse VDP_drawText" shortcut items.c's own letters already use.
+// Collectible plants (user request): "un tipo de planta que quepa en 1
+// tile... cuando la nave pasa por ellas las recoge y suma un contador...
+// distribúyelas en líneas dentro del path del grafo... se colocan en
+// grupos de varias en línea." A plant is one maze cell, drawn with its
+// own tile, y no hay dos iguales en todo el juego: la forma sale del
+// indice unico de cada planta (ver Plants_buildTile mas abajo).
 // Unlike items.h's letters, there's no COLLECTION order -- just a
 // running counter. They do gate something now, though (user request:
 // "las puertas se abren en cada habitación siempre que se hayan
@@ -33,6 +33,25 @@
 
 // Clears every room's collected-plant state and the running total. Call
 // once per newGame(), alongside Items_reset().
+// Deja puestas las tres tintas de la flora en PAL0. Una vez al arrancar,
+// junto a Maze_loadGraphics(). El dibujo no se carga: se arma al vuelo.
+void Plants_loadGraphics(void);
+
+// EL INDICE UNICO DE UNA PLANTA. Cada planta del juego tiene el suyo:
+//
+//     indice = slot * (PLANTS_LINES_PER_ROOM * PLANTS_MAX_PER_LINE)
+//              + linea * PLANTS_MAX_PER_LINE + i
+//
+// donde slot es el que main.c reparte por (planeta, col, fila). De ahi sale su
+// forma, y no hay dos iguales en todo el juego: el indice decide perfil,
+// relleno y tallo por restos de tres modulos coprimos, y tools/plant_tiles.py
+// comprueba al generar que las PLANT_SHAPE_COUNT combinaciones dan
+// PLANT_SHAPE_COUNT dibujos distintos.
+//
+// Escribe en dst los 32 bytes de la tesela de esa planta. Es lo que va a
+// necesitar la pagina de coleccion del menu para pintar una planta suelta.
+void Plants_buildTile(u16 shape, u8 *dst);
+
 void Plants_reset(void);
 
 // Regenerates this room's plant lines deterministically from roomSeed --
@@ -45,7 +64,7 @@ void Plants_reset(void);
 // time. Call right after Maze_generateRoom() in loadRoom(), before
 // Maze_draw(). Not called for the insertion room (no plants there, same
 // as enemy.c).
-void Plants_spawnForRoom(u16 roomSeed);
+void Plants_spawnForRoom(u16 roomSeed, u16 slot);
 
 // Player is in room (col,row), ship box at pixel (playerX,playerY).
 // Marks any of this room's plants (any of its PLANTS_LINES_PER_ROOM

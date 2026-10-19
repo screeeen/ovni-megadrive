@@ -2,6 +2,18 @@
 #include "maze.h"
 #include "hud.h"
 #include "guidemap.h" // MAX_MAP_COLS/MAX_MAP_ROWS
+#include "menu.h"     // MENU_TILE_COUNT
+#include "plant_tiles_gen.h"
+
+// Detras de todo lo que ya reserva teselas, igual que se encadenan entre si.
+// Son las de las plantas de ESTA habitacion, rehechas en cada una.
+#define PLANT_TILE_BASE (TILE_USER_INDEX + MAZE_TILE_COUNT + GUIDEMAP_TILE_COUNT \
+                         + MAZE_SCRATCH_TILE_COUNT + MENU_TILE_COUNT + HUD_FONT_TILE_COUNT)
+
+// Fijas en todo el juego: a la flora no la tine el planeta.
+#define PAL_PLANTA_OSCURA 11   // #490049
+#define PAL_PLANTA_MEDIA  12   // #B64992
+#define PAL_PLANTA_CLARA  13   // #FFB6DB
 
 // 3 independent lines per room (user request: "añade dos hileras más de
 // plantas... en cada room" -- 2 more on top of the original 1). Also the
@@ -10,12 +22,19 @@
 #define PLANTS_LINES_PER_ROOM 3
 #define PLANTS_MAX_PER_LINE   5
 #define PLANTS_LINE_MIN       3
-// A plant is drawn as one 8x8 text glyph, so that is how big it is to hit.
+// Una planta es una tesela de 8x8, y esa es su caja.
 #define PLANTS_GLYPH_PX       8
 // Random (anchor,axis,dir) tries before giving up on ONE line -- tombo
 // rooms are ~90% open interior (maze.h's own doc comment), so this
 // converges fast in practice, same reasoning as enemy.c's findOpenInLane.
 #define PLANTS_SPAWN_ATTEMPTS 24
+// Las plantas que como mucho tiene una habitacion, y por tanto las teselas que
+// hacen falta en VRAM y el paso del indice unico de planta a planta.
+#define PLANT_MAX_PER_ROOM (PLANTS_LINES_PER_ROOM * PLANTS_MAX_PER_LINE)
+
+#if (((PLANTS_CACHE_SLOTS + 1) * PLANT_MAX_PER_ROOM) > PLANT_SHAPE_COUNT)
+#error hay mas plantas que formas: subir PERFILES en tools/plant_tiles.py
+#endif
 
 static u8 curCol[PLANTS_LINES_PER_ROOM][PLANTS_MAX_PER_LINE];
 static u8 curRow[PLANTS_LINES_PER_ROOM][PLANTS_MAX_PER_LINE];
@@ -46,6 +65,12 @@ static u16 total;
 // A per-planet constant, not session state, so Plants_reset() leaves it
 // alone.
 static u16 planetTotal;
+
+// La habitacion cuyas plantas estan ahora en VRAM, y de donde sale el indice
+// unico de cada una. PLANTS_CACHE_SLOTS cuando la celda no es habitacion.
+static u16 curSlot = PLANTS_CACHE_SLOTS;
+static u16 tilesSlot = 0xFFFF;
+static u32 plantTileData[PLANT_MAX_PER_ROOM * 8];   // u32: el DMA quiere alineado
 
 // Own tiny xorshift PRNG, seeded from roomSeed, instead of the shared
 // random() stream: Maze_generateRoom's accepted-attempt cache (maze.h)
@@ -103,6 +128,150 @@ static bool isOccupied(s16 x, s16 y, const u8 *occCol, const u8 *occRow, u8 occC
     return FALSE;
 }
 
+// Las celdas de la copa, una mascara de columnas por fila. Mismo dibujo que
+// hace tools/plant_tiles.py: un ancho impar centrado en PLANT_CROWN_MID.
+static void crownMask(const u8 *h, u8 *copa)
+{
+    u8 r;
+
+    for (r = 0; r < PLANT_CROWN_ROWS; r++)
+    {
+        copa[r] = 0;
+        if (h[r])
+        {
+            const u8 w = (u8) (h[r] - 1);
+            u8 x;
+
+            for (x = (u8) (PLANT_CROWN_MID - w); x <= (u8) (PLANT_CROWN_MID + w); x++)
+                copa[r] |= (u8) (1u << x);
+        }
+    }
+}
+
+static bool crownInner(const u8 *copa, u8 x, u8 r)
+{
+    if (!(copa[r] & (u8) (1u << x)))
+        return FALSE;
+    if ((x == 0) || !(copa[r] & (u8) (1u << (x - 1))))
+        return FALSE;
+    if ((x >= 7) || !(copa[r] & (u8) (1u << (x + 1))))
+        return FALSE;
+    if ((r == 0) || !(copa[r - 1] & (u8) (1u << x)))
+        return FALSE;
+    if (((r + 1) >= PLANT_CROWN_ROWS) || !(copa[r + 1] & (u8) (1u << x)))
+        return FALSE;
+
+    return TRUE;
+}
+
+// Escribe en dst los 32 bytes de la tesela de la planta numero `shape`. Dos
+// plantas del juego nunca comparten shape, y dos shapes nunca dan el mismo
+// dibujo (lo comprueba el generador), asi que no hay dos plantas iguales.
+void Plants_buildTile(u16 shape, u8 *dst)
+{
+    const u8 *const h = plantProfile[shape % PLANT_PROFILE_COUNT];
+    const u8 fill = (u8) (shape % PLANT_FILL_COUNT);
+    const u8 stem = (u8) (shape % PLANT_STEM_COUNT);
+    u8 px[64];
+    u8 copa[PLANT_CROWN_ROWS];
+    u8 base = 0;
+    u8 x, y, r;
+
+    for (x = 0; x < 64; x++)
+        px[x] = PAL_SUELO;
+
+    crownMask(h, copa);
+    for (r = 0; r < PLANT_CROWN_ROWS; r++)
+        if (copa[r])
+            base = r;
+
+    for (r = 0; r <= base; r++)
+    {
+        for (x = 0; x < 8; x++)
+        {
+            bool dentro;
+            u8 c;
+
+            if (!(copa[r] & (u8) (1u << x)))
+                continue;
+
+            dentro = crownInner(copa, x, r);
+            switch (fill)
+            {
+                case 0:  c = PAL_PLANTA_CLARA; break;
+                case 1:  c = (r == base) ? PAL_PLANTA_MEDIA : PAL_PLANTA_CLARA; break;
+                case 2:  c = dentro ? PAL_PLANTA_MEDIA : PAL_PLANTA_CLARA; break;
+                case 3:  c = dentro ? PAL_SUELO : PAL_PLANTA_CLARA; break;
+                case 4:  c = ((x + r) & 1) ? PAL_PLANTA_CLARA : PAL_PLANTA_MEDIA; break;
+                default: c = !dentro ? PAL_PLANTA_CLARA
+                                     : (((x + r) & 1) ? PAL_PLANTA_MEDIA : PAL_SUELO); break;
+            }
+            px[(r * 8) + x] = c;
+        }
+    }
+
+    for (y = (u8) (base + 1); y < 7; y++)
+    {
+        px[(y * 8) + PLANT_CROWN_MID] = PAL_PLANTA_MEDIA;
+        if (stem == 1)
+        {
+            px[(y * 8) + PLANT_CROWN_MID - 1] = PAL_PLANTA_MEDIA;
+            px[(y * 8) + PLANT_CROWN_MID + 1] = PAL_PLANTA_MEDIA;
+        }
+        else if (stem == 3)
+        {
+            px[(y * 8) + PLANT_CROWN_MID] = PAL_SUELO;
+            px[(y * 8) + PLANT_CROWN_MID - 1] = PAL_PLANTA_MEDIA;
+            px[(y * 8) + PLANT_CROWN_MID + 1] = PAL_PLANTA_MEDIA;
+        }
+    }
+    if (stem == 2)
+    {
+        const u8 hoja = (u8) (((base + 2) < 6) ? (base + 2) : 6);
+
+        px[(hoja * 8) + PLANT_CROWN_MID - 2] = PAL_PLANTA_MEDIA;
+        px[(hoja * 8) + PLANT_CROWN_MID - 1] = PAL_PLANTA_MEDIA;
+        px[(hoja * 8) + PLANT_CROWN_MID + 1] = PAL_PLANTA_MEDIA;
+        px[(hoja * 8) + PLANT_CROWN_MID + 2] = PAL_PLANTA_MEDIA;
+    }
+    else if (stem == 4)
+    {
+        px[((base + 1) * 8) + PLANT_CROWN_MID + 1] = PAL_PLANTA_MEDIA;
+        px[((base + 1) * 8) + PLANT_CROWN_MID + 2] = PAL_PLANTA_MEDIA;
+    }
+
+    for (x = 0; x < 8; x++)
+        if (plantRoot[stem] & (u8) (1u << x))
+            px[(7 * 8) + x] = PAL_PLANTA_OSCURA;
+
+    for (y = 0; y < 8; y++)
+        for (x = 0; x < 8; x += 2)
+            *dst++ = (u8) ((px[(y * 8) + x] << 4) | px[(y * 8) + x + 1]);
+}
+
+// Rehace las PLANT_MAX_PER_ROOM teselas de esta habitacion y las sube. Solo
+// cuando cambia de habitacion: recoger una planta no mueve ninguna.
+static void uploadRoomTiles(void)
+{
+    u8 i;
+
+    if (curSlot == tilesSlot)
+        return;
+
+    for (i = 0; i < PLANT_MAX_PER_ROOM; i++)
+        Plants_buildTile((u16) ((curSlot * PLANT_MAX_PER_ROOM) + i), (u8 *) &plantTileData[i * 8]);
+
+    VDP_loadTileData(plantTileData, PLANT_TILE_BASE, PLANT_MAX_PER_ROOM, DMA);
+    tilesSlot = curSlot;
+}
+
+void Plants_loadGraphics(void)
+{
+    PAL_setColor(PAL_PLANTA_OSCURA, RGB3_3_3_TO_VDPCOLOR(2, 0, 2));
+    PAL_setColor(PAL_PLANTA_MEDIA,  RGB3_3_3_TO_VDPCOLOR(5, 2, 4));
+    PAL_setColor(PAL_PLANTA_CLARA,  RGB3_3_3_TO_VDPCOLOR(7, 5, 6));
+}
+
 void Plants_reset(void)
 {
     u8 r, c, line;
@@ -121,12 +290,13 @@ void Plants_reset(void)
     // whole point: it is filled during the cartography screen at boot, so
     // no room has to pay for its own first visit mid-play.
 
+    tilesSlot = 0xFFFF;
     total = 0;
     for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
         curCount[line] = 0;
 }
 
-void Plants_spawnForRoom(u16 roomSeed)
+void Plants_spawnForRoom(u16 roomSeed, u16 slot)
 {
     const u16 nodeCount = Maze_slideNodeCount();
     u8 occCol[PLANTS_LINES_PER_ROOM * PLANTS_MAX_PER_LINE];
@@ -134,6 +304,7 @@ void Plants_spawnForRoom(u16 roomSeed)
     u8 occCount = 0;
     u8 line;
 
+    curSlot = (slot <= PLANTS_CACHE_SLOTS) ? slot : PLANTS_CACHE_SLOTS;
     seedRng(roomSeed);
 
     for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
@@ -285,6 +456,8 @@ void Plants_drawInRoom(u8 col, u8 row)
 {
     u8 line, i;
 
+    uploadRoomTiles();
+
     for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
     {
         for (i = 0; i < curCount[line]; i++)
@@ -295,7 +468,11 @@ void Plants_drawInRoom(u8 col, u8 row)
                 continue;
 
             // a maze cell is one VDP tile now; the origin carries the HUD band and the centring, same convention as items.c
-            VDP_drawText("*", Maze_originColumn() + curCol[line][i], Maze_originRow() + curRow[line][i]);
+            VDP_setTileMapXY(BG_A,
+                             TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE,
+                                            (u16) (PLANT_TILE_BASE + (line * PLANTS_MAX_PER_LINE) + i)),
+                             Maze_originColumn() + curCol[line][i],
+                             Maze_originRow() + curRow[line][i]);
         }
     }
 }
@@ -367,6 +544,8 @@ bool Plants_loadCachedRoom(u16 slot)
 
     if ((slot >= PLANTS_CACHE_SLOTS) || !cacheValid[slot])
         return FALSE;
+
+    curSlot = slot;
 
     for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
     {

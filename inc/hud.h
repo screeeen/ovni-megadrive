@@ -3,6 +3,8 @@
 
 #include <genesis.h>
 
+#define HUD_FONT_TILE_COUNT 96   // font_hud.png: 128x48
+
 // Fuente propia para el HUD de juego (peticion del usuario: una fuente
 // distinta de la del resto). SGDK carga UNA sola fuente en
 // TILE_FONT_INDEX y todos los VDP_drawText tiran de ella, asi que tener

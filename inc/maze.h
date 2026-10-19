@@ -116,6 +116,17 @@ void Maze_setRoomSize(u8 w, u8 h, u8 variety);
 s16 Maze_originPxX(void);
 s16 Maze_originPxY(void);
 // Same two, in 8px VDP tile/text units, for VDP_drawText call sites.
+// Una barra de progreso de w teselas en (x,y), llena hasta `filled`. Usa los
+// dos tonos del planeta puesto, asi que la cartografia la pinta de su color.
+// Las cuatro entradas de PAL0 del escenario. Maze_setPlanetTint mueve las tres
+// del muro; el suelo es el fondo de cualquier cosa que se dibuje sobre el.
+#define PAL_SUELO   2
+#define PAL_CUERPO  3
+#define PAL_SOMBRA  4
+#define PAL_BRILLO  5
+
+void Maze_drawProgressBar(u16 x, u16 y, u16 w, u16 filled);
+
 u16 Maze_originColumn(void);
 u16 Maze_originRow(void);
 
