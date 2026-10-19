@@ -231,6 +231,38 @@ static Sprite *playerSprite;
 static Sprite *mapShipSprite;
 static Enemy enemy;
 static Sprite *enemySprite;
+// Que fotograma esta puesto. A fichero y no dentro de updateSquash porque
+// setShipArt tiene que invalidarlo: SPR_setDefinition rearma el sprite al 0.
+static u8 squashShown = 0xFF;
+
+// LOS CUATRO PRIMEROS PLANETAS llevan la nave y el enemigo de 16x16, los de
+// antes de que la celda pasara a 8 px (peticion del usuario). Son justo los de
+// habitacion pequena -- de 16x10 a 28x16 celdas -- donde la de 8x8 se queda
+// perdida en la pantalla. Cambia SOLO el dibujo: la caja de colision es la
+// celda (player.c, BOX), asi que el deslizamiento no se entera de nada.
+#define BIG_SHIP_PRESETS 4
+
+// Lo que se resta al pintar: la de 16x16 va centrada en la celda de 8, o sea
+// que sobresale 4 px por lado.
+static s16 shipDrawOffset = 0;
+
+static void setShipArt(u8 preset)
+{
+    const bool big = (preset < BIG_SHIP_PRESETS);
+    bool puesta = FALSE;
+
+    // SPR_setDefinition realoja la VRAM del sprite el solo y devuelve FALSE si
+    // no cabe. El desplazamiento va atado a que la del jugador haya entrado:
+    // ponerlo con el arte viejo puesto descentraria el dibujo medio tile.
+    if (playerSprite)
+        puesta = SPR_setDefinition(playerSprite, big ? &playerShip16 : &playerShip);
+    if (enemySprite)
+        SPR_setDefinition(enemySprite, big ? &enemyShip16 : &enemyShip);
+
+    shipDrawOffset = (big && puesta) ? -4 : 0;
+    squashShown = 0xFF; // el sprite nuevo viene en el 0 y la cache no lo sabe
+}
+
 static u16 mapSeed;
 static u8 currentCol, currentRow;
 // TRUE while the player is still in the special insertion room (spec
@@ -955,6 +987,7 @@ static u16 scanPlanetPlantTotal(u8 presetIndex)
     Maze_setRoomSize(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
                      sizePresets[presetIndex].variety);
     Maze_setPlanetTint(presetIndex);   // el color de los muros de este planeta
+    setShipArt(presetIndex);           // la nave de 16x16 en los cuatro primeros
     GuideMap_setShape(sizePresets[presetIndex].map, sizePresets[presetIndex].cols,
                       sizePresets[presetIndex].rows);
     GuideMap_generate();
@@ -1256,6 +1289,7 @@ static void introSetUpPlanet(u8 presetIndex)
     Maze_setRoomSize(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
                      sizePresets[presetIndex].variety);
     Maze_setPlanetTint(presetIndex);   // el color de los muros de este planeta
+    setShipArt(presetIndex);           // la nave de 16x16 en los cuatro primeros
     GuideMap_setShape(sizePresets[presetIndex].map, sizePresets[presetIndex].cols,
                       sizePresets[presetIndex].rows);
     GuideMap_generate();
@@ -1828,7 +1862,8 @@ static void loadRoom(u8 col, u8 row)
     {
         Enemy_spawnForRoom(&enemy, seed, doorN, doorE, doorS, doorW, doorOffsets);
         PAL_setColor(ENEMY_INK_INDEX, ENEMY_DANGEROUS_COLOR);
-        SPR_setPosition(enemySprite, enemy.x + Maze_originPxX(), enemy.y + Maze_originPxY());
+        SPR_setPosition(enemySprite, enemy.x + Maze_originPxX() + shipDrawOffset,
+                    enemy.y + Maze_originPxY() + shipDrawOffset);
         // Not always alive: a room with nowhere legal to put an enemy (every
         // open cell on a door trajectory) gets none -- see Enemy_spawnForRoom.
         SPR_setVisibility(enemySprite, enemy.alive ? VISIBLE : HIDDEN);
@@ -1999,7 +2034,8 @@ static void newGame(void)
         case DOOR_E: player.dir = DIR_LEFT;  break;
         default:     player.dir = DIR_RIGHT; break; // DOOR_W
     }
-    SPR_setPosition(playerSprite, player.x + Maze_originPxX(), player.y + Maze_originPxY()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+    SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
+                    player.y + Maze_originPxY() + shipDrawOffset); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
     SPR_setVisibility(playerSprite, VISIBLE);
     SPR_setVisibility(enemySprite, HIDDEN); // no enemy in the insertion room (spec §27)
 }
@@ -2515,6 +2551,7 @@ static void resetToMenu(void)
 // two read as one event.
 #define SQUASH_FRAMES SHAKE_DURATION_FRAMES
 
+
 static void triggerSquash(u8 dir)
 {
     if (dir == DIR_NONE)
@@ -2530,7 +2567,6 @@ static void triggerSquash(u8 dir)
 // not deforming at all.
 static void updateSquash(void)
 {
-    static u8 shown = 0xFF;
     u8 want;
 
     if (squashFramesLeft > 0)
@@ -2541,9 +2577,9 @@ static void updateSquash(void)
     else
         want = 0;
 
-    if (want != shown)
+    if (want != squashShown)
     {
-        shown = want;
+        squashShown = want;
         SPR_setFrame(playerSprite, want);
     }
 }
@@ -4758,7 +4794,8 @@ int main(bool hardReset)
                     resetToMenu();
                 }
 
-                SPR_setPosition(playerSprite, player.x + Maze_originPxX(), player.y + Maze_originPxY()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+                SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
+                    player.y + Maze_originPxY() + shipDrawOffset); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
             }
             else
             {
@@ -4790,7 +4827,8 @@ int main(bool hardReset)
                 // it in sync with enemy.state.
                 Enemy_update(&enemy);
                 PAL_setColor(ENEMY_INK_INDEX, (enemy.state == ENEMY_DANGEROUS) ? ENEMY_DANGEROUS_COLOR : ENEMY_VULNERABLE_COLOR);
-                SPR_setPosition(enemySprite, enemy.x + Maze_originPxX(), enemy.y + Maze_originPxY());
+                SPR_setPosition(enemySprite, enemy.x + Maze_originPxX() + shipDrawOffset,
+                    enemy.y + Maze_originPxY() + shipDrawOffset);
                 SPR_setVisibility(enemySprite, Enemy_blinkVisible(&enemy) ? VISIBLE : HIDDEN);
 
                 // One 1px sub-step at a time, checking for the letter (and
@@ -4980,7 +5018,8 @@ int main(bool hardReset)
                     }
                 }
 
-                SPR_setPosition(playerSprite, player.x + Maze_originPxX(), player.y + Maze_originPxY()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+                SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
+                    player.y + Maze_originPxY() + shipDrawOffset); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
             }
 
             // Did the ship travel this frame? (The steering lock,

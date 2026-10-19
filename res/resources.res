@@ -19,6 +19,12 @@ TILESET hudFont "sprite/font_hud.png" NONE NONE ROW
 # descomprimirla en el heap, que es lo que va justo en esta consola.
 SPRITE playerShip "sprite/player.png" 1 1 NONE
 SPRITE enemyShip "sprite/enemy.png" 1 1 BEST
+
+# Las de 16x16, de antes del paso a celdas de 8 px. Las usan los cuatro
+# primeros planetas, que son los de habitacion pequena. La caja de colision
+# sigue siendo la celda (player.c, BOX): esto solo cambia el dibujo.
+SPRITE playerShip16 "sprite/player16.png" 2 2 NONE
+SPRITE enemyShip16 "sprite/enemy16.png" 2 2 BEST
 SPRITE mapShip "sprite/map_ship.png" 1 1 BEST
 SPRITE planetSmall "sprite/planet_small.png" 1 1 BEST
 SPRITE planetMedium "sprite/planet_medium.png" 2 2 BEST
