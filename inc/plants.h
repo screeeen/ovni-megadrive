@@ -37,10 +37,25 @@
 // junto a Maze_loadGraphics(). El dibujo no se carga: se arma al vuelo.
 void Plants_loadGraphics(void);
 
+// Los cuatro tonos de la flora en PAL0. Fijos en todo el juego: a las plantas
+// no las tine el planeta, que es lo que hace que una se reconozca de un sitio
+// a otro. El de silueta solo lo usa la coleccion.
+#define PAL_PLANTA_OSCURA  11   // #490049
+#define PAL_PLANTA_MEDIA   12   // #B64992
+#define PAL_PLANTA_CLARA   13   // #FFB6DB
+#define PAL_PLANTA_SILUETA 14   // #6D2449
+
+// Las plantas que como mucho tiene una habitacion: el paso del indice unico
+// de abajo, y las teselas que la sala reserva en VRAM.
+#define PLANTS_PER_ROOM 15
+
+// La primera tesela libre detras de las de las plantas de la sala, para quien
+// quiera cargar las suyas ahi -- la pagina de coleccion del menu.
+u16 Plants_tilesEnd(void);
+
 // EL INDICE UNICO DE UNA PLANTA. Cada planta del juego tiene el suyo:
 //
-//     indice = slot * (PLANTS_LINES_PER_ROOM * PLANTS_MAX_PER_LINE)
-//              + linea * PLANTS_MAX_PER_LINE + i
+//     indice = slot * PLANTS_PER_ROOM + linea * PLANTS_MAX_PER_LINE + i
 //
 // donde slot es el que main.c reparte por (planeta, col, fila). De ahi sale su
 // forma, y no hay dos iguales en todo el juego: el indice decide perfil,
@@ -48,6 +63,26 @@ void Plants_loadGraphics(void);
 // comprueba al generar que las PLANT_SHAPE_COUNT combinaciones dan
 // PLANT_SHAPE_COUNT dibujos distintos.
 //
+// Que huecos de esa habitacion son plantas de verdad (una habitacion tiene
+// entre 3 y PLANTS_PER_ROOM), un bit por hueco igual que la mascara de
+// recogidas. 0 cuando el planeta no se ha cartografiado todavia.
+u16 Plants_cachedRoomMask(u16 slot);
+
+// Solo la marca de la retícula: la casilla que no le toca a ninguna planta.
+void Plants_buildSpotTile(u8 *dst);
+
+// La planta tal como la pinta la COLECCION: con la marca de su spot, y en un
+// solo tono apagado mientras no se haya recogido, para que se vea que forma
+// falta. Plants_buildTile de arriba es la del laberinto y no lleva marca.
+void Plants_buildSpot(u16 shape, u8 *dst, bool recogida);
+
+// La silueta a secas, sin la marca del spot: para verla en grande.
+void Plants_buildSilhouette(u16 shape, u8 *dst);
+
+// El nombre de esa planta, hasta 15 letras mas el cero. Estable y propio: dos
+// plantas nunca comparten nombre.
+void Plants_name(u16 shape, char *out);
+
 // Escribe en dst los 32 bytes de la tesela de esa planta. Es lo que va a
 // necesitar la pagina de coleccion del menu para pintar una planta suelta.
 void Plants_buildTile(u16 shape, u8 *dst);

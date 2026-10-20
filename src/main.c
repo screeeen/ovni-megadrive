@@ -42,7 +42,8 @@
 // its own (user request: "haz una tabla high scores que alterne con el
 // menu de los planetas"). Added at the end so the debug view's own
 // stateNames[] keeps lining up with the values before it.
-typedef enum { STATE_INTRO, STATE_MENU, STATE_PLAYING, STATE_GAMEOVER, STATE_SCORES } GameState;
+typedef enum { STATE_INTRO, STATE_MENU, STATE_PLAYING, STATE_GAMEOVER, STATE_SCORES,
+               STATE_COLLECTION } GameState;
 
 // The ship slides in a straight line until a wall stops it, turning only
 // from a stop -- the only control scheme the room generator's slide-graph
@@ -2188,6 +2189,406 @@ static void gameOverStep(void)
 static void drawScoreTable(void);
 static void flushSprites(void);
 
+// --- LA COLECCION DE PLANTAS -----------------------------------------------
+//
+// Una reticula de spots con aire entre filas: todas las casillas marcadas, y
+// dentro la silueta apagada de la planta que le toca, que se enciende al
+// recogerla. Se desplaza sola al empujar el cursor contra el borde -- no hay
+// paginas -- y con A se ve la planta del cursor en grande.
+//
+// Es COMPACTA: solo se colocan las plantas que el juego sabe que existen
+// (Plants_cachedRoomMask, o sea las de planetas ya cartografiados), seguidas y
+// sin huecos, asi que la reticula crece segun exploras. El orden dentro no es
+// el del catalogo sino un sorteo -- collShuffle --, para que no se llene por
+// bloques de habitacion.
+#define COLL_COLS      18
+#define COLL_VIS_ROWS  8
+#define COLL_CELLS     (COLL_COLS * COLL_VIS_ROWS)
+#define COLL_X         2      // una columna libre entre spots, para el cursor
+#define COLL_Y         4
+#define COLL_PITCH_Y   2      // una fila de aire debajo de cada planta
+#define COLL_CHUNK     8
+#define COLL_NAME_ROW  21
+#define COLL_FOOT_ROW  23
+#define COLL_HINT_ROW  25
+
+// El zoom: cada pixel de la planta es un cuadro de COLL_ZOOM teselas, o sea
+// 8*COLL_ZOOM de lado. Con 3 son 24 de 28 filas de pantalla, lo mas grande
+// que cabe dejando sitio al nombre.
+#define COLL_ZOOM      3
+#define COLL_ZOOM_X    ((40 - (8 * COLL_ZOOM)) / 2)
+#define COLL_ZOOM_Y    1
+
+static u32 collBuf[COLL_CHUNK * 8];
+static u16 collPos[COLL_CHUNK];   // la celda a la que va cada tesela del buffer
+static u16 collTotal;    // recogidas
+static u16 collKnown;    // las que se sabe que existen
+static u16 collRows;     // filas que ocupa todo lo conocido
+static u16 collTop;      // primera fila a la vista
+static u16 collCursor;   // celda absoluta: fila * COLL_COLS + columna
+static bool collZoom;
+static u16 collSavedFloor;
+
+#define COLL_CELL_X(vis) ((u16) (COLL_X + (((vis) % COLL_COLS) * 2)))
+#define COLL_CELL_Y(vis) ((u16) (COLL_Y + (((vis) / COLL_COLS) * COLL_PITCH_Y)))
+
+// Reparte 0..n-1 con pinta de sorteo: una red de Feistel de 12 bits y cuatro
+// vueltas, repitiendo hasta caer dentro del rango. Multiplicar por una
+// constante NO vale: deja las plantas en diagonales regulares.
+static u16 collShuffle(u16 v, u16 n)
+{
+    if (n <= 1)
+        return 0;
+
+    do
+    {
+        u8 l = (u8) ((v >> 6) & 0x3F);
+        u8 r = (u8) (v & 0x3F);
+        u8 i;
+
+        for (i = 0; i < 4; i++)
+        {
+            const u8 f = (u8) (((r * 73) + (i * 41) + 17) & 0x3F);
+            const u8 nl = r;
+
+            r = (u8) (l ^ f);
+            l = nl;
+        }
+        v = (u16) ((l << 6) | r);
+    }
+    while (v >= n);
+
+    return v;
+}
+
+// La vuelta: de casilla a numero de orden. Las mismas vueltas al reves.
+static u16 collUnshuffle(u16 v, u16 n)
+{
+    if (n <= 1)
+        return 0;
+
+    do
+    {
+        u8 l = (u8) ((v >> 6) & 0x3F);
+        u8 r = (u8) (v & 0x3F);
+        u8 i;
+
+        for (i = 4; i-- > 0; )
+        {
+            const u8 f = (u8) (((l * 73) + (i * 41) + 17) & 0x3F);
+            const u8 nl = (u8) (r ^ f);
+
+            r = l;
+            l = nl;
+        }
+        v = (u16) ((l << 6) | r);
+    }
+    while (v >= n);
+
+    return v;
+}
+
+static u8 collBits(u16 m)
+{
+    u8 n = 0;
+
+    while (m)
+    {
+        n = (u8) (n + (m & 1));
+        m >>= 1;
+    }
+
+    return n;
+}
+
+// El slot de una habitacion es su numero de orden recorriendo planetas, filas
+// y columnas -- exactamente lo que reparte initPlantCacheSlots --, asi que
+// llevar la cuenta sale igual que llamar a plantCacheSlot y no barre el mapa
+// en cada celda.
+#define COLL_WALK_BEGIN(P, COL, ROW, SLOT, EXISTE, RECOG)                      \
+    do {                                                                       \
+        u16 SLOT = 0;                                                          \
+        u8 P, COL, ROW;                                                        \
+        for (P = 0; P < SIZE_PRESET_COUNT; P++)                                \
+            for (ROW = 0; ROW < sizePresets[P].rows; ROW++)                    \
+                for (COL = 0; COL < sizePresets[P].cols; COL++)                \
+                {                                                              \
+                    u16 EXISTE, RECOG;                                         \
+                    if (sizePresets[P].map[ROW][COL] != '#')                   \
+                        continue;                                              \
+                    if (SLOT >= PLANTS_CACHE_SLOTS)                            \
+                        break;                                                 \
+                    EXISTE = Plants_cachedRoomMask(SLOT);                      \
+                    RECOG = presetSave[P].plantsMask[ROW][COL];
+
+#define COLL_WALK_END(SLOT)                                                    \
+                    SLOT++;                                                    \
+                }                                                              \
+    } while (0)
+
+static void collFlush(u16 base, u16 firstTile, u16 n)
+{
+    u16 i;
+
+    VDP_loadTileData(collBuf, (u16) (base + firstTile), n, DMA);
+    for (i = 0; i < n; i++)
+        VDP_setTileMapXY(BG_A,
+                         TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, (u16) (base + firstTile + i)),
+                         COLL_CELL_X(collPos[i]), COLL_CELL_Y(collPos[i]));
+}
+
+static void collDrawCursor(bool marcar)
+{
+    const u16 vis = (u16) (collCursor - (collTop * COLL_COLS));
+    const u16 x = COLL_CELL_X(vis);
+    const u16 y = COLL_CELL_Y(vis);
+
+    VDP_drawText(marcar ? "[" : " ", (u16) (x - 1), y);
+    VDP_drawText(marcar ? "]" : " ", (u16) (x + 1), y);
+}
+
+// Que planta hay en la celda `celda`, si la hay. Devuelve FALSE cuando esa
+// casilla de la reticula no le toca a ninguna.
+static bool collPlantAt(u16 celda, u16 *outIdx, bool *outTiene)
+{
+    u16 orden, visto = 0;
+
+    if ((collKnown == 0) || (celda >= collKnown))
+        return FALSE;
+
+    orden = collUnshuffle(celda, collKnown);
+
+    COLL_WALK_BEGIN(p, col, row, slot, existe, recogidas)
+    {
+        u8 k;
+
+        for (k = 0; k < PLANTS_PER_ROOM; k++)
+        {
+            const u16 bit = (u16) (1u << k);
+
+            if (!(existe & bit))
+                continue;
+            if (visto == orden)
+            {
+                *outIdx = (u16) ((slot * PLANTS_PER_ROOM) + k);
+                *outTiene = (recogidas & bit) ? TRUE : FALSE;
+                return TRUE;
+            }
+            visto++;
+        }
+    }
+    COLL_WALK_END(slot);
+
+    return FALSE;
+}
+
+static void collDrawName(void)
+{
+    char buf[24];
+    u16 idx, len;
+    bool tiene;
+
+    VDP_clearTextLine(COLL_NAME_ROW);
+    if (!collPlantAt(collCursor, &idx, &tiene))
+        return;
+
+    if (tiene)
+        Plants_name(idx, buf);
+    else
+        strcpy(buf, "???");
+    len = (u16) strlen(buf);
+    VDP_drawText(buf, (u16) ((40 - len) / 2), COLL_NAME_ROW);
+}
+
+// Una tesela de un solo color, para pintar el zoom a cuadros.
+static void collSolid(u8 *dst, u8 idx)
+{
+    u8 i;
+
+    for (i = 0; i < 32; i++)
+        *dst++ = (u8) ((idx << 4) | idx);
+}
+
+// La planta del cursor a lo grande: cada pixel suyo es un cuadro de teselas
+// macizas, asi que cuesta cuatro teselas de VRAM y un mapa, no arte nuevo.
+static void drawZoom(void)
+{
+    const u16 base = Plants_tilesEnd();
+    u8 tile[32];
+    char buf[24];
+    u16 idx, len;
+    bool tiene;
+    u8 x, y, i;
+
+    VDP_clearPlane(BG_A, TRUE);
+    VDP_setTextPalette(PAL0);
+
+    if (!collPlantAt(collCursor, &idx, &tiene))
+    {
+        collZoom = FALSE;
+        return;
+    }
+
+    for (i = 0; i < 4; i++)
+        collSolid((u8 *) &collBuf[i * 8], (u8) (PAL_PLANTA_OSCURA + i));
+    VDP_loadTileData(collBuf, base, 4, DMA);
+
+    if (tiene)
+        Plants_buildTile(idx, tile);
+    else
+        Plants_buildSilhouette(idx, tile);
+
+    for (y = 0; y < 8; y++)
+        for (x = 0; x < 8; x++)
+        {
+            const u8 b = tile[(y * 4) + (x >> 1)];
+            const u8 c = (x & 1) ? (u8) (b & 0x0F) : (u8) (b >> 4);
+            u8 dx, dy;
+
+            if ((c < PAL_PLANTA_OSCURA) || (c > PAL_PLANTA_SILUETA))
+                continue;
+
+            for (dy = 0; dy < COLL_ZOOM; dy++)
+                for (dx = 0; dx < COLL_ZOOM; dx++)
+                    VDP_setTileMapXY(BG_A,
+                                     TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE,
+                                                    (u16) (base + (c - PAL_PLANTA_OSCURA))),
+                                     (u16) (COLL_ZOOM_X + (x * COLL_ZOOM) + dx),
+                                     (u16) (COLL_ZOOM_Y + (y * COLL_ZOOM) + dy));
+        }
+
+    if (tiene)
+        Plants_name(idx, buf);
+    else
+        strcpy(buf, "???");
+    len = (u16) strlen(buf);
+    VDP_drawText(buf, (u16) ((40 - len) / 2), COLL_HINT_ROW);
+    VDP_drawText("A OR B TO GO BACK", (40 - 17) / 2, COLL_HINT_ROW + 2);
+}
+
+static void drawCollection(void)
+{
+    const u16 base = Plants_tilesEnd();
+    const u16 primera = (u16) (collTop * COLL_COLS);
+    u16 usadas, enBuf = 0, orden = 0, i;
+    char buf[40];
+    int len;
+
+    if (collZoom)
+    {
+        drawZoom();
+        if (collZoom)
+            return;
+    }
+
+    VDP_clearPlane(BG_A, TRUE);
+    VDP_setTextPalette(PAL0);
+
+    // 1) cuanto se conoce y cuanto se lleva
+    collKnown = 0;
+    collTotal = 0;
+    COLL_WALK_BEGIN(p, col, row, slot, existe, recogidas)
+    {
+        collKnown = (u16) (collKnown + collBits(existe));
+        collTotal = (u16) (collTotal + collBits((u16) (existe & recogidas)));
+    }
+    COLL_WALK_END(slot);
+
+    collRows = (u16) ((collKnown + COLL_COLS - 1) / COLL_COLS);
+    if (collRows == 0)
+        collRows = 1;
+    if ((collTop + COLL_VIS_ROWS) > collRows)
+        collTop = (collRows > COLL_VIS_ROWS) ? (u16) (collRows - COLL_VIS_ROWS) : 0;
+
+    // 2) la reticula: la misma tesela de marca en las casillas a la vista
+    Plants_buildSpotTile((u8 *) collBuf);
+    VDP_loadTileData(collBuf, base, 1, DMA);
+    for (i = 0; i < COLL_CELLS; i++)
+        VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, base),
+                         COLL_CELL_X(i), COLL_CELL_Y(i));
+    usadas = 1;
+
+    // 3) lo que cae a la vista, encima de su marca
+    COLL_WALK_BEGIN(p, col, row, slot, existe, recogidas)
+    {
+        u8 k;
+
+        for (k = 0; k < PLANTS_PER_ROOM; k++)
+        {
+            const u16 bit = (u16) (1u << k);
+            u16 pos;
+
+            if (!(existe & bit))
+                continue;
+
+            pos = collShuffle(orden, collKnown);
+            orden++;
+            if ((pos < primera) || (pos >= (u16) (primera + COLL_CELLS)))
+                continue;
+
+            Plants_buildSpot((u16) ((slot * PLANTS_PER_ROOM) + k),
+                             (u8 *) &collBuf[enBuf * 8], (recogidas & bit) ? TRUE : FALSE);
+            collPos[enBuf] = (u16) (pos - primera);
+            enBuf++;
+            if (enBuf == COLL_CHUNK)
+            {
+                collFlush(base, usadas, enBuf);
+                usadas = (u16) (usadas + enBuf);
+                enBuf = 0;
+            }
+        }
+    }
+    COLL_WALK_END(slot);
+
+    if (enBuf)
+        collFlush(base, usadas, enBuf);
+
+    len = sprintf(buf, "PLANT COLLECTION");
+    VDP_drawText(buf, (u16) ((40 - len) / 2), 1);
+    len = sprintf(buf, "%u OF %u", collTotal, collKnown);
+    VDP_drawText(buf, (u16) ((40 - len) / 2), 2);
+    len = sprintf(buf, "ROW %u OF %u", collTop + 1, collRows);
+    VDP_drawText(buf, (u16) ((40 - len) / 2), COLL_FOOT_ROW);
+    len = sprintf(buf, "A ZOOM   B BACK");
+    VDP_drawText(buf, (u16) ((40 - len) / 2), COLL_HINT_ROW);
+
+    collDrawCursor(TRUE);
+    collDrawName();
+}
+
+// Menu -> coleccion. Menu_setVisible(FALSE) es lo que devuelve el indice 2 de
+// PAL0 al suelo del planeta: el menu lo tiene prestado para el violeta de su
+// barra, y el fondo de cada tesela de planta es justo ese indice.
+static void enterCollection(void)
+{
+    gameState = STATE_COLLECTION;
+    screenAlternateTimer = 0;
+    collTop = 0;
+    collCursor = 0;
+    collZoom = FALSE;
+    Menu_setVisible(FALSE);
+    flushSprites();
+    // El fondo de toda tesela de planta es el suelo del planeta; igualandolo al
+    // del plano, las plantas y los huecos salen sueltos y no en un recuadro.
+    collSavedFloor = PAL_getColor((PAL0 * 16) + PAL_SUELO);
+    PAL_setColor((PAL0 * 16) + PAL_SUELO, PAL_getColor(PAL0 * 16));
+    drawCollection();
+}
+
+static void leaveCollection(void)
+{
+    bool completed[SIZE_PRESET_COUNT];
+
+    gameState = STATE_MENU;
+    screenAlternateTimer = 0;
+    PAL_setColor((PAL0 * 16) + PAL_SUELO, collSavedFloor); // antes de que el menu lo guarde
+    Menu_setVisible(TRUE);
+    Menu_hideSprites(); // suben solos detras de la pantalla, igual que al volver de la tabla
+    drawMenu();
+    planetCompletedFlags(completed);
+    Menu_fadeInSprites(sizePresetIndex, unlockedPlanets, completed);
+}
+
 // Menu -> table. The planets, sun and cursor are sprites, so they have to
 // be taken off the table AND flushed, or they stay on screen over it.
 static void enterScoreTable(void)
@@ -2338,7 +2739,7 @@ static void drawMenu(void)
 
     VDP_drawText(buf, (40 - len) / 2, MENU_ROW_B);
 
-    VDP_drawText("PRESS A TO START", 12, MENU_ROW_C);
+    VDP_drawText("PRESS A TO START   B COLLECTION", (40 - 31) / 2, MENU_ROW_C);
     }
 
     // How close the next planet is to opening (user request: the rest of
@@ -4405,6 +4806,68 @@ int main(bool hardReset)
             else if (++screenAlternateTimer >= SCREEN_ALTERNATE_FRAMES)
                 leaveScoreTable(); // its turn is over, hand back to the menu
         }
+        else if (gameState == STATE_COLLECTION)
+        {
+            // La cruceta mueve el cursor y la reticula se desplaza sola al
+            // empujarlo contra un borde. A ve la planta en grande; B sale del
+            // zoom, o de la coleccion si no lo hay.
+            const u16 antes = collCursor;
+            const u16 arriba = collTop;
+
+            if ((state & BUTTON_B) && !(prevState & BUTTON_B))
+            {
+                if (collZoom)
+                {
+                    collZoom = FALSE;
+                    drawCollection();
+                }
+                else
+                    leaveCollection();
+            }
+            else if ((state & BUTTON_A) && !(prevState & BUTTON_A))
+            {
+                collZoom = !collZoom;
+                drawCollection();
+            }
+            else if (!collZoom)
+            {
+                const u16 fila = (u16) (collCursor / COLL_COLS);
+                const u16 columna = (u16) (collCursor % COLL_COLS);
+
+                if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT) && (columna > 0))
+                    collCursor--;
+                if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT) &&
+                    (columna < (COLL_COLS - 1)))
+                    collCursor++;
+                if ((state & BUTTON_UP) && !(prevState & BUTTON_UP) && (fila > 0))
+                    collCursor = (u16) (collCursor - COLL_COLS);
+                if ((state & BUTTON_DOWN) && !(prevState & BUTTON_DOWN) &&
+                    ((fila + 1) < collRows))
+                    collCursor = (u16) (collCursor + COLL_COLS);
+
+                {
+                    const u16 nueva = (u16) (collCursor / COLL_COLS);
+
+                    if (nueva < collTop)
+                        collTop = nueva;
+                    else if (nueva >= (u16) (collTop + COLL_VIS_ROWS))
+                        collTop = (u16) (nueva - COLL_VIS_ROWS + 1);
+                }
+
+                if (collTop != arriba)
+                    drawCollection();       // se ha desplazado: hay que repintar
+                else if (collCursor != antes)
+                {
+                    const u16 guardado = collCursor;
+
+                    collCursor = antes;
+                    collDrawCursor(FALSE);
+                    collCursor = guardado;
+                    collDrawCursor(TRUE);
+                    collDrawName();
+                }
+            }
+        }
         else if (gameState == STATE_MENU)
         {
             // Cursor arrow tracks the selected planet's live orbit
@@ -4471,6 +4934,13 @@ int main(bool hardReset)
                 else
                     startSelectedPlanet();
             }
+            // B abre la coleccion de plantas (peticion del usuario). Solo
+            // B: con A o C es parte de un acorde (RESET_COMBO, los de
+            // depuracion), igual que pasa con C a secas aqui debajo.
+            if ((state & BUTTON_B) && !(prevState & BUTTON_B) &&
+                !(state & (BUTTON_A | BUTTON_C)))
+                enterCollection();
+
             // Sound toggle (spec §47, user request: "activable desde el
             // menu y por defecto apagado") -- BUTTON_C alone, free in the
             // menu (only ever meaningful as part of the 3-button

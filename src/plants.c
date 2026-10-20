@@ -10,10 +10,6 @@
 #define PLANT_TILE_BASE (TILE_USER_INDEX + MAZE_TILE_COUNT + GUIDEMAP_TILE_COUNT \
                          + MAZE_SCRATCH_TILE_COUNT + MENU_TILE_COUNT + HUD_FONT_TILE_COUNT)
 
-// Fijas en todo el juego: a la flora no la tine el planeta.
-#define PAL_PLANTA_OSCURA 11   // #490049
-#define PAL_PLANTA_MEDIA  12   // #B64992
-#define PAL_PLANTA_CLARA  13   // #FFB6DB
 
 // 3 independent lines per room (user request: "añade dos hileras más de
 // plantas... en cada room" -- 2 more on top of the original 1). Also the
@@ -28,11 +24,11 @@
 // rooms are ~90% open interior (maze.h's own doc comment), so this
 // converges fast in practice, same reasoning as enemy.c's findOpenInLane.
 #define PLANTS_SPAWN_ATTEMPTS 24
-// Las plantas que como mucho tiene una habitacion, y por tanto las teselas que
-// hacen falta en VRAM y el paso del indice unico de planta a planta.
-#define PLANT_MAX_PER_ROOM (PLANTS_LINES_PER_ROOM * PLANTS_MAX_PER_LINE)
+#if (PLANTS_PER_ROOM != (PLANTS_LINES_PER_ROOM * PLANTS_MAX_PER_LINE))
+#error PLANTS_PER_ROOM no cuadra con las hileras de esta sala
+#endif
 
-#if (((PLANTS_CACHE_SLOTS + 1) * PLANT_MAX_PER_ROOM) > PLANT_SHAPE_COUNT)
+#if (((PLANTS_CACHE_SLOTS + 1) * PLANTS_PER_ROOM) > PLANT_SHAPE_COUNT)
 #error hay mas plantas que formas: subir PERFILES en tools/plant_tiles.py
 #endif
 
@@ -70,7 +66,7 @@ static u16 planetTotal;
 // unico de cada una. PLANTS_CACHE_SLOTS cuando la celda no es habitacion.
 static u16 curSlot = PLANTS_CACHE_SLOTS;
 static u16 tilesSlot = 0xFFFF;
-static u32 plantTileData[PLANT_MAX_PER_ROOM * 8];   // u32: el DMA quiere alineado
+static u32 plantTileData[PLANTS_PER_ROOM * 8];   // u32: el DMA quiere alineado
 
 // Own tiny xorshift PRNG, seeded from roomSeed, instead of the shared
 // random() stream: Maze_generateRoom's accepted-attempt cache (maze.h)
@@ -167,7 +163,34 @@ static bool crownInner(const u8 *copa, u8 x, u8 r)
 // Escribe en dst los 32 bytes de la tesela de la planta numero `shape`. Dos
 // plantas del juego nunca comparten shape, y dos shapes nunca dan el mismo
 // dibujo (lo comprueba el generador), asi que no hay dos plantas iguales.
-void Plants_buildTile(u16 shape, u8 *dst)
+// Las cuatro esquinas del spot, en un cuadro de 7x7. Cuadrado a proposito: con
+// el mismo paso de 16 px en los dos ejes, el aire entre spots sale igual a los
+// lados que arriba y abajo. Van debajo de la planta, que las tapa donde
+// coincidan.
+static void marcaDeSpot(u8 *px)
+{
+    px[(0 * 8) + 0] = PAL_PLANTA_SILUETA;
+    px[(0 * 8) + 6] = PAL_PLANTA_SILUETA;
+    px[(6 * 8) + 0] = PAL_PLANTA_SILUETA;
+    px[(6 * 8) + 6] = PAL_PLANTA_SILUETA;
+}
+
+// Solo la marca: la casilla de la retícula que no le toca a ninguna planta.
+void Plants_buildSpotTile(u8 *dst)
+{
+    u8 px[64];
+    u8 x, y;
+
+    for (x = 0; x < 64; x++)
+        px[x] = PAL_SUELO;
+    marcaDeSpot(px);
+
+    for (y = 0; y < 8; y++)
+        for (x = 0; x < 8; x += 2)
+            *dst++ = (u8) ((px[(y * 8) + x] << 4) | px[(y * 8) + x + 1]);
+}
+
+static void buildTile(u16 shape, u8 *dst, bool silueta, bool marca)
 {
     const u8 *const h = plantProfile[shape % PLANT_PROFILE_COUNT];
     const u8 fill = (u8) (shape % PLANT_FILL_COUNT);
@@ -179,6 +202,8 @@ void Plants_buildTile(u16 shape, u8 *dst)
 
     for (x = 0; x < 64; x++)
         px[x] = PAL_SUELO;
+    if (marca)
+        marcaDeSpot(px);
 
     crownMask(h, copa);
     for (r = 0; r < PLANT_CROWN_ROWS; r++)
@@ -244,12 +269,38 @@ void Plants_buildTile(u16 shape, u8 *dst)
         if (plantRoot[stem] & (u8) (1u << x))
             px[(7 * 8) + x] = PAL_PLANTA_OSCURA;
 
+    // La silueta es la misma planta en un tono propio, mas apagado que
+    // cualquiera de los suyos: se ve la forma pero no compite con las que si
+    // estan recogidas.
+    if (silueta)
+        for (x = 0; x < 64; x++)
+            if (px[x] != PAL_SUELO)
+                px[x] = PAL_PLANTA_SILUETA;
+
     for (y = 0; y < 8; y++)
         for (x = 0; x < 8; x += 2)
             *dst++ = (u8) ((px[(y * 8) + x] << 4) | px[(y * 8) + x + 1]);
 }
 
-// Rehace las PLANT_MAX_PER_ROOM teselas de esta habitacion y las sube. Solo
+// La planta a secas: es la que va en el laberinto, sin nada de la reticula.
+void Plants_buildTile(u16 shape, u8 *dst)
+{
+    buildTile(shape, dst, FALSE, FALSE);
+}
+
+// La de la coleccion: lleva la marca del spot, y apagada mientras no se tenga.
+void Plants_buildSpot(u16 shape, u8 *dst, bool recogida)
+{
+    buildTile(shape, dst, !recogida, TRUE);
+}
+
+// La silueta sola, sin marca: la del zoom de una planta que aun no se tiene.
+void Plants_buildSilhouette(u16 shape, u8 *dst)
+{
+    buildTile(shape, dst, TRUE, FALSE);
+}
+
+// Rehace las PLANTS_PER_ROOM teselas de esta habitacion y las sube. Solo
 // cuando cambia de habitacion: recoger una planta no mueve ninguna.
 static void uploadRoomTiles(void)
 {
@@ -258,11 +309,56 @@ static void uploadRoomTiles(void)
     if (curSlot == tilesSlot)
         return;
 
-    for (i = 0; i < PLANT_MAX_PER_ROOM; i++)
-        Plants_buildTile((u16) ((curSlot * PLANT_MAX_PER_ROOM) + i), (u8 *) &plantTileData[i * 8]);
+    for (i = 0; i < PLANTS_PER_ROOM; i++)
+        Plants_buildTile((u16) ((curSlot * PLANTS_PER_ROOM) + i), (u8 *) &plantTileData[i * 8]);
 
-    VDP_loadTileData(plantTileData, PLANT_TILE_BASE, PLANT_MAX_PER_ROOM, DMA);
+    VDP_loadTileData(plantTileData, PLANT_TILE_BASE, PLANTS_PER_ROOM, DMA);
     tilesSlot = curSlot;
+}
+
+// Que plantas tiene de verdad esa habitacion, un bit por hueco igual que
+// collectedMask. 0 si nunca se cartografio: entonces no se sabe y no se
+// dibuja hueco ninguno.
+u16 Plants_cachedRoomMask(u16 slot)
+{
+    u16 mask = 0;
+    u8 line, i;
+
+    if ((slot >= PLANTS_CACHE_SLOTS) || !cacheValid[slot])
+        return 0;
+
+    for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
+        for (i = 0; i < cacheCount[slot][line]; i++)
+            mask |= (u16) (1u << ((line * PLANTS_MAX_PER_LINE) + i));
+
+    return mask;
+}
+
+// El nombre de una planta. Sale de su propio indice con una tabla de silabas,
+// asi que es estable y no se repite: multiplicar por un impar y quedarse con
+// 12 bits es biyectivo, y hay 4096 nombres para 2565 plantas.
+void Plants_name(u16 shape, char *out)
+{
+    static const char *const silA[16] = {
+        "VEX", "KOR", "THAL", "ZUN", "MIR", "OLD", "BRAC", "SYL",
+        "NEV", "QUIS", "DRA", "FEN", "UMB", "GLAU", "PYR", "ASH",
+    };
+    static const char *const silB[16] = {
+        "ARIS", "ONE", "ULA", "ITH", "ORA", "ENSE", "YLL", "UMA",
+        "ASCA", "IRIS", "OLIX", "ANTH", "ERNA", "USCA", "IDIA", "ORN",
+    };
+    static const char *const silC[16] = {
+        "MOLT", "VERN", "CRIS", "PALE", "DUSK", "FERN", "GRIM", "WAX",
+        "SILT", "TIDE", "MYRR", "COAL", "SNOW", "RUST", "VEIL", "BLOOM",
+    };
+    const u16 n = (u16) ((shape * 2053u) & 4095u);
+
+    sprintf(out, "%s%s %s", silA[n & 15], silB[(n >> 4) & 15], silC[(n >> 8) & 15]);
+}
+
+u16 Plants_tilesEnd(void)
+{
+    return (u16) (PLANT_TILE_BASE + PLANTS_PER_ROOM);
 }
 
 void Plants_loadGraphics(void)
@@ -270,6 +366,7 @@ void Plants_loadGraphics(void)
     PAL_setColor(PAL_PLANTA_OSCURA, RGB3_3_3_TO_VDPCOLOR(2, 0, 2));
     PAL_setColor(PAL_PLANTA_MEDIA,  RGB3_3_3_TO_VDPCOLOR(5, 2, 4));
     PAL_setColor(PAL_PLANTA_CLARA,  RGB3_3_3_TO_VDPCOLOR(7, 5, 6));
+    PAL_setColor(PAL_PLANTA_SILUETA, RGB3_3_3_TO_VDPCOLOR(3, 1, 2));
 }
 
 void Plants_reset(void)

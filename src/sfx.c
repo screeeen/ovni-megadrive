@@ -575,6 +575,25 @@ static void slopVoiceTimbre(u8 v, u8 modTL, u8 modMul, u8 modDT, u8 fb, u8 pms)
 
 // --- CALLARLO TODO ----------------------------------------------------------
 
+// Calla los dos chips a lo bruto: key off en los seis canales del FM y los
+// cuatro del PSG al minimo. Es la red de seguridad de Sfx_musicStop, porque no
+// todo lo que suena pasa por aqui -- la estatica del mapa, por ejemplo, se
+// queda el canal de ruido a tope y solo lo suelta al soltar la A, asi que
+// cualquier salida que no sea esa lo dejaba pitando en el menu.
+static void chipsSilence(void)
+{
+    u8 i;
+
+    for (i = 0; i < 4; i++)
+        PSG_setEnvelope(i, PSG_ENVELOPE_MIN);
+
+    Z80_requestBus(TRUE);
+    for (i = 0; i < 6; i++)
+        YM2612_writeReg(0, 0x28, (u8) ((i < 3) ? i : (i + 1))); // key off, 0 slots
+    YM2612_write(0, 0x2A); // el latch de la parte 0 en su sitio, ver slopFlush
+    Z80_releaseBus();
+}
+
 // Calla lo que este sonando que no sea un efecto suelto. Se pasa por aqui al
 // volver al menu, al acabar la partida y al apagar el sonido con la C.
 void Sfx_musicStop(void)
@@ -585,6 +604,8 @@ void Sfx_musicStop(void)
     // reescribe el modulador de estas mismas voces.
     if (jazzOn)
         jazzSilence();
+
+    chipsSilence();
 }
 
 // --- EL JAZZ DEL GAME OVER -------------------------------------------------
