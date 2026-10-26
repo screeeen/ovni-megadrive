@@ -233,6 +233,121 @@ static void carveTree(void)
     }
 }
 
+// --- MODO TUNEL (prueba del usuario: "las habitaciones tienen que ser mas
+// pequenas, con 1 salida. Mas tunel") ---
+//
+// En vez del arbol de Prim, el planeta es UN pasillo: un paseo que no se cruza
+// desde la sala de salida, de modo que cada sala tiene la puerta por la que
+// entras y una sola salida, y la ultima es el fondo. Las celdas que el paseo
+// no pisa se quedan vacias, asi que el mapa del planeta es una serpiente
+// dentro de su forma. Lo enciende MAP_TUNNEL (guidemap.h).
+//
+// El paseo es ciego: se mete en un callejon y se acaba, asi que se tiran
+// TUNNEL_TRIES y se queda el mas largo. Todos salen del random() compartido,
+// o sea que el planeta sigue siendo el mismo para la misma semilla.
+#define TUNNEL_TRIES 16
+
+static Coord tunnel[MAX_MAP_COLS * MAX_MAP_ROWS];
+static u16 tunnelLen;
+
+// Un paseo entero desde la salida, a celdas permitidas que no haya pisado ya.
+// Solo escribe en `into`: el mapa no se toca hasta saber cual es el bueno.
+static u16 walkTunnel(Coord *into)
+{
+    static bool pisada[MAX_MAP_ROWS][MAX_MAP_COLS];
+    s16 col = startCol, row = startRow;
+    u16 len = 0;
+
+    memset(pisada, 0, sizeof(pisada));
+    pisada[row][col] = TRUE;
+    into[len].col = (u8) col; into[len].row = (u8) row; len++;
+
+    for (;;)
+    {
+        u8 dirs[4];
+        u8 n = 0;
+        u8 dir;
+        s16 ncol, nrow;
+
+        if (inBounds(col, row - 1) && allowed(col, row - 1) && !pisada[row - 1][col]) dirs[n++] = DOOR_N;
+        if (inBounds(col + 1, row) && allowed(col + 1, row) && !pisada[row][col + 1]) dirs[n++] = DOOR_E;
+        if (inBounds(col, row + 1) && allowed(col, row + 1) && !pisada[row + 1][col]) dirs[n++] = DOOR_S;
+        if (inBounds(col - 1, row) && allowed(col - 1, row) && !pisada[row][col - 1]) dirs[n++] = DOOR_W;
+
+        if (n == 0)
+            return len;
+
+        dir = dirs[random() % n];
+        neighborInDir((u8) col, (u8) row, dir, &ncol, &nrow);
+        col = ncol; row = nrow;
+        pisada[row][col] = TRUE;
+        into[len].col = (u8) col; into[len].row = (u8) row; len++;
+    }
+}
+
+// La direccion de una celda a la siguiente del paseo, que siempre son vecinas.
+static u8 dirBetween(Coord a, Coord b)
+{
+    if (b.row < a.row) return DOOR_N;
+    if (b.col > a.col) return DOOR_E;
+    if (b.row > a.row) return DOOR_S;
+    return DOOR_W;
+}
+
+static void carveTunnel(void)
+{
+    static Coord mejor[MAX_MAP_COLS * MAX_MAP_ROWS];
+    u16 mejorLen = 0;
+    u16 i, t;
+
+    for (t = 0; t < TUNNEL_TRIES; t++)
+    {
+        const u16 len = walkTunnel(tunnel);
+
+        if (len > mejorLen)
+        {
+            mejorLen = len;
+            for (i = 0; i < len; i++)
+                mejor[i] = tunnel[i];
+        }
+    }
+
+    tunnelLen = mejorLen;
+    for (i = 0; i < tunnelLen; i++)
+    {
+        tunnel[i] = mejor[i];
+        guideMap[tunnel[i].row][tunnel[i].col].type = CELL_ROOM;
+        if (i)
+            openDoor(tunnel[i - 1].col, tunnel[i - 1].row, dirBetween(tunnel[i - 1], tunnel[i]));
+    }
+}
+
+// Las letras, repartidas a lo largo del pasillo en vez de en callejones (en
+// un tunel solo hay uno): una por tramo, y la ultima al fondo del todo.
+static void selectItemRoomsTunnel(void)
+{
+    u8 n;
+
+    if (tunnelLen < 2)
+    {
+        itemCount = 1;
+        itemCol[0] = startCol;
+        itemRow[0] = startRow;
+        return;
+    }
+
+    if (itemCount > (u8) (tunnelLen - 1))
+        itemCount = (u8) (tunnelLen - 1); // un tunel corto ofrece menos letras
+
+    for (n = 0; n < itemCount; n++)
+    {
+        const u16 idx = (u16) (((u32) (n + 1) * (u32) (tunnelLen - 1)) / itemCount);
+
+        itemCol[n] = tunnel[idx].col;
+        itemRow[n] = tunnel[idx].row;
+    }
+}
+
 static u8 doorCountAt(u8 col, u8 row)
 {
     u8 n = 0;
@@ -665,7 +780,14 @@ static void selectInsertionLink(void)
     u16 candidateCount = 0;
     s16 col, row;
 
-    markPathToFirstItem();
+    if (MAP_TUNNEL)
+    {
+        // Se entra por donde empieza el pasillo, para recorrerlo entero.
+        memset(pathToAScratch, 0, sizeof(pathToAScratch));
+        pathToAScratch[startRow][startCol] = TRUE;
+    }
+    else
+        markPathToFirstItem();
 
     for (row = 0; row < mapRows; row++)
     {
@@ -777,16 +899,33 @@ void GuideMap_generate(void)
                 }
     }
 
-    carveTree();
-    pruneLeaves();
-    selectGoal();
-    selectItemRooms();
+    if (MAP_TUNNEL)
+    {
+        carveTunnel();
+        selectGoal();
+        selectItemRoomsTunnel();
+    }
+    else
+    {
+        carveTree();
+        pruneLeaves();
+        selectGoal();
+        selectItemRooms();
+    }
     selectInsertionLink(); // needs itemCol[0]/itemRow[0] (spec §29bis)
 }
 
-// 320x224 screen = 40x28 tiles; center the (small) guide map within it.
+// 320x224 screen = 40x28 tiles. El mapa se centra en la ZONA DE JUEGO, no en
+// la pantalla entera (peticion del usuario: "el hud superpone el mapa,
+// encuadra el mapa en la zona de pintado del juego, fuera del hud"): las
+// MAZE_HUD_ROWS primeras filas son del HUD -- el marcador, las plantas, la
+// linea de estado -- y se dibuja en BG_B por encima, asi que lo que caia ahi
+// salia pisado. El mapa mas grande (10x8 salas) mide 23 filas y la zona de
+// juego tiene 24, o sea que cabe justo.
 #define TEXT_COLS 40
 #define TEXT_ROWS 28
+#define MAP_TOP_ROW  MAZE_ORIGIN_ROW
+#define MAP_AREA_ROWS (TEXT_ROWS - MAP_TOP_ROW)
 
 // Overlay tileset lives right after maze.c's tiles in VRAM (spec §5's
 // MAZE_TILE_COUNT reservation).
@@ -842,7 +981,7 @@ static void roomBoxOriginTiles(u8 col, u8 row, u16 *outRx, u16 *outRy)
     const u16 totalW = (mapCols * ROOM_STRIDE_W) - 1;
     const u16 totalH = (mapRows * ROOM_STRIDE_H) - 1;
     const u16 offsetX = (TEXT_COLS - totalW) / 2;
-    const u16 offsetY = (TEXT_ROWS - totalH) / 2;
+    const u16 offsetY = MAP_TOP_ROW + ((MAP_AREA_ROWS - totalH) / 2);
 
     *outRx = offsetX + (col * ROOM_STRIDE_W);
     *outRy = offsetY + (row * ROOM_STRIDE_H);
@@ -873,12 +1012,12 @@ static void insertRoomBoxOriginTiles(u16 *outRx, u16 *outRy)
         const s16 totalH = (mapRows * ROOM_STRIDE_H) - 1;
 
         rx = ((TEXT_COLS - totalW) / 2) + (insCol * ROOM_STRIDE_W);
-        ry = ((TEXT_ROWS - totalH) / 2) + (insRow * ROOM_STRIDE_H);
+        ry = MAP_TOP_ROW + ((MAP_AREA_ROWS - totalH) / 2) + (insRow * ROOM_STRIDE_H);
     }
 
     if (rx < 0) rx = 0;
     if (rx > (TEXT_COLS - ROOM_BOX_W)) rx = TEXT_COLS - ROOM_BOX_W;
-    if (ry < 0) ry = 0;
+    if (ry < MAP_TOP_ROW) ry = MAP_TOP_ROW;   // nunca por debajo del HUD
     if (ry > (TEXT_ROWS - ROOM_BOX_H)) ry = TEXT_ROWS - ROOM_BOX_H;
 
     *outRx = (u16) rx;
@@ -1127,7 +1266,7 @@ void GuideMap_drawOverlay(void)
         switch (insertLinkDir)
         {
             case DOOR_N:
-                if (linkRy > 0)
+                if (linkRy > MAP_TOP_ROW)
                     putTile(MAP_TILE_CORRIDOR_V, PAL0, linkRx + (ROOM_BOX_W / 2), linkRy - 1);
                 break;
             case DOOR_S:

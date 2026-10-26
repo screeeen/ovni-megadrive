@@ -42,8 +42,14 @@
 // its own (user request: "haz una tabla high scores que alterne con el
 // menu de los planetas"). Added at the end so the debug view's own
 // stateNames[] keeps lining up with the values before it.
+// STATE_REWARD (prueba del usuario: "cuando llegue al final del planeta ...
+// simplemente sale una pantalla informativa de recompensa con los stats y
+// vuelve al menu") -- salta sola en cuanto caen la ultima letra y la ultima
+// planta, sin tener que volver andando a la sala de extraccion, y de ahi al
+// menu con A. Es la misma pantalla del game over con otro titulo, asi que
+// comparte el contador de score que baja (summaryStep).
 typedef enum { STATE_INTRO, STATE_MENU, STATE_PLAYING, STATE_GAMEOVER, STATE_SCORES,
-               STATE_COLLECTION } GameState;
+               STATE_COLLECTION, STATE_REWARD } GameState;
 
 // The ship slides in a straight line until a wall stops it, turning only
 // from a stop -- the only control scheme the room generator's slide-graph
@@ -79,8 +85,8 @@ static u8 tombSpeedIdx; // where the current slide is on tombRamp
 // mas grande sea el planeta, mas grande es la habitacion... me gustaria
 // probar con distintas geometrias"). The room footprint used to be the
 // same fixed 20x12 box everywhere; it now grows with the planet, from
-// 12x7 on the 1x1 test planet up to the full screen (MAZE_MAX_W x
-// MAZE_MAX_H = 20x12, la celda vuelve a ser de 16 px) on the outermost
+// 9x6 on the 1x1 test planet up to 14x9, bien por debajo de lo que cabe
+// (MAZE_MAX_W x MAZE_MAX_H = 20x12 celdas de 16 px), on the outermost
 // one, and each planet gets its own
 // shape rolled per room by maze.c (Maze_setRoomSize's last column is how
 // many cuts a room may take: 0 = plain boxes).
@@ -151,17 +157,26 @@ typedef struct { const char *const *map; u8 cols, rows, letters, roomW, roomH, v
 // generateRoomTombo already handles like any other. Set as the new
 // default planet (SIZE_PRESET_DEFAULT below) so starting a game goes
 // straight into it.
-// La rampa de tamanos es la de antes partida por dos, porque la celda
-// vuelve a medir 16 px: en pixeles la sala es exactamente la misma.
+// Salas de paso, anchas y bajas (prueba del usuario: "mas tunel", y luego
+// "que sean mas angostos, para que el usuario tenga que discurrir menos a
+// donde ir"): 7 celdas de alto de las 12 que caben, asi que la sala es
+// un pasillo horizontal y desde cada parada hay poco donde elegir: todas
+// miden 7 de alto y lo que cambia con el planeta es lo larga que es.
+// Medido: 2,2-2,3 salidas por parada a 7 de alto, 2,4 a 10. Van con MAP_TUNNEL
+// (guidemap.h): con el arbol de siempre, que hace salas de 3 y 4 puertas, a
+// este tamano el generador se queda sin sitio para el puzzle mas a menudo.
+//
+// El suelo de maze.c (ROOM_MIN_W/ROOM_MIN_H) recorta lo que se pida aqui:
+// nada por debajo de 10x7.
 static const SizePreset sizePresets[] = {
-    { map0,  1, 1, 1, 12,  7, 0 },
-    { map1,  4, 3, 1, 13,  8, 1 },
-    { map2,  6, 4, 2, 14,  9, 2 },
-    { map3,  6, 4, 3, 15, 10, 2 },
-    { map4,  7, 5, 4, 16, 10, 3 },
-    { map5,  8, 6, 5, 17, 11, 3 },
-    { map6,  8, 6, 5, 18, 12, 4 },
-    { map7, 10, 8, 5, 20, 12, 4 },
+    { map0,  1, 1, 1, 12, 7, 0 },
+    { map1,  4, 3, 1, 13, 7, 1 },
+    { map2,  6, 4, 2, 14, 7, 2 },
+    { map3,  6, 4, 3, 15, 7, 2 },
+    { map4,  7, 5, 4, 16, 7, 3 },
+    { map5,  8, 6, 5, 17, 7, 3 },
+    { map6,  8, 6, 5, 18, 7, 4 },
+    { map7, 10, 8, 5, 20, 7, 4 },
 };
 // Must equal menu.h's MENU_PLANET_COUNT (spec §31) -- sizePresetIndex
 // (0..SIZE_PRESET_COUNT-1) is passed straight into Menu_update() as the
@@ -2233,7 +2248,44 @@ static void gameOverBegin(void)
 }
 
 // Una vez por frame mientras la pantalla esta puesta.
-static void gameOverStep(void)
+// La pantalla del final del planeta. Mismo molde que el game over -- se
+// escribe sola y el marcador baja con summaryStep -- pero con lo que el
+// jugador se lleva: lo recogido, lo matado, lo que ha tardado y lo que le
+// queda de puntuacion.
+static void rewardBegin(void)
+{
+    const u8 p = sizePresetIndex;
+    const u32 start = (u32) presetSave[p].scoreRooms * SCORE_PER_ROOM;
+    const u16 segundos = (u16) (presetSave[p].scoreFrames / 60);
+    char buf[40];
+
+    Sfx_musicStop();
+
+    VDP_clearPlane(BG_A, TRUE);
+    typeReset();
+    typeLine("PLANET CLEARED", 13, 8);
+
+    sprintf(buf, "PLANTS  %3d OF %3d", Plants_collectedCount(), presetSave[p].plantsTotal);
+    typeLine(buf, 11, 12);
+    sprintf(buf, "LETTERS %3d OF %3d", Items_collectedCount(), lettersFor(p));
+    typeLine(buf, 11, 14);
+    sprintf(buf, "ENEMIES %3u OF %3u", countDeadEnemies(),
+            (u16) (presetSave[p].scoreRooms * enemiesPerRoom[p]));
+    typeLine(buf, 11, 16);
+    sprintf(buf, "TIME    %3u:%02u", (u16) (segundos / 60), (u16) (segundos % 60));
+    typeLine(buf, 11, 18);
+    sprintf(buf, "MOVES   %3u", presetSave[p].scoreMoves);
+    typeLine(buf, 11, 19);
+    typeLine("SCORE", 11, GAMEOVER_SCORE_ROW);
+
+    goTarget = scoreFor(p);
+    goShown = start;
+    goStep = ((start - goTarget) / GAMEOVER_COUNT_FRAMES) + 1;
+    goSettled = FALSE;
+    goTick = 0;
+}
+
+static void summaryStep(void)
 {
     char buf[12];
     int len;
@@ -2987,7 +3039,8 @@ static void resetToMenu(void)
     // si la nave muere y es game over... quiero que guardes el estado del
     // planeta"). It used to be deliberately left out, so a death threw the
     // whole attempt away -- letters, plants and the map device with them.
-    if ((previousState == STATE_PLAYING) || (previousState == STATE_GAMEOVER))
+    if ((previousState == STATE_PLAYING) || (previousState == STATE_GAMEOVER) ||
+        (previousState == STATE_REWARD))
     {
         presetSave[sizePresetIndex].hasSave = TRUE;
         presetSave[sizePresetIndex].mapSeed = mapSeed;
@@ -4652,7 +4705,7 @@ static void drawDebugView(void)
     VDP_setTextPriority(1);
 
     {
-        static const char *const stateNames[] = { "MENU", "PLAY", "WIN ", "OVER", "SCOR" };
+        static const char *const stateNames[] = { "INTR", "MENU", "PLAY", "OVER", "SCOR", "COLL", "WIN " };
 
         sprintf(buf, "ST:%s", stateNames[gameState]);
         VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW);
@@ -5063,9 +5116,9 @@ int main(bool hardReset)
                     enterScoreTable();
             }
         }
-        else if (gameState == STATE_GAMEOVER) // user request, see its own enum doc comment
+        else if ((gameState == STATE_GAMEOVER) || (gameState == STATE_REWARD))
         {
-            gameOverStep(); // escribe el resumen y baja el marcador
+            summaryStep(); // escribe el resumen y baja el marcador
 
             // A sigue volviendo al menu aunque ya no se anuncie (user
             // request: quitar el "PRESS A TO RETURN").
@@ -5548,11 +5601,12 @@ int main(bool hardReset)
                         // Unlocks the next branch (spec §16) -- affects
                         // rooms not yet loaded, they pick up the new lock
                         // state next time loadRoom() regenerates them.
-                        // Checked BEFORE roomFullyCleared() below in case
-                        // it ever mattered for this room's own neighbors
-                        // too (it normally doesn't -- a letter's room is
-                        // always a dead end -- but costs nothing to order
-                        // this way regardless).
+                        // Checked BEFORE roomFullyCleared() below
+                        // because con MAP_TUNNEL (guidemap.h) si importa:
+                        // la letra ya no vive en un callejon sino en una
+                        // sala de paso, y lo que acaba de abrirse es la
+                        // sala de la letra siguiente, que es por donde
+                        // sigue el pasillo.
                         GuideMap_recomputeLocks();
 
                         if (roomFullyCleared(currentCol, currentRow))
@@ -5728,7 +5782,19 @@ int main(bool hardReset)
                     // allEnemiesDead() sigue ahi para el recuento.
                     if (Items_allCollected() &&
                         (Plants_collectedCount() >= presetSave[sizePresetIndex].plantsTotal))
+                    {
                         presetSave[sizePresetIndex].scoreDone = TRUE;
+
+                        // Planeta terminado: la pantalla de recompensa sale
+                        // aqui mismo (prueba del usuario), sin tener que
+                        // volver andando hasta la sala de extraccion.
+                        gameState = STATE_REWARD;
+                        SPR_setVisibility(playerSprite, HIDDEN);
+                        hideEnemySprites();
+                        updateItemIcon();
+                        drawInsertRoomStatus(FALSE);
+                        rewardBegin();
+                    }
                 }
             }
         }

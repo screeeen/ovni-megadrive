@@ -20,6 +20,14 @@
 // guidemap.c do this for itself.
 #define GUIDEMAP_TILE_COUNT 10
 
+// EL PLANETA ES UN PASILLO (prueba del usuario: "las habitaciones tienen que
+// ser mas pequenas, con 1 salida. Mas tunel"). A 1, guidemap.c traza un unico
+// paseo que no se cruza en vez del arbol de Prim: cada sala tiene la puerta
+// por la que entras y una sola salida, la ultima es el fondo y las letras van
+// repartidas a lo largo. A 0 vuelve el arbol de siempre, con sus ramas y sus
+// callejones. Lo unico que hay que tocar para probar una cosa o la otra.
+#define MAP_TUNNEL 1
+
 typedef enum { CELL_EMPTY, CELL_ROOM } CellType;
 
 typedef struct

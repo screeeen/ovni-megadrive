@@ -3,9 +3,9 @@
 
 Es el arte de siempre -- las 9 tramas de 16x16 de res/sprite/maze_tiles_dither.png,
 las del ovni original -- repintadas a los indices de PAL0 que usa maze.c: la trama
-en PAL_CUERPO y sus huecos en PAL_SUELO, el mismo del suelo. El suelo no viene del
-arte, es una celda maciza de ese mismo indice, asi que Maze_setPlanetTint tine la
-sala entera moviendo dos entradas de paleta.
+en PAL_CUERPO y sus huecos en PAL_SOMBRA. El suelo no viene del arte, es una celda
+maciza de PAL_SUELO, asi que Maze_setPlanetTint tine la sala entera moviendo tres
+entradas de paleta: la trama, sus huecos y el suelo.
 
 La hoja es una fila de celdas de 16x16 y rescomp la trocea en teselas de 8x8 por
 filas (TILESET ... ROW, sin dedup), asi que la celda c ocupa las teselas
@@ -18,7 +18,7 @@ ARTE = os.path.join(RAIZ, "res/sprite/maze_tiles_dither.png")
 SAL  = os.path.join(RAIZ, "res/sprite/maze_tiles16.png")
 GEN  = os.path.join(RAIZ, "inc/maze_tiles_gen.h")
 
-PAL_SUELO, PAL_CUERPO = 2, 3
+PAL_SUELO, PAL_CUERPO, PAL_SOMBRA = 2, 3, 4
 N = 16                  # lado de la celda
 MUROS = range(1, 10)    # las 9 tramas del arte; la 0 es el suelo vacio
 
@@ -98,15 +98,19 @@ def main():
 
     celdas = [[[PAL_SUELO] * N for _ in range(N)]]          # 0: suelo macizo
     for c in MUROS:
-        # Los huecos de la trama son suelo, no fondo: el muro se apoya en el
-        # suelo del planeta en vez de abrir un agujero de otro color.
-        celdas.append([[PAL_CUERPO if px[y][c * N + x] else PAL_SUELO for x in range(N)]
+        # Los huecos de la trama llevan SU PROPIO indice, el de la sombra, no
+        # el del suelo: asi la masa de muro se puede subir entera de valor y
+        # el suelo quedarse a oscuras, que es lo que hace que contraste. Un
+        # planeta que quiera los huecos del color del suelo solo tiene que
+        # poner su sombra igual que su suelo (maze.c, EL TINTE).
+        celdas.append([[PAL_CUERPO if px[y][c * N + x] else PAL_SOMBRA for x in range(N)]
                        for y in range(N)])
     celdas.append([[PAL_CUERPO] * N for _ in range(N)])     # la maciza
 
     # Lo que escribe encima Maze_setPlanetTint; aqui solo tienen que ser
     # distintos entre si para que el PNG no funda los dos en uno.
-    paleta = [(0, 0, 36), (152, 125, 250), (25, 23, 22), (109, 182, 72)] + [(0, 0, 0)] * 12
+    paleta = [(0, 0, 36), (152, 125, 250), (25, 23, 22), (109, 182, 72),
+              (36, 72, 36)] + [(0, 0, 0)] * 11
 
     ancho, alto = escribir_png(SAL, celdas, paleta)
     escribir_h(len(celdas), ancho // 8)

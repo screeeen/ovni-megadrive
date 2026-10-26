@@ -137,6 +137,10 @@ static void applyWallArt(void)
 #define MAZE_DIR_S 2
 #define MAZE_DIR_W 3
 
+// Paso de cada MAZE_DIR_* en celdas, para el excavador de pasillos.
+static const s8 dirStepX[4] = {  0, 1, 0, -1 };
+static const s8 dirStepY[4] = { -1, 0, 1,  0 };
+
 // How far into the room from each border a door's anchor point sits
 // (spec §5) -- fixed regardless of WHERE along that border the door is
 // (spec §30: that's the other axis, doorOffsets[dir]/doorOffset).
@@ -1405,20 +1409,35 @@ static bool tomboTooEasy(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, b
 
 // ---- structure (the generator) --------------------------------------
 
-// Share of the room's INTERIOR cells (the 18x12 inside the border ring,
-// which is always wall) that ends up as wall. The rest is open floor with
-// a scatter of small obstacles: every obstacle gives the sliding ship new
-// stops on all four sides, so instead of one corridor from A to B there
-// are many routes between any two stops.
-#define TOMBO_WALL_PERCENT 10
+// Cuanto del interior de la sala (lo de dentro del anillo de muro, que
+// siempre es muro) acaba siendo muro, y de que forma.
+//
+// ANGOSTO (peticion del usuario: "que sean mas angostos, para que el usuario
+// tenga que discurrir menos a donde ir"). Antes era un 10% de pilares sueltos
+// de una celda que no se tocaban con nada: una plaza con columnas, donde desde
+// cada parada salen cuatro deslizamientos y hay que pensar cual. Ahora son
+// barras de TOMBO_BAR_MIN..TOMBO_BAR_MAX celdas, mas muro, y pueden apoyarse
+// en el anillo del borde (TOMBO_TOUCH_BORDER), que es lo que de verdad
+// estrecha: sin eso siempre queda un carril libre dando la vuelta a la sala
+// entera. Entre barra y barra sigue habiendo al menos una celda, asi que el
+// suelo no se puede partir en dos.
+//
+// Son los mandos de lo angosto: mas muro y barras mas largas = menos paradas
+// y menos salidas por parada. Lo mide tools/ -- ver el arnes de anchura.
+#define TOMBO_WALL_PERCENT 14
 #define TOMBO_WALL_TARGET  (((MAZE_W - 2) * (MAZE_H - 2) * TOMBO_WALL_PERCENT) / 100)
+#define TOMBO_BAR_MIN       2
+#define TOMBO_BAR_MAX       3
+#define TOMBO_TOUCH_BORDER  1
 
-// Obstacles stay off the border ring's inner row/column (no one-cell
-// gutters along the edges) -- the bounds of where a wall cell may go.
-#define OBST_X_MIN 2
-#define OBST_X_MAX (MAZE_W - 3)
-#define OBST_Y_MIN 2
-#define OBST_Y_MAX (MAZE_H - 3)
+// Donde puede caer una celda de muro. Con TOMBO_TOUCH_BORDER las barras
+// llegan hasta la fila/columna pegada al anillo; sin el se quedan a una
+// celda, que es lo que dejaba el carril de la vuelta.
+#define OBST_INSET (TOMBO_TOUCH_BORDER ? 1 : 2)
+#define OBST_X_MIN OBST_INSET
+#define OBST_X_MAX (MAZE_W - 1 - OBST_INSET)
+#define OBST_Y_MIN OBST_INSET
+#define OBST_Y_MAX (MAZE_H - 1 - OBST_INSET)
 
 // True if (x,y) is one of the cells right in front of an active door (the
 // first 2 cells of its 2-wide lane, measured from the border): kept open so
@@ -1460,13 +1479,19 @@ static bool tomboPlaceObstacle(s16 x, s16 y, u8 len, bool horiz, u8 doorMask, co
             return FALSE;
     }
 
-    // Everything in the shape's 1-cell halo must still be floor, except
-    // the shape's own cells (which are floor too, right now) -- i.e. the
-    // whole halo must be PATH.
+    // Todo el halo de una celda alrededor de la barra tiene que seguir
+    // siendo suelo: asi dos barras nunca se tocan y el suelo no se parte.
+    // El anillo del borde no cuenta (es muro por definicion): si contara,
+    // ninguna barra podria apoyarse en el.
     for (ny = y - 1; ny <= y + (len * dy) + (1 - dy) ; ny++)
         for (nx = x - 1; nx <= x + (len * dx) + (1 - dx); nx++)
+        {
+            if (TOMBO_TOUCH_BORDER &&
+                ((nx <= 0) || (ny <= 0) || (nx >= MAZE_W - 1) || (ny >= MAZE_H - 1)))
+                continue;
             if (grid[ny][nx] != PATH)
                 return FALSE;
+        }
 
     for (i = 0; i < len; i++)
         grid[y + (i * dy)][x + (i * dx)] = 1;
@@ -1507,6 +1532,13 @@ static void tomboPlaceDoorFrames(u8 doorMask, const u8 doorOff[4])
 static bool tomboPlacePillarNear(s16 minX, s16 maxX, s16 minY, s16 maxY, u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
 {
     u8 t;
+
+    // En una sala baja o estrecha el margen que pide el llamante no existe
+    // (maxY por debajo de minY). Sin esto el modulo de abajo divide entre
+    // cero, que en el 68000 es una excepcion y el juego se cae: lo tapaba
+    // ROOM_MIN_W/ROOM_MIN_H y nada mas.
+    if ((maxX < minX) || (maxY < minY))
+        return FALSE;
 
     for (t = 0; t < 20; t++)
     {
@@ -1582,6 +1614,330 @@ static u16 tomboBlockAlignedDoors(u8 doorMask, const u8 doorOff[4], s16 hubX, s1
     return placed;
 }
 
+// ---- EXCAVAR PASILLOS ---------------------------------------------
+//
+// Peticion del usuario: "cambia el generador para que excave pasillos".
+// El otro reparte obstaculos en una sala abierta; este hace lo contrario --
+// la sala empieza siendo roca maciza y se le abren pasillos de UNA celda.
+// Con el deslizamiento de tombo eso es justo lo que quita decisiones: por un
+// pasillo de una celda solo se puede ir adelante o atras, y las paradas son
+// las esquinas y los fondos de saco.
+//
+// La forma es UNA serpiente, sin una sola bifurcacion: boca de la primera
+// puerta, unos cuantos rodeos, la celda de la letra, y la segunda puerta (o
+// un fondo de saco si no hay segunda). Que no haya bifurcaciones no es por
+// simplificar: deslizandose, de un cruce de tres salen siempre dos
+// direcciones alineadas, la nave pasa de largo por el cruce y el tercer brazo
+// NO SE PUEDE TOMAR nunca. Un cruce de tres es un pasillo muerto.
+//
+// Lo que lo garantiza es que ningun tramo puede pegarse de lado a otro ya
+// abierto (carveCellOk), y que la unica celda exenta de esa regla es el final
+// del recorrido, que es donde se unen dos tramos en una esquina.
+#define CARVE_CORRIDORS   1    // 0 = vuelve el esparcido de obstaculos
+#define CARVE_TAIL_MAX    6    // el fondo de saco de una sala de una puerta
+// Puntos de paso antes de la letra y despues: son los que hacen que el
+// pasillo de vueltas y llene la sala en vez de ir derecho de puerta a puerta.
+// Cada uno es opcional -- si no cabe, se sigue desde donde se estaba -- asi
+// que subirlos alarga la serpiente sin arriesgar el intento.
+#define CARVE_WAYPOINTS   4
+
+// Las celdas de la boca de cada puerta. No cuentan para la regla de "no
+// pegarse a otro pasillo": la puerta mide 2 celdas y el pasillo que sale de
+// la garganta tiene que poder correr por debajo de la otra. No hay riesgo de
+// que la nave se quede sin donde parar, porque la sala es una serpiente y de
+// la boca no cuelga nada mas.
+#define CARVE_POCKET_MAX 6
+static s16 pocketX[CARVE_POCKET_MAX], pocketY[CARVE_POCKET_MAX];
+static u8 pocketCount;
+
+static bool carveIsPocket(s16 x, s16 y)
+{
+    u8 i;
+
+    for (i = 0; i < pocketCount; i++)
+        if ((pocketX[i] == x) && (pocketY[i] == y))
+            return TRUE;
+
+    return FALSE;
+}
+
+// Si una celda puede abrirse como pasillo: tiene que ser roca de dentro de la
+// sala y no pegarse de lado a ningun pasillo ya abierto, o saldria un paso de
+// dos celdas de ancho. `dstX/dstY` es el destino del tramo, que si ya esta
+// abierto vale igual (es la union), y (fromX,fromY) es de donde sale.
+static bool carveCellOk(s16 x, s16 y, s16 fromX, s16 fromY, s16 dstX, s16 dstY)
+{
+    s16 d;
+
+    if ((x < 1) || (x > MAZE_W - 2) || (y < 1) || (y > MAZE_H - 2))
+        return FALSE;
+    if ((x == dstX) && (y == dstY))
+        return TRUE;
+    if (grid[y][x] == PATH)
+        return FALSE;
+
+    for (d = 0; d < 4; d++)
+    {
+        const s16 nx = x + dirStepX[d];
+        const s16 ny = y + dirStepY[d];
+
+        if ((nx == fromX) && (ny == fromY)) continue;
+        if ((nx == dstX) && (ny == dstY)) continue;
+        if ((nx < 0) || (ny < 0) || (nx >= MAZE_W) || (ny >= MAZE_H)) continue;
+        if (carveIsPocket(nx, ny)) continue;
+        if (grid[ny][nx] == PATH)
+            return FALSE;
+    }
+
+    return TRUE;
+}
+
+// Un tramo recto de (x,y) a (x1,y1) -- uno de los dos ejes, no los dos.
+// Comprueba antes de escribir: o cabe entero o no se toca nada.
+static bool carveStraight(s16 x, s16 y, s16 x1, s16 y1, s16 dstX, s16 dstY)
+{
+    const s16 dx = (x1 > x) ? 1 : ((x1 < x) ? -1 : 0);
+    const s16 dy = (y1 > y) ? 1 : ((y1 < y) ? -1 : 0);
+    s16 cx = x, cy = y;
+
+    while ((cx != x1) || (cy != y1))
+    {
+        const s16 px = cx, py = cy;
+
+        cx += dx; cy += dy;
+        if (!carveCellOk(cx, cy, px, py, dstX, dstY))
+            return FALSE;
+    }
+
+    cx = x; cy = y;
+    while ((cx != x1) || (cy != y1))
+    {
+        cx += dx; cy += dy;
+        grid[cy][cx] = PATH;
+    }
+
+    return TRUE;
+}
+
+// Une dos sitios con una L de dos tramos. La esquina es una parada de
+// verdad: la nave llega hasta ella, choca y desde ahi puede girar. Es lo que
+// NO hacia la version anterior, que cruzaba el pasillo del centro por la
+// mitad -- por ahi la nave pasa de largo y media sala se vuelve inalcanzable.
+static bool carveElbow(s16 x0, s16 y0, s16 x1, s16 y1, bool xFirst, s16 *cornerX, s16 *cornerY)
+{
+    const s16 ex = xFirst ? x1 : x0;
+    const s16 ey = xFirst ? y0 : y1;
+
+    if (!carveStraight(x0, y0, ex, ey, x1, y1))
+        return FALSE;
+    if (!carveStraight(ex, ey, x1, y1, x1, y1))
+        return FALSE;
+
+    *cornerX = ex;
+    *cornerY = ey;
+    return TRUE;
+}
+
+// Une (x0,y0) con (x1,y1) probando varios recorridos: la L por los dos lados
+// y, si ninguna cabe, zigzags por una columna o una fila al azar. Un recorrido
+// que no cabe deja medio pasillo abierto, asi que se guarda el cuarto antes y
+// se devuelve como estaba. Cada tramo acaba donde gira, que es lo que hace
+// que todo cruce sea una parada.
+static u8 carveSave[MAZE_MAX_H][MAZE_MAX_W];
+static u8 carveKeep[MAZE_MAX_H][MAZE_MAX_W]; // el cuarto antes de los rodeos
+
+static bool carveConnect(s16 x0, s16 y0, s16 x1, s16 y1, s16 *cornerX, s16 *cornerY)
+{
+    u8 t;
+
+    memcpy(carveSave, grid, sizeof(carveSave));
+
+    for (t = 0; t < 2; t++)
+        if (carveElbow(x0, y0, x1, y1, (t == 0), cornerX, cornerY))
+            return TRUE;
+        else
+            memcpy(grid, carveSave, sizeof(carveSave));
+
+    for (t = 0; t < 16; t++)
+    {
+        const bool porColumna = ((t & 1) != 0);
+        const s16 r = porColumna
+                          ? (s16) (1 + (random() % (MAZE_W - 2)))
+                          : (s16) (1 + (random() % (MAZE_H - 2)));
+
+        // El destino exento es SIEMPRE el final del recorrido, nunca una
+        // esquina de paso: si una esquina pudiera caer sobre un pasillo ya
+        // abierto se formaria un cruce de tres, que es justo lo que no puede
+        // haber.
+        if (porColumna)
+        {
+            if (carveStraight(x0, y0, r, y0, x1, y1) &&
+                carveStraight(r, y0, r, y1, x1, y1) &&
+                carveStraight(r, y1, x1, y1, x1, y1))
+            {
+                *cornerX = r; *cornerY = y1;
+                return TRUE;
+            }
+        }
+        else
+        {
+            if (carveStraight(x0, y0, x0, r, x1, y1) &&
+                carveStraight(x0, r, x1, r, x1, y1) &&
+                carveStraight(x1, r, x1, y1, x1, y1))
+            {
+                *cornerX = x1; *cornerY = r;
+                return TRUE;
+            }
+        }
+        memcpy(grid, carveSave, sizeof(carveSave));
+    }
+
+    return FALSE;
+}
+
+// El tramo muerto del final: desde (x,y) hacia donde haya roca, lo mas largo
+// que quepa hasta CARVE_TAIL_MAX. Es el fondo de saco de una sala de una sola
+// puerta, donde la nave se para y da media vuelta.
+static bool carveTail(s16 x, s16 y)
+{
+    u8 d;
+
+    for (d = 0; d < 4; d++)
+    {
+        const u8 dir = (u8) ((random() + d) % 4);
+        s16 len;
+
+        for (len = CARVE_TAIL_MAX; len >= 1; len--)
+        {
+            const s16 tx = (s16) (x + (len * dirStepX[dir]));
+            const s16 ty = (s16) (y + (len * dirStepY[dir]));
+
+            if (carveStraight(x, y, tx, ty, -1, -1))
+                return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+// La boca de una puerta: las 2 celdas del borde (la puerta mide 2) y UNA
+// garganta hacia dentro, alineada con la celda por la que entra la nave.
+// De la garganta sale el pasillo y de ningun otro sitio: si colgara otro de
+// la celda de entrada, la nave pasaria de largo por delante sin poder
+// pararse, y media sala se quedaria sin camino.
+static void carveDoorPocket(u8 dir, const u8 doorOff[4], s16 *px, s16 *py)
+{
+    const u8 o = doorOff[dir];
+
+    switch (dir)
+    {
+        case MAZE_DIR_N:
+            grid[1][o] = PATH; grid[1][o + 1] = PATH; grid[2][o] = PATH;
+            pocketX[pocketCount] = o;     pocketY[pocketCount++] = 1;
+            pocketX[pocketCount] = o + 1; pocketY[pocketCount++] = 1;
+            *px = o; *py = 2; break;
+        case MAZE_DIR_S:
+            grid[MAZE_H - 2][o] = PATH; grid[MAZE_H - 2][o + 1] = PATH; grid[MAZE_H - 3][o] = PATH;
+            pocketX[pocketCount] = o;     pocketY[pocketCount++] = MAZE_H - 2;
+            pocketX[pocketCount] = o + 1; pocketY[pocketCount++] = MAZE_H - 2;
+            *px = o; *py = MAZE_H - 3; break;
+        case MAZE_DIR_E:
+            grid[o][MAZE_W - 2] = PATH; grid[o + 1][MAZE_W - 2] = PATH; grid[o][MAZE_W - 3] = PATH;
+            pocketX[pocketCount] = MAZE_W - 2; pocketY[pocketCount++] = o;
+            pocketX[pocketCount] = MAZE_W - 2; pocketY[pocketCount++] = o + 1;
+            *px = MAZE_W - 3; *py = o; break;
+        default: // MAZE_DIR_W
+            grid[o][1] = PATH; grid[o + 1][1] = PATH; grid[o][2] = PATH;
+            pocketX[pocketCount] = 1; pocketY[pocketCount++] = o;
+            pocketX[pocketCount] = 1; pocketY[pocketCount++] = o + 1;
+            *px = 2; *py = o; break;
+    }
+}
+
+// Abre los pasillos de esta sala sobre la roca que dejo fillWallsFixed.
+// El llamante ya ha comprobado que la sala tiene 1 o 2 puertas.
+//
+// La sala es UNA serpiente: boca de la primera puerta -> un rodeo -> la celda
+// de la letra -> la segunda puerta (o un fondo de saco si no hay segunda).
+// Ni una bifurcacion, y no por simplificar: deslizandose, de un cruce salen
+// siempre dos direcciones alineadas, la nave pasa de largo por el y el tercer
+// brazo no se puede tomar NUNCA. Un cruce de tres es un pasillo muerto.
+// Por eso tampoco sabe hacer salas de 3 o 4 puertas: ahi hace falta un cruce,
+// y esas se las deja al generador de obstaculos (tomboTryOnce).
+//
+// FALSE si no ha encontrado recorrido: el intento se descarta como cualquier
+// otro y se prueba con otra semilla.
+static bool tomboCarve(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
+{
+    s16 ax, ay, bx, by, cx, cy, wx, wy;
+    u8 dir, k, doors = 0, primera = 4, segunda = 4;
+
+    pocketCount = 0;
+
+    for (dir = 0; dir < 4; dir++)
+        if (doorMask & (1 << dir))
+        {
+            doors++;
+            if (primera == 4) primera = dir; else if (segunda == 4) segunda = dir;
+        }
+
+    if ((doors == 0) || (doors > 2))
+        return FALSE;
+
+    grid[hubY][hubX] = PATH;
+    carveDoorPocket(primera, doorOff, &ax, &ay);
+
+    // De la boca a la letra, dando el rodeo que se pueda. Si con los rodeos
+    // ya no hay forma de llegar a la letra, se deshacen y se va derecho.
+    memcpy(carveKeep, grid, sizeof(carveKeep));
+    wx = ax; wy = ay;
+    for (k = 0; k < CARVE_WAYPOINTS; k++)
+    {
+        const s16 rx = (s16) (1 + (random() % (MAZE_W - 2)));
+        const s16 ry = (s16) (1 + (random() % (MAZE_H - 2)));
+
+        if (carveConnect(wx, wy, rx, ry, &cx, &cy))
+        {
+            wx = rx; wy = ry;
+        }
+    }
+
+    if (!carveConnect(wx, wy, hubX, hubY, &cx, &cy))
+    {
+        memcpy(grid, carveKeep, sizeof(carveKeep));
+        if (!carveConnect(ax, ay, hubX, hubY, &cx, &cy))
+            return FALSE;
+    }
+
+    if (doors == 2)
+    {
+        // Y de la letra a la otra puerta, con mas rodeo si cabe.
+        carveDoorPocket(segunda, doorOff, &bx, &by);
+        memcpy(carveKeep, grid, sizeof(carveKeep));
+        wx = hubX; wy = hubY;
+        for (k = 0; k < CARVE_WAYPOINTS; k++)
+        {
+            const s16 rx = (s16) (1 + (random() % (MAZE_W - 2)));
+            const s16 ry = (s16) (1 + (random() % (MAZE_H - 2)));
+
+            if (carveConnect(wx, wy, rx, ry, &cx, &cy))
+            {
+                wx = rx; wy = ry;
+            }
+        }
+        if (!carveConnect(wx, wy, bx, by, &cx, &cy))
+        {
+            memcpy(grid, carveKeep, sizeof(carveKeep));
+            if (!carveConnect(hubX, hubY, bx, by, &cx, &cy))
+                return FALSE;
+        }
+    }
+    else if (!carveTail(hubX, hubY))
+        return FALSE;
+
+    return TRUE;
+}
+
 // One generation attempt: an open floor, the door pockets, a scatter of
 // obstacles up to the wall budget, then the validator's verdict.
 static bool tomboTryOnce(u16 seed, s16 hubX, s16 hubY, u8 doorMask, const u8 doorOff[4],
@@ -1591,18 +1947,37 @@ static bool tomboTryOnce(u16 seed, s16 hubX, s16 hubY, u8 doorMask, const u8 doo
     u8 dir;
     u16 placed = 0;
     u16 tries;
+    u8 doors = 0;
+    bool excavar;
+
+    for (dir = 0; dir < 4; dir++)
+        if (doorMask & (1 << dir))
+            doors++;
+
+    // Excavar solo sabe de pasillos, y un pasillo no puede tener un cruce de
+    // tres (ver tomboCarve). Una sala de 3 o 4 puertas se la queda el
+    // generador de obstaculos, que es de sala abierta y ahi si valen.
+    excavar = CARVE_CORRIDORS && (doors <= 2);
 
     setRandomSeed(seed);
     // Before anything touches the grid: this attempt's own footprint.
     // Drawing from the attempt seed is deliberate -- an unplayable shape
-    // is then just another rejected attempt.
-    buildRandomShape(doorMask, doorOff, hubX, hubY);
+    // is then just another rejected attempt. Excavando no hay recorte: la
+    // sala ya es roca maciza y lo que la dibuja son los pasillos.
+    if (!excavar)
+        buildRandomShape(doorMask, doorOff, hubX, hubY);
+    else
+    {
+        memset(outsideShape, FALSE, sizeof(outsideShape));
+        memset(shapeEdge, FALSE, sizeof(shapeEdge));
+    }
     fillWallsFixed(useFixedWall ? fixedWallVariant : 1); // cheap: variants are only rolled for the accepted room
     tomboResetDebugGraph();
 
-    for (y = 1; y < MAZE_H - 1; y++)
-        for (x = 1; x < MAZE_W - 1; x++)
-            tomboMark(x, y);
+    if (!excavar)
+        for (y = 1; y < MAZE_H - 1; y++)
+            for (x = 1; x < MAZE_W - 1; x++)
+                tomboMark(x, y);
 
     // Door pockets across the border ring (same 2x2 cells the caller's
     // border punch opens -- done here too so the validator sees the real
@@ -1621,17 +1996,28 @@ static bool tomboTryOnce(u16 seed, s16 hubX, s16 hubY, u8 doorMask, const u8 doo
         }
     }
 
-    tomboPlaceDoorFrames(doorMask, doorOff);
-    for (dir = 0; dir < 4; dir++)
-        if (doorMask & (1 << dir))
-            placed++;
-    placed += tomboBlockAlignedDoors(doorMask, doorOff, hubX, hubY);
-    placed += tomboPlaceHubFeeders(doorMask, doorOff, hubX, hubY);
+    if (excavar && !tomboCarve(doorMask, doorOff, hubX, hubY))
+        return FALSE;
 
-    for (tries = 0; (placed < TOMBO_WALL_TARGET) && (tries < 400); tries++)
+    // Los marcos, los tapones y los alimentadores del nudo son del otro
+    // generador: ponen muro DENTRO de una sala abierta. Excavando no hacen
+    // falta (todo lo que no es pasillo ya es roca) y el marco ademas podria
+    // tapiar un pasillo.
+    if (!excavar)
     {
-        const u8 roll = random() % 10;
-        u8 len = (roll < 8) ? 1 : 2; // mostly single pillars: each one is up to 4 new stops
+        tomboPlaceDoorFrames(doorMask, doorOff);
+        for (dir = 0; dir < 4; dir++)
+            if (doorMask & (1 << dir))
+                placed++;
+        placed += tomboBlockAlignedDoors(doorMask, doorOff, hubX, hubY);
+        placed += tomboPlaceHubFeeders(doorMask, doorOff, hubX, hubY);
+    }
+
+    for (tries = 0; !excavar && (placed < TOMBO_WALL_TARGET) && (tries < 400); tries++)
+    {
+        // Barras, no pilares: una barra larga tapa un carril entero y deja
+        // un paso, que es lo que hace la sala angosta.
+        u8 len = (u8) (TOMBO_BAR_MIN + (random() % (TOMBO_BAR_MAX - TOMBO_BAR_MIN + 1)));
         const bool horiz = (random() & 1);
         const s16 px = OBST_X_MIN + (random() % (OBST_X_MAX - OBST_X_MIN + 1));
         const s16 py = OBST_Y_MIN + (random() % (OBST_Y_MAX - OBST_Y_MIN + 1));
@@ -1693,13 +2079,17 @@ void Maze_setActiveMapSlot(u8 slot)
 // Room footprint: how big this planet's rooms are and what shape.
 // ---------------------------------------------------------------------
 
-// Smallest room that still generates: the door pockets are 2 cells wide
-// and sit 2 clear of each corner (guidemap's old DOOR_COL_MIN), the
-// obstacle bounds are inset 2, and tomboPlaceHubFeeders wants up to 6
-// cells of clearance either side of the hub. Below this the validator
-// rejects everything and every room falls back to a bare open box.
-#define ROOM_MIN_W 14
-#define ROOM_MIN_H 10
+// La sala mas pequena que todavia sale bien. Medido en el anfitrion sobre
+// todas las salas de 1 y 2 puertas (que son las que hace un tunel) y todas
+// las posiciones de puerta: a 10x7 y de ahi para arriba ninguna cae al
+// relleno trivial; a 6 de alto cae entre el 2 y el 5%, y mas bajo no hay ni
+// sitio para una puerta de 2 celdas a 2 de las esquinas.
+//
+// OJO: esto RECORTA lo que pida main.c, en silencio. Estuvo en 14x10 mientras
+// las salas eran de 8 px, asi que cualquier preset mas pequeno que eso se
+// quedaba en 14x10 sin avisar y los ocho planetas salian iguales.
+#define ROOM_MIN_W 10
+#define ROOM_MIN_H  7
 
 u8 Maze_roomW(void) { return roomW; }
 u8 Maze_roomH(void) { return roomH; }
@@ -2358,23 +2748,38 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
 // ella, de modo que lo que se lee aqui es lo que sale en pantalla.
 
 
-// Cada planeta es UN tono en tres escalones de valor: el suelo abajo y el muro
+// Cada planeta es UN tono en escalones de valor: el suelo abajo y el muro
 // arriba (peticion del usuario: "el color del suelo tiene que ser el mismo que
-// los muros pero mas oscuro"). Lo que separa muro de suelo es el BRILLO y no el
-// color, que es lo que hace falta para leer la pantalla.
+// los muros pero mas oscuro"). Lo que separa muro de suelo es el VALOR y no el
+// color, que es lo que hace falta para leer la pantalla sin distinguir tonos.
+//
+// LAS CUATRO PRIMERAS, A TODO CONTRASTE (peticion del usuario, dos veces:
+// "quiero contraste"). La trama del muro va al escalon mas alto del VDP, SUS
+// HUECOS a un tono medio del mismo color -- asi la masa de muro sube entera y
+// no se queda a medias tintas -- y el suelo al negro del todo. De la 4 en
+// adelante los huecos siguen valiendo lo mismo que el suelo, que es como se
+// veia todo hasta ahora, y asi el salto se nota al avanzar.
 //
 // Los escalones no son inventados: son los que el VDP de verdad tiene sobre el
 // rayo de cada tono, con 3 bits por canal.
 static const u32 planetTint[MAZE_MAP_SLOTS][4] = {
     //  cuerpo     sombra     brillo     suelo
-    { 0x6DB648, 0x484824, 0x91DA6D, 0x242400 },   // 0  verde      (el del arte original)
-    { 0x489191, 0x244848, 0x6DDADA, 0x002449 },   // 1  agua       (el otro del arte original)
-    { 0xB66D24, 0x6D4824, 0xDA9124, 0x482400 },   // 2  ambar
-    { 0xDA6D24, 0x6D4824, 0xFF9148, 0x482424 },   // 3  carmesi
-    { 0xB66DDA, 0x48486D, 0xB691FF, 0x242448 },   // 4  violeta
-    { 0x249191, 0x004848, 0x24DADA, 0x002449 },   // 5  turquesa
-    { 0xB6B66D, 0x484848, 0xDADA91, 0x242424 },   // 6  hueso
-    { 0x4891B6, 0x24486D, 0x6D91DA, 0x242449 },   // 7  anil
+    // LAS CUATRO PRIMERAS, A TODO CONTRASTE (peticion del usuario: "cambia la
+    // paleta de color en las primeras fases, que tenga mas contraste"). El
+    // muro sube al escalon mas alto que tiene el VDP y el suelo baja casi al
+    // negro: lo que separa muro de suelo pasa a ser el VALOR, que se lee sin
+    // distinguir colores, y no el tono. De la 4 en adelante se quedan los
+    // tonos medios de antes, para que la diferencia se note al avanzar.
+    { 0x91FF6D, 0x246D24, 0xDAFFB6, 0x000000 },   // 0  verde      (el del arte original)
+    { 0x6DDAFF, 0x24486D, 0xB6FFFF, 0x000000 },   // 1  agua       (el otro del arte original)
+    { 0xFFB648, 0x6D4800, 0xFFDA91, 0x000000 },   // 2  ambar
+    { 0xFF916D, 0x6D2424, 0xFFB6B6, 0x000000 },   // 3  carmesi
+    // De la 4 en adelante la sombra vale lo mismo que el suelo: los huecos de
+    // la trama se funden con el, que es como se veian todas hasta ahora.
+    { 0xB66DDA, 0x242448, 0xB691FF, 0x242448 },   // 4  violeta
+    { 0x249191, 0x002449, 0x24DADA, 0x002449 },   // 5  turquesa
+    { 0xB6B66D, 0x242424, 0xDADA91, 0x242424 },   // 6  hueso
+    { 0x4891B6, 0x242449, 0x6D91DA, 0x242449 },   // 7  anil
 };
 
 void Maze_setPlanetTint(u8 planet)
