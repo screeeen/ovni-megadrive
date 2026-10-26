@@ -20,34 +20,27 @@
 // locked-door tiles instead of repeating the literal.
 #define MAZE_BG_COLOR 0x000024 // dark blue, nearly black (user request) -- blue level 1 of the 7 the VDP has
 
-// One maze cell = 8x8 px = exactly one VDP background tile (user
-// request: rooms that vary with the planet, "cuanto mas grande sea el
-// planeta, mas grande es la habitacion"). It used to be 16px/2x2 tiles,
-// which capped a room at 20x12 cells -- one screen, and there is nowhere
-// to grow without scrolling. Halving the cell doubles the grid on both
-// axes for the same 320x192 play area, so the biggest planet gets 40x24
-// cells instead. The ship halves with it (8x8, see main.c's playerShip)
-// -- that is what makes the room genuinely bigger rather than just
-// finer: the room is the same pixels, the ship is half the size.
+// One maze cell = 16x16 px = 2x2 VDP background tiles, as it was before
+// the 8px experiment (user request: "volvamos a utilizar los tiles para
+// construir el laberinto de 16x16 como hace tiempo"). That caps a room at
+// 20x12 cells -- one screen below the HUD band, no scrolling -- so the
+// per-planet room ramp is half what it was in cells and exactly the same
+// in pixels. The ship and the enemies are the 16x16 art again, one cell
+// each (main.c's setShipArt).
 //
-// MAZE_W/MAZE_H are now the MAXIMUM a room can be (40x24 = the full
-// screen below the HUD), and only ever dimension the static grids.
-// The size a room actually IS comes from Maze_setRoomSize() below and
-// is read back with Maze_roomW()/Maze_roomH() -- inside maze.c itself
+// MAZE_W/MAZE_H are the MAXIMUM a room can be and only ever dimension the
+// static grids; the size a room actually IS comes from Maze_setRoomSize()
+// below and is read back with Maze_roomW()/Maze_roomH() -- inside maze.c
 // MAZE_W/MAZE_H are redefined to those runtime values, see the top of
 // that file.
-#define MAZE_TILE_PX    8
-// log2(MAZE_TILE_PX). Converting a room pixel to a cell is a SHIFT, not a
-// divide, because it has to floor toward minus infinity: a coordinate one
-// pixel outside the room must land on cell -1 so Maze_isWall() reports it
-// out of range, and a signed divide would round it to 0 and read a real
-// cell instead. Derived from MAZE_TILE_PX and checked against it by a
-// _Static_assert in maze.c -- player.c and enemy.c each had this shift
-// hardcoded to 4 for the old 16px cell, which is exactly the kind of
-// silent drift that survives a clean compile.
-#define MAZE_TILE_SHIFT 3
-#define MAZE_MAX_W      40
-#define MAZE_MAX_H      24
+#define MAZE_TILE_PX    16
+// log2(MAZE_TILE_PX). Room pixel -> cell is a SHIFT, not a divide: it has
+// to floor toward minus infinity so a coordinate one pixel outside the
+// room lands on cell -1 and Maze_isWall() reports it out of range. Checked
+// against MAZE_TILE_PX by a _Static_assert in maze.c.
+#define MAZE_TILE_SHIFT 4
+#define MAZE_MAX_W      20
+#define MAZE_MAX_H      12
 
 // The size the CURRENT room actually is. Every call site that used to
 // read the old fixed 20x12 constants keeps working unchanged -- it just
@@ -127,8 +120,13 @@ s16 Maze_originPxY(void);
 
 void Maze_drawProgressBar(u16 x, u16 y, u16 w, u16 filled);
 
+// La esquina de la habitacion en teselas de pantalla de 8 px (lleva ya la
+// banda del HUD y el centrado), y la tesela en la que empieza una celda suya:
+// la celda son 2x2 teselas, asi que no es una suma, es un desplazamiento.
 u16 Maze_originColumn(void);
 u16 Maze_originRow(void);
+u16 Maze_cellColumn(s16 cx);
+u16 Maze_cellRow(s16 cy);
 
 // The range a door's offset along border `dir` (0=N,1=E,2=S,3=W) may
 // take for the current footprint: the span of that side that the shape
@@ -139,14 +137,14 @@ u16 Maze_originRow(void);
 void Maze_doorOffsetRange(u8 dir, u8 *lo, u8 *hi);
 
 // mazeTiles occupies this many contiguous VRAM tiles starting at
-// TILE_USER_INDEX, one VDP tile per logical cell. Tiene que coincidir
-// EXACTAMENTE con los tiles que trae maze_tiles_auto.png: VDP_loadTileSet
+// TILE_USER_INDEX, 2x2 of them per logical cell. Tiene que coincidir
+// EXACTAMENTE con los tiles que trae maze_tiles16.png: VDP_loadTileSet
 // carga los que diga el recurso, no los que diga esta constante, asi que
 // quedarse corto escribe encima de quien venga detras, asi que la cuenta la
-// genera tools/maze_tiles.py a la vez que el propio PNG y no se escribe a mano.
+// genera tools/maze_tiles16.py a la vez que el propio PNG y no se escribe a mano.
 // No separate locked-door cell (spec §19: a sealed door reuses an
 // ordinary wall cell, drawn through a different palette).
-#include "maze_tiles_gen.h"   // MAZE_TILE_COUNT, TILE_*, FILO_VAR_*, CANTO_VAR_*
+#include "maze_tiles_gen.h"   // MAZE_TILE_COUNT, MAZE_SHEET_ROW, CELL_*, TILE_*
 
 // What maze.c claims in VRAM BEYOND those: the 24-tile pool
 // Maze_drawNoiseFrame rewrites every call, plus the single solid tile the
@@ -191,7 +189,10 @@ void Maze_restoreTextColor(void);
 // were verified exhaustively host-side over every door subset x offset
 // combination) -- a trivial open-interior fallback exists only as a
 // safety net for if every single one of those somehow fails, and carries
-// no puzzle guarantee; it's never actually been observed to trigger.
+// no puzzle guarantee. Con la celda de 16 px y salas de hasta 20x12 salta
+// en el 0,04% de los repartos de puertas (salas de 3 o 4 puertas de menos
+// de 11 celdas de alto); esa sala sigue siendo jugable, pero no lleva
+// puzzle ni plantas.
 
 // Accepted-attempt cache (see maze.c's attempt codes): one byte per room
 // remembers which generation attempt was accepted, so re-entering a room

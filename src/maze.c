@@ -40,26 +40,16 @@ static bool outsideShape[MAZE_MAX_H][MAZE_MAX_W];
 // would stop against nothing.
 static bool shapeEdge[MAZE_MAX_H][MAZE_MAX_W];
 
-// mazeTiles.png is an 80x8 source image: 10 logical 8x8 cells in a row
-// -- cell 0 = floor; cells 1-9 = the dither wall variants from ovni's
-// image_edit.png (matching the original's random getRandomValue() 2-10
-// look). Strict duotone: palette index 0 is the background (maze.h's
-// MAZE_BG_COLOR), index 1 the one wall colour. The art used to carry three more copies of
-// those 9 shapes in other accent colours, from when a room picked one of
-// 4; they were cropped out once every room went to a single colour. There
-// used to be an 11th "locked door" cell
-// (an hourglass/X shape, spec §16) but it was removed (spec §19, user
-// feedback): a sealed door now renders as an ordinary wall cell from the
-// wall block -- randomWallVariant() picks it the same as any
-// other wall cell, no separate value or art needed, so a locked door
-// looks exactly like the rest of that room's walls.
-//
-// It was 160x16 (16x16 cells, 4 subtiles each) until the cell became
-// 8x8; now a cell IS a VDP tile, so cell value c is simply tile BASE+c
-// and the old 4-subtile addressing is gone. The 8x8 variants are
-// placeholder art for now -- the 16x16 dither patterns are textures and
-// halving them turns them into speckle, so they were re-thresholded to
-// keep each variant's silhouette instead of its weave.
+// mazeTiles es res/sprite/maze_tiles16.png: una fila de celdas de 16x16 --
+// la 0 el suelo macizo, de la 1 a la 9 las nueve tramas del ovni original
+// (el getRandomValue() 2-10 de aquel) y la ultima maciza, para la barra de
+// progreso. Las tramas van en PAL_CUERPO y SUS HUECOS en PAL_SUELO, el mismo
+// del suelo (peticion del usuario), asi que Maze_setPlanetTint lo tine todo
+// sin tocar el arte y la celda de muro no deja ver el fondo.
+// Rescomp la trocea en teselas de 8x8 por filas (ROW, sin dedup): la celda c
+// son las teselas 2c/2c+1 arriba y MAZE_SHEET_ROW+2c/+1 abajo.
+// No hay celda propia de puerta cerrada (spec 19): es un muro cualquiera
+// dibujado con otra paleta.
 #define BASE_TILE       TILE_USER_INDEX
 
 // El recuadro solido del panel de depuracion. Va al 10, el primero de los
@@ -68,23 +58,15 @@ static bool shapeEdge[MAZE_MAX_H][MAZE_MAX_W];
 
 #define PATH 0
 
-// --- EL TILEADO ---
+// --- LAS TRAMAS DEL MURO ---
 //
-// El aspecto de un muro no se sortea: lo decide su situacion. La regla sale
-// del propio arte, leyendo por adyacencia el mapa del que salen los tiles:
-// una masa lleva el filo claro en el lado por el que se la ve desde el suelo.
-// Medido sobre el mapa original, las casillas bien muestreadas lo cumplen al
-// 100% (el tramo horizontal es la pieza de filo en 47 de 47).
-//
-// Solo hacen falta tres piezas de muro, y entre las tres gastan tres colores:
-// el CUERPO (el relleno), la SOMBRA (la columna derecha del canto y la fila
-// de abajo del filo) y el BRILLO (la linea clara). Por eso el muro se puede
-// tintar entero moviendo dos entradas de paleta -- ver Maze_setPlanetTint.
-// Los TILE_* y los *_VAR_* los trae maze_tiles_gen.h via maze.h.
+// Un muro no lleva filo ni canto: es una de las nueve tramas del arte
+// original, entera en su celda de 16x16. Todas gastan un solo color, el
+// CUERPO, asi que el planeta se tine moviendo una entrada de paleta -- ver
+// Maze_setPlanetTint. Los CELL_* los trae maze_tiles_gen.h via maze.h.
 
 // La variante de cada celda sale de DONDE esta y de la semilla del cuarto, no
-// de un sorteo guardado: no cuesta RAM (los catorce arrays de 40x24 ya aprietan)
-// y sale igual en cada redibujado, asi que el suelo no parpadea.
+// de un sorteo guardado: no cuesta RAM y sale igual en cada redibujado.
 static u16 tileSeed = 0;
 
 static u8 cellVariant(s16 x, s16 y, u8 count)
@@ -95,14 +77,6 @@ static u8 cellVariant(s16 x, s16 y, u8 count)
     h = (u16) (h * 0x2545);
     h ^= (u16) (h >> 9);
     return (u8) ((h >> 3) % count);
-}
-
-// La pieza a mano y las del arte entran en el mismo sorteo.
-static u8 wallVariant(s16 x, s16 y, u8 base, u8 varBase, u8 varCount)
-{
-    const u8 k = cellVariant(x, y, (u8) (varCount + 1));
-
-    return (k == 0) ? base : (u8) (varBase + k - 1);
 }
 
 static u8 grid[MAZE_MAX_H][MAZE_MAX_W];
@@ -130,45 +104,22 @@ static void clearLockedDoorCells(void)
 }
 
 // Valor con el que se marca una celda de muro MIENTRAS se genera. Cualquier
-// valor distinto de PATH vale: applyAutotile() lo sustituye al final por el
-// tile que toque. Se queda en el relleno del material por si algo dibujase
-// antes de esa pasada.
+// valor distinto de PATH vale: applyWallArt() lo sustituye al final por la
+// trama que le toque a su sitio.
 static u8 randomWallVariant(void)
 {
-    return TILE_LISO;
+    return CELL_MURO_BASE;
 }
 
-// Si la celda se DIBUJA como muro. No basta con mirar el grid: Maze_draw deja
-// en blanco lo que la forma de la habitacion recorta (outsideShape sin
-// shapeEdge), asi que para el filo eso cuenta como suelo. Fuera del cuarto
-// cuenta como muro, para que el borde no se perfile contra la nada.
-static bool drawnWall(s16 x, s16 y)
-{
-    if (x < 0 || y < 0 || x >= MAZE_W || y >= MAZE_H)
-        return TRUE;
-    if (outsideShape[y][x] && !shapeEdge[y][x])
-        return FALSE;
-    return grid[y][x] != PATH;
-}
-
-// La regla, en orden: si por debajo se ve suelo manda el filo; si no, si se
-// ve suelo a la derecha, el canto; si no, el relleno.
-static void applyAutotile(void)
+// La trama de cada muro, al cerrar la generacion.
+static void applyWallArt(void)
 {
     s16 x, y;
 
     for (y = 0; y < MAZE_H; y++)
         for (x = 0; x < MAZE_W; x++)
-        {
-            if (grid[y][x] == PATH)
-                continue;
-            if (!drawnWall(x, y + 1))
-                grid[y][x] = wallVariant(x, y, TILE_FILO, FILO_VAR_BASE, FILO_VAR_COUNT);
-            else if (!drawnWall(x + 1, y))
-                grid[y][x] = wallVariant(x, y, TILE_CANTO, CANTO_VAR_BASE, CANTO_VAR_COUNT);
-            else
-                grid[y][x] = TILE_LISO;
-        }
+            if (grid[y][x] != PATH)
+                grid[y][x] = (u8) (CELL_MURO_BASE + cellVariant(x, y, CELL_MURO_COUNT));
 }
 
 // The room's own hub doubles as the player's spawn point in the very
@@ -314,9 +265,14 @@ static u8 tomboOpposite(u8 dir)
 // deterministic per roomSeed), then TOMBO_FALLBACK_ATTEMPTS more drawn
 // from a seed that depends on NOTHING but this file -- so if every
 // roomSeed-derived attempt fails, the outcome is a pure function of the
-// door layout (which doors, and where), a domain small enough to have
-// been verified exhaustively host-side (every door subset x every legal
-// offset combination = ~25k inputs, all of them succeed).
+// door layout (which doors, and where), un dominio bastante pequeno para
+// recorrerlo entero en el anfitrion: 57.541 repartos de puerta x posicion
+// con los ocho tamanos de main.c, probados con dos semillas cada uno, y 23
+// de ellos (el 0,04%) acaban en el relleno trivial. Todas son salas de 3 o 4 puertas en las de menos de
+// 11 celdas de alto, y subir este numero no las arregla (probado a 223 y a
+// 191+32: 44 y 45) -- no es mala suerte, es que a ese tamano esas puertas
+// no dan sala. El tope lo pone el byte de la cache de intentos:
+// 2*TOMBO_STRICT_ATTEMPTS + TOMBO_FALLBACK_ATTEMPTS <= 255.
 #define TOMBO_STRICT_ATTEMPTS         16 // per puzzle tier
 #define TOMBO_FALLBACK_ATTEMPTS       200
 #define TOMBO_FALLBACK_SEED           0x5A17
@@ -1970,14 +1926,26 @@ s16 Maze_originPxY(void)
     return (s16) (MAZE_ORIGIN_PX + (((MAZE_MAX_H - roomH) / 2) * MAZE_TILE_PX));
 }
 
+// En teselas de 8 px: la celda son 2x2, asi que el margen del centrado va
+// doblado igual que las celdas de dentro.
 u16 Maze_originColumn(void)
 {
-    return (u16) ((MAZE_MAX_W - roomW) / 2);
+    return (u16) (((MAZE_MAX_W - roomW) / 2) * 2);
 }
 
 u16 Maze_originRow(void)
 {
-    return (u16) (MAZE_ORIGIN_ROW + ((MAZE_MAX_H - roomH) / 2));
+    return (u16) (MAZE_ORIGIN_ROW + (((MAZE_MAX_H - roomH) / 2) * 2));
+}
+
+u16 Maze_cellColumn(s16 cx)
+{
+    return (u16) (Maze_originColumn() + (cx * 2));
+}
+
+u16 Maze_cellRow(s16 cy)
+{
+    return (u16) (Maze_originRow() + (cy * 2));
 }
 
 // Independent of the room's shape again, now that a shape is rolled per
@@ -2029,10 +1997,10 @@ static bool tomboTryCode(u16 code, s16 hubX, s16 hubY, u8 doorMask, const u8 doo
 // then the middle tier, then the fixed-seed no-puzzle ones -- see the tier
 // comments above), stopping at the first the validator accepts. FALSE only
 // if every one is rejected -- the caller (Maze_generateRoom) then falls
-// back to a trivial open interior (never observed: see the exhaustive host
-// fuzz in TOMBO_FALLBACK_ATTEMPTS's comment). If cacheSlot already holds an
-// accepted code, only that attempt is replayed (same room, no search, no
-// validation).
+// back to a trivial open interior (0,04% de los repartos de puertas: ver
+// el recorrido exhaustivo en el comentario de TOMBO_FALLBACK_ATTEMPTS).
+// If cacheSlot already holds an accepted code, only that attempt is
+// replayed (same room, no search, no validation).
 // useFixedWall/fixedWallVariant let the insertion room keep its own
 // uniform look (spec §27) under tombo too. spawnAtHub additionally
 // requires the insertion room's spawn point (the hub) to be a working
@@ -2224,7 +2192,7 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
     if (tomboOk)
         tomboRebuildGraph(doorMask, doorOffsets, ROOM_SEED_COL, ROOM_SEED_ROW, FALSE);
 
-    applyAutotile();
+    applyWallArt();
 
     // Maze_isPlantSafe's inputs changed; it recomputes on the next query.
     plantSafeDirty = TRUE;
@@ -2236,11 +2204,11 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
 // Fixed dither cell used throughout the insertion room (spec §27) -- any
 // single nonzero value works exactly as far as carveLPath is concerned (it
 // only ever distinguishes PATH=0 from "not yet carved"), so this just picks
-// one deliberately instead of the usual randomWallVariant() mix, giving the
+// one deliberately instead of the usual applyWallArt() mix, giving the
 // room a uniform, deliberately distinct look. Never re-coloured
 // (spec §18 doesn't apply -- this room lives outside the grid/tree
 // entirely, so wallHueBase is left untouched here).
-#define INSERT_WALL_VARIANT TILE_LISO
+#define INSERT_WALL_VARIANT (CELL_MURO_BASE + 4)
 
 // Punches a room's 2-cell-wide door open on grid border dir, at anchor
 // (ax,ay) -- shared by both of the insertion room's doors (spec §36) so
@@ -2442,7 +2410,7 @@ void Maze_drawProgressBar(u16 x, u16 y, u16 w, u16 filled)
 
     for (i = 0; i < w; i++)
         VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE,
-                                              (u16) (BASE_TILE + ((i < filled) ? TILE_LISO : TILE_SUELO))),
+                                              (u16) (BASE_TILE + ((i < filled) ? TILE_SOLIDO : TILE_SUELO))),
                          (u16) (x + i), y);
 }
 
@@ -2482,25 +2450,15 @@ void Maze_drawDebugGraph(void);
 
 void Maze_draw(void)
 {
-    // The whole screen is built in RAM and handed to the VDP as ONE DMA
-    // transfer (user request: the room change stalled). It used to be 12
-    // separate CPU transfers of one maze row each -- 1920 bytes poked
-    // through the data port a word at a time, with the FIFO stalling the
-    // 68000 on every one of them for as long as the display is active.
-    // DMA moves the same bytes several times faster and costs one call.
+    // La pantalla entera se arma en RAM y se le da al VDP en una sola DMA
+    // (peticion del usuario: el cambio de sala se atascaba). Antes eran doce
+    // transferencias de CPU, una por fila, con el FIFO parando al 68000 en
+    // cada una mientras el haz dibuja.
     //
-    // The buffer covers the HUD's band too (rows 0..MAZE_ORIGIN_ROW-1),
-    // left as tile 0: the room doesn't reach up there any more, but
-    // whatever was on BG_A -- the guide-map overlay, the static, a debug
-    // screen -- would still be sitting in it, and this is what every one
-    // of those is undone by. Those rows are never written after this
-    // file's own zero-init, so clearing them costs nothing per call.
-    // Always the full 320x224 tilemap, whatever size the room is: a room
-    // smaller than 40x24 is centred (Maze_originColumn/Row) and the
-    // margin around it has to be cleared to tile 0 for the same reason
-    // the HUD band does -- whatever was on BG_A before is still sitting
-    // there otherwise.
-    static u16 plane[MAZE_ORIGIN_ROW + MAZE_MAX_H][MAZE_MAX_W];
+    // Cubre tambien la banda del HUD y el margen de una sala mas pequena que
+    // la pantalla, dejados en la tesela 0: ahi puede haber quedado el mapa,
+    // el ruido o una pantalla de depuracion, y esto es lo unico que lo borra.
+    static u16 plane[MAZE_ORIGIN_ROW + (MAZE_MAX_H * 2)][MAZE_MAX_W * 2];
     const u16 ox = Maze_originColumn();
     const u16 oy = Maze_originRow();
     s16 x, y;
@@ -2509,37 +2467,35 @@ void Maze_draw(void)
 
     for (y = 0; y < MAZE_H; y++)
     {
-        u16 *const row = plane[oy + y];
+        u16 *const arriba = plane[oy + (y * 2)];
+        u16 *const abajo = plane[oy + (y * 2) + 1];
 
         for (x = 0; x < MAZE_W; x++)
         {
-            // Cut away by the room's shape and not on its silhouette:
-            // leave the plane's own blank tile there, same as the margin
-            // around a room smaller than the screen.
+            // Recortada por la forma de la sala y no en su silueta: se queda
+            // la tesela en blanco, igual que el margen de alrededor.
             if (outsideShape[y][x] && !shapeEdge[y][x])
                 continue;
 
-            // A cell is one VDP tile now, so the tile index IS the cell
-            // value offset by the tileset's base.
             {
-            const u8 cell = grid[y][x];
-            // Las de canto son reborde IZQUIERDO del arte: el volteo es un bit
-            // del mapa de la plana, no una tesela mas en VRAM.
-            const bool volteada = (cell >= CANTO_VAR_BASE) &&
-                                  (cell < (CANTO_VAR_BASE + CANTO_VAR_COUNT));
-            const u16 t = (u16) (BASE_TILE + cell);
-            // Locked doors (user request) render with PAL3 (yellow, see
-            // menu.c's LOCKED_DOOR_INK_INDEX) instead of PAL0 -- same tile,
-            // same dither shape, just a different palette slot.
+            const u16 tl = (u16) (BASE_TILE + (2 * grid[y][x]));
+            const u16 bl = (u16) (tl + MAZE_SHEET_ROW);
+            const u16 i = (u16) (ox + (x * 2));
+            // Las puertas cerradas (peticion del usuario) van en PAL3
+            // (amarillo, menu.c LOCKED_DOOR_INK_INDEX): misma trama, otra
+            // paleta.
             const u8 pal = lockedDoorCell[y][x] ? PAL3 : PAL0;
 
-            row[ox + x] = TILE_ATTR_FULL(pal, 0, FALSE, volteada, t);
+            arriba[i] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tl);
+            arriba[i + 1] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tl + 1);
+            abajo[i] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, bl);
+            abajo[i + 1] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, bl + 1);
             }
         }
     }
 
-    VDP_setTileMapDataRect(BG_A, &plane[0][0], 0, 0, MAZE_MAX_W,
-                            MAZE_ORIGIN_ROW + MAZE_MAX_H, MAZE_MAX_W, DMA);
+    VDP_setTileMapDataRect(BG_A, &plane[0][0], 0, 0, MAZE_MAX_W * 2,
+                            MAZE_ORIGIN_ROW + (MAZE_MAX_H * 2), MAZE_MAX_W * 2, DMA);
 
     if (debugEdgesVisible)
     {
@@ -2711,7 +2667,7 @@ void Maze_drawDebugGraph(void)
     u16 i;
 
     for (i = 0; i < slideCount; i++)
-        VDP_drawText(".", (u16) (Maze_originColumn() + slideNodeX[i]), (u16) (Maze_originRow() + slideNodeY[i]));
+        VDP_drawText(".", Maze_cellColumn(slideNodeX[i]), Maze_cellRow(slideNodeY[i]));
 }
 
 // Toggled by its own debug combo (user request: "haz un modo debug nuevo,
@@ -2767,7 +2723,7 @@ void Maze_drawDebugEdges(void)
                 const s16 hi = (slideNodeX[i] < slideNodeX[t]) ? slideNodeX[t] : slideNodeX[i];
 
                 for (a = lo; a <= hi; a++)
-                    VDP_drawText("-", (u16) (Maze_originColumn() + a), (u16) (Maze_originRow() + slideNodeY[i]));
+                    VDP_drawText("-", Maze_cellColumn(a), Maze_cellRow(slideNodeY[i]));
             }
             else // N/S: same column
             {
@@ -2775,7 +2731,7 @@ void Maze_drawDebugEdges(void)
                 const s16 hi = (slideNodeY[i] < slideNodeY[t]) ? slideNodeY[t] : slideNodeY[i];
 
                 for (b = lo; b <= hi; b++)
-                    VDP_drawText("|", (u16) (Maze_originColumn() + slideNodeX[i]), (u16) (Maze_originRow() + b));
+                    VDP_drawText("|", Maze_cellColumn(slideNodeX[i]), Maze_cellRow(b));
             }
         }
     }

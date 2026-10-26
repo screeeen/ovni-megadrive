@@ -3,96 +3,91 @@
 
 #include <genesis.h>
 
-// One enemy per room (user request: "en cada habitación 1 enemigo"),
-// placeholder sprite (enemyShip, already in resources.res). It patrols a
-// single straight lane hugging one of the room's own walls -- one border
-// row/column, picked at spawn -- sliding back and forth along it and
-// bouncing off whatever it runs into (the room's own corners, an
-// obstacle, a sealed door), same collision-driven bounce player.c's own
-// movePlayer() uses. The axis never changes after spawn: a
-// DIR_UP/DIR_DOWN enemy only ever flips between those two, a
-// DIR_LEFT/DIR_RIGHT one only between those.
+// Varios enemigos por sala y de especies distintas (peticion del usuario:
+// "muchos mas enemigos distintos de forma que el gameplay sea
+// interesante"). Cada especie tiene su propia forma de moverse, su propia
+// velocidad y su propio reparto entre peligrosa y vulnerable; cuantos hay
+// y cuantas especies se mezclan lo decide el planeta (main.c,
+// enemiesPerRoom/enemySpeciesCap).
 //
-// Two states, cycling on a timer (user request, placeholder distinction --
-// main.c tints the shared sprite by state, no separate art):
-// ENEMY_DANGEROUS kills the player on contact; ENEMY_VULNERABLE lets the
-// player kill IT on contact instead ("atropellarlo", melee by running
-// into it). Toggles every ENEMY_STATE_FRAMES regardless of the player --
-// not triggered by anything the player does. WHERE in that cycle an enemy
-// is when the ship walks in is drawn fresh every time (user request: "el
-// estado de la fase de vulnerabilidad de los enemigos tiene que ser
-// aleatoria cuando la nave entra en la room, no siempre la misma"), so
-// the same room never greets you the same way twice.
+// Lo que NO cambia respecto al enemigo unico de antes: donde aparecen es
+// determinista por roomSeed (la misma sala siempre trae los mismos), la
+// fase del parpadeo sale del random() compartido (la sala no te recibe
+// igual dos veces), ninguno aparece en la trayectoria de entrada o salida
+// de una puerta, y ninguno vuelve si lo mataste.
+//
+// El orden del enum es el de los fotogramas de enemyShip
+// (tools/enemy_tiles.py): 2*especie el peligroso, 2*especie+1 el
+// vulnerable. La forma es la senal de estado, el color solo acompana.
+typedef enum
+{
+    ESP_PATRULLA,   // carril recto pegado a un muro, rebota -- el de siempre
+    ESP_TORRETA,    // quieta, casi siempre peligrosa: un obstaculo con ventana
+    ESP_RONDA,      // da la vuelta al perimetro interior, gira en las esquinas
+    ESP_ACECHO,     // avanza una celda hacia la nave cada vez que la nave se para
+    ESP_DESLIZA,    // se desliza hasta el muro como la nave; vulnerable solo al pararse
+    ESP_ESPECTRO,   // atraviesa muros, se reorienta hacia la nave, casi siempre vulnerable
+    ENEMY_SPECIES_COUNT
+} EnemySpecies;
+
+// Cuantos caben en una sala: la mascara de muertos de guidemap es un u8.
+#define ENEMIES_MAX 6
+
 typedef enum { ENEMY_DANGEROUS, ENEMY_VULNERABLE } EnemyState;
 
-// How long each state lasts (user request: "parpadea solo, por tiempo",
-// then shortened -- "ese intervalo entre que es y no es vulnerable tiene
-// que ser un poco mas corto").
-#define ENEMY_STATE_FRAMES 100 // 1.67s at 60fps, was 150
-
-// How many frames a killed enemy blinks before actually disappearing
-// (placeholder "death animation" -- user request, no real art needed).
+// Parpadeo de muerte (marcador de posicion, sin arte propio).
 #define ENEMY_DEATH_BLINK_FRAMES 24
-#define ENEMY_DEATH_BLINK_PERIOD 4 // toggle visibility every this many frames
+#define ENEMY_DEATH_BLINK_PERIOD 4
 
 typedef struct
 {
-    s16 x;              // pixel position, top-left of the 16x16 box -- same convention as Player
+    s16 x;              // esquina de la caja de una celda, como Player
     s16 y;
-    u8 dir;             // DIR_UP/DOWN/LEFT/RIGHT (player.h) -- fixed axis, only ever flips to its opposite
-    EnemyState state;
-    u16 stateTimer;     // counts up to ENEMY_STATE_FRAMES, then flips state and resets
-    bool alive;         // FALSE once the player has killed it (melee, spec below) -- stops updating/colliding
-    u16 deathTimer;      // counts up during the death blink; alive stays TRUE until it reaches 0 (see Enemy_update)
+    u8 species;         // EnemySpecies
+    u8 dir;             // DIR_UP/DOWN/LEFT/RIGHT (player.h)
+    u8 state;           // EnemyState
+    u8 tick;            // divisor de velocidad, para las especies lentas
+    u8 glide;           // px que le quedan al paso de celda en curso (ESP_ACECHO)
+    u8 pause;           // fotogramas parado entre deslizamientos (ESP_DESLIZA)
+    bool sawRest;       // la nave estaba parada el frame anterior (ESP_ACECHO)
+    bool alive;
+    u16 stateTimer;
+    u16 rng;            // su propio azar: no toca el random() compartido
+    u16 aimTimer;       // cada cuanto se reorienta (ESP_ESPECTRO)
+    u16 deathTimer;
 } Enemy;
 
-// Picks the patrol lane (one of the 4 border-adjacent rows/columns) and a
-// starting position along it deterministically from roomSeed -- same
-// persistence philosophy as the room's own layout (Maze_generateRoom):
-// same seed, same enemy, every time this room loads. Always spawns alive,
-// ENEMY_DANGEROUS, timer reset. Caller must have already generated the
-// room's maze (this searches Maze_isWall for an open starting cell along
-// the chosen lane).
-// doorN/E/S/W and doorOffsets[4] (spec §30, same values/index convention
-// maze.c's own Maze_generateRoom takes -- 0=N,1=E,2=S,3=W -- passed
-// straight through rather than #including guidemap.h here, same reasoning
-// as maze.h's own doorDir comment) describe this room's active doors: user
-// request "un enemigo no puede estar en la trayectoria de entrada o salida
-// de una room" -- for each active door this traces the straight line a
-// ship slides along right after crossing it (and, symmetrically, right
-// before leaving through it) out to the first wall, and keeps the enemy's
-// entire patrol -- not just its spawn point -- off every cell on any of
-// those lines, so it can never be sitting exactly where the player is
-// about to arrive or has to stand to leave. See enemy.c's own
-// markDoorTrajectory.
-void Enemy_spawnForRoom(Enemy *e, u16 roomSeed, bool doorN, bool doorE, bool doorS, bool doorW,
-                         const u8 doorOffsets[4]);
+// Llena list[0..count-1] para esta sala. speciesCap es cuantas especies
+// entran en el sorteo (las primeras del enum, main.c las abre por planeta);
+// las que salen son consecutivas desde una base sacada de roomSeed, asi que
+// mientras count <= speciesCap no se repite ninguna en la misma sala.
+// killedMask lleva un bit por indice ya muerto (guidemap): esos quedan con
+// alive FALSE y deathTimer 0 sin volver a aparecer. Un indice sin sitio
+// legal queda igual, asi que main.c lo reconoce por no estar en killedMask
+// y lo apunta como muerto para que la sala pueda completarse.
+// doorN/E/S/W y doorOffsets[4] (0=N,1=E,2=S,3=W) son las puertas activas:
+// de cada una se traza la recta por la que la nave entra y sale, y esas
+// celdas quedan prohibidas para siempre -- no solo al aparecer, tambien
+// hacen de muro para todas las especies, incluido el espectro. Son los
+// pasillos seguros, y es lo que hace jugable una sala con seis.
+void Enemy_spawnGroup(Enemy *list, u8 count, u8 speciesCap, u8 killedMask, u16 roomSeed,
+                       bool doorN, bool doorE, bool doorS, bool doorW,
+                       const u8 doorOffsets[4]);
 
-// Advances the enemy one pixel along its fixed axis, bouncing on
-// collision, and ticks its state/death timers. No-op once e->alive is
-// FALSE and its death blink has finished (see Enemy_isGone).
-void Enemy_update(Enemy *e);
+// Un fotograma de uno. playerX/playerY es la esquina de la caja de la nave
+// y playerResting si no se movio en el fotograma anterior: las dos las usan
+// el acecho y el espectro para apuntar.
+void Enemy_update(Enemy *e, s16 playerX, s16 playerY, bool playerResting);
 
-// Starts the death blink (user request: melee-killed enemies get a
-// placeholder animation, not just an instant vanish) -- e->alive stays
-// TRUE while it plays (Enemy_update keeps ticking deathTimer down),
-// Enemy_isGone() flips TRUE once it's over. Stops movement/state-cycling
-// immediately (Enemy_update's own early-out).
 void Enemy_kill(Enemy *e);
-
-// TRUE once a killed enemy's death blink has finished -- main.c hides its
-// sprite for good at that point instead of every frame during the blink
-// (which toggles visibility itself, see Enemy_blinkVisible).
 bool Enemy_isGone(const Enemy *e);
-
-// TRUE if the enemy should be drawn as visible THIS frame -- always TRUE
-// while alive and not dying, toggles every ENEMY_DEATH_BLINK_PERIOD
-// frames during the death blink. Meaningless once Enemy_isGone() is TRUE.
 bool Enemy_blinkVisible(const Enemy *e);
-
-// Same 16x16 AABB overlap test as Items_tryCollect uses for the letter --
-// the enemy "sprite" is checked at the same box size as everything else
-// in this game.
 bool Enemy_overlapsBox(const Enemy *e, s16 boxX, s16 boxY);
+
+// Fotograma de enemyShip que le toca: forma de la especie y estado.
+u8 Enemy_frame(const Enemy *e);
+
+// Tres letras, para la vista de datos.
+const char *Enemy_speciesTag(u8 species);
 
 #endif

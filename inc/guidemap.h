@@ -30,16 +30,13 @@ typedef struct
     u8 doorS  : 1;
     u8 doorW  : 1;
     u8 visited: 1;
-    // TRUE once this room's enemy has been killed by the player (user
-    // request: "los enemigos no reaparecen, si los matas en una room no
-    // vuelven a aparecer en esa room") -- checked by main.c's loadRoom()
-    // every time this room is (re)entered: an enemy is only ever spawned
-    // if this is still FALSE. Persists for the rest of the run (reset only
-    // by clearMap(), i.e. a new game or the menu resetting the whole map),
-    // same lifetime as `visited` above. Read/written via
-    // GuideMap_isEnemyDead/GuideMap_markEnemyDead so main.c doesn't need
-    // to know the MapCell layout.
-    u8 enemyDead: 1;
+    // Que enemigos de esta sala estan ya muertos, un bit por indice
+    // (peticion del usuario: "los enemigos no reaparecen"). Era un solo
+    // bit cuando habia un enemigo por sala; ahora hay varios y cada uno
+    // tiene que recordarse por separado. Dura toda la partida (solo lo
+    // borra clearMap()), igual que `visited`. Se lee y se escribe por
+    // GuideMap_enemyKilledMask/GuideMap_markEnemyKilled.
+    u8 enemyKilled;
     // Where each active door sits along its border (spec §30): a maze
     // column (for doorN/doorS) or maze row (for doorE/doorW), in
     // MAZE_TILE_PX cell units -- no longer always the room's own center.
@@ -154,12 +151,11 @@ void GuideMap_recomputeLocks(void);
 
 bool GuideMap_isRoomLocked(u8 col, u8 row);
 
-// See MapCell's own enemyDead field doc comment above: TRUE once (col,row)'s
-// enemy has been killed, in which case main.c's loadRoom() must not spawn a
-// new one there. GuideMap_markEnemyDead() is main.c's own call, right when
-// a melee kill lands.
-bool GuideMap_isEnemyDead(u8 col, u8 row);
-void GuideMap_markEnemyDead(u8 col, u8 row);
+// La mascara de muertos de (col,row): un bit por indice de enemigo, que
+// main.c pasa a Enemy_spawnGroup para que no vuelva ninguno de ellos.
+// GuideMap_markEnemyKilled la escribe en cuanto cae un melee.
+u8 GuideMap_enemyKilledMask(u8 col, u8 row);
+void GuideMap_markEnemyKilled(u8 col, u8 row, u8 index);
 
 // Snapshots/restores those bits whole, the same way plants.c's own
 // Plants_saveMask/restoreMask do for collected plants (user request: "si
@@ -173,7 +169,7 @@ void GuideMap_markEnemyDead(u8 col, u8 row);
 // back after dying still shows the ground they covered (user request:
 // "tiene que ensenar al jugador que vuelve a terminar el planeta su
 // progreso en el mapa"). GuideMap_generate() clears `visited` along with
-// everything else, so like enemyDead it has to travel in the save.
+// everything else, so like enemyKilled it has to travel in the save.
 //
 // One BIT per room rather than one byte: MAX_MAP_COLS is 10, so a row
 // fits in a u16 and a whole planet costs 16 bytes instead of 80 -- this
@@ -181,8 +177,8 @@ void GuideMap_markEnemyDead(u8 col, u8 row);
 void GuideMap_saveVisited(u16 out[MAX_MAP_ROWS]);
 void GuideMap_restoreVisited(const u16 in[MAX_MAP_ROWS]);
 
-void GuideMap_saveEnemyDead(bool out[MAX_MAP_ROWS][MAX_MAP_COLS]);
-void GuideMap_restoreEnemyDead(const bool in[MAX_MAP_ROWS][MAX_MAP_COLS]);
+void GuideMap_saveEnemyKilled(u8 out[MAX_MAP_ROWS][MAX_MAP_COLS]);
+void GuideMap_restoreEnemyKilled(const u8 in[MAX_MAP_ROWS][MAX_MAP_COLS]);
 
 // Uploads the overlay tileset to VRAM (right after maze.c's tileset --
 // see MAZE_TILE_COUNT) and sets up PAL2 for the current-room highlight.

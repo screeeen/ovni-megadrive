@@ -79,8 +79,9 @@ static u8 tombSpeedIdx; // where the current slide is on tombRamp
 // mas grande sea el planeta, mas grande es la habitacion... me gustaria
 // probar con distintas geometrias"). The room footprint used to be the
 // same fixed 20x12 box everywhere; it now grows with the planet, from
-// 16x10 on the 1x1 test planet up to the full screen (MAZE_MAX_W x
-// MAZE_MAX_H = 40x24) on the outermost one, and each planet gets its own
+// 12x7 on the 1x1 test planet up to the full screen (MAZE_MAX_W x
+// MAZE_MAX_H = 20x12, la celda vuelve a ser de 16 px) on the outermost
+// one, and each planet gets its own
 // shape rolled per room by maze.c (Maze_setRoomSize's last column is how
 // many cuts a room may take: 0 = plain boxes).
 // Each planet's MAP drawn in ASCII, one string per row: '#' is a room,
@@ -150,15 +151,17 @@ typedef struct { const char *const *map; u8 cols, rows, letters, roomW, roomH, v
 // generateRoomTombo already handles like any other. Set as the new
 // default planet (SIZE_PRESET_DEFAULT below) so starting a game goes
 // straight into it.
+// La rampa de tamanos es la de antes partida por dos, porque la celda
+// vuelve a medir 16 px: en pixeles la sala es exactamente la misma.
 static const SizePreset sizePresets[] = {
-    { map0,  1, 1, 1, 16, 10, 0 },
-    { map1,  4, 3, 1, 20, 12, 1 },
-    { map2,  6, 4, 2, 24, 14, 2 },
-    { map3,  6, 4, 3, 28, 16, 2 },
-    { map4,  7, 5, 4, 30, 18, 3 },
-    { map5,  8, 6, 5, 34, 20, 3 },
-    { map6,  8, 6, 5, 36, 22, 4 },
-    { map7, 10, 8, 5, 40, 24, 4 },
+    { map0,  1, 1, 1, 12,  7, 0 },
+    { map1,  4, 3, 1, 13,  8, 1 },
+    { map2,  6, 4, 2, 14,  9, 2 },
+    { map3,  6, 4, 3, 15, 10, 2 },
+    { map4,  7, 5, 4, 16, 10, 3 },
+    { map5,  8, 6, 5, 17, 11, 3 },
+    { map6,  8, 6, 5, 18, 12, 4 },
+    { map7, 10, 8, 5, 20, 12, 4 },
 };
 // Must equal menu.h's MENU_PLANET_COUNT (spec §31) -- sizePresetIndex
 // (0..SIZE_PRESET_COUNT-1) is passed straight into Menu_update() as the
@@ -197,15 +200,25 @@ static const SizePreset sizePresets[] = {
 // 2x this at 60fps.
 #define MAP_BLINK_FRAMES 30
 
-// One enemy per room (user request), PAL2 (enemyShip's own palette, also
-// reused by the menu's "completed planet" yellow -- COMPLETED_INK_INDEX in
-// menu.c -- the two never show at once, same sharing the map-ship ink
-// index already relies on). Its ink swaps between these two colors as a
-// placeholder for the "dangerous"/"vulnerable" states (enemy.h) -- no
-// separate sprite art needed, same override trick as PLAYER_SHIP_INK_INDEX.
-#define ENEMY_INK_INDEX ((PAL2 * 16) + 1)
-#define ENEMY_DANGEROUS_COLOR RGB24_TO_VDPCOLOR(0xFF3030)
-#define ENEMY_VULNERABLE_COLOR RGB24_TO_VDPCOLOR(0x30FF90)
+// Varios enemigos por sala y de especies distintas (enemy.h). El estado
+// peligroso/vulnerable ya no es un cambio de color de PAL2 -- con seis
+// enemigos a la vez cada uno tiene que decir el suyo por su cuenta, y la
+// paleta es una sola -- sino un fotograma propio del sprite: macizo cuando
+// mata, hueco con el nucleo blanco cuando se le puede atropellar. La forma
+// es la senal y el color solo acompana, asi que tambien se lee sin color.
+// enemyShip trae la paleta entera de PAL2: 2..7 una tinta por especie y el
+// 8 el blanco del nucleo. Los indices 1 (amarillo de planeta completado,
+// menu.c) y 15 ("BACK TO SPACE", RETURN_MSG_INK_INDEX) siguen libres y el
+// arte no los usa.
+//
+// Cuantos enemigos lleva cada sala y cuantas especies se mezclan, por
+// planeta (indices de sizePresets[]): es la rampa de dificultad, y los dos
+// numeros de abajo son el mando. count <= cap en todos, asi que una sala
+// nunca repite especie.
+static const u8 enemiesPerRoom[]  = { 2, 3, 3, 4, 5, 5, 6, 6 };
+static const u8 enemySpeciesCap[] = { 2, 3, 4, 5, 6, 6, 6, 6 };
+_Static_assert(sizeof enemiesPerRoom == SIZE_PRESET_COUNT, "enemiesPerRoom necesita una entrada por planeta");
+_Static_assert(sizeof enemySpeciesCap == SIZE_PRESET_COUNT, "enemySpeciesCap necesita una entrada por planeta");
 
 // Screenshake (user request: "un ligero screenshake cuando la nave golpea
 // muros o enemigos", refined further: "tiene que ser sutil, dura medio
@@ -231,22 +244,14 @@ static Player player;
 static Sprite *playerSprite;
 static Sprite *mapShipSprite;
 static Sprite *itemIconSprite;   // el icono 16x16 del objeto de esta sala, ver updateItemIcon
-static Enemy enemy;
-static Sprite *enemySprite;
+static Enemy enemies[ENEMIES_MAX];
+static Sprite *enemySprites[ENEMIES_MAX];
+// Que fotograma lleva puesto cada uno: SPR_setFrame resube sus teselas, asi
+// que solo se llama cuando cambia de verdad (igual que squashShown).
+static u8 enemyFrameShown[ENEMIES_MAX];
 // Que fotograma esta puesto. A fichero y no dentro de updateSquash porque
 // setShipArt tiene que invalidarlo: SPR_setDefinition rearma el sprite al 0.
 static u8 squashShown = 0xFF;
-
-// LOS CUATRO PRIMEROS PLANETAS llevan la nave y el enemigo de 16x16, los de
-// antes de que la celda pasara a 8 px (peticion del usuario). Son justo los de
-// habitacion pequena -- de 16x10 a 28x16 celdas -- donde la de 8x8 se queda
-// perdida en la pantalla. Cambia SOLO el dibujo: la caja de colision es la
-// celda (player.c, BOX), asi que el deslizamiento no se entera de nada.
-#define BIG_SHIP_PRESETS 4
-
-// Lo que se resta al pintar: la de 16x16 va centrada en la celda de 8, o sea
-// que sobresale 4 px por lado.
-static s16 shipDrawOffset = 0;
 
 #define IDLE_BOB_FRAMES 9
 static const s8 idleBob[6] = { 0, -1, -1, 0, 1, 1 };
@@ -258,20 +263,23 @@ static s16 shipBob(void)
     return (s16) idleBob[idleStep];
 }
 
-static void setShipArt(u8 preset)
+// La nave y los enemigos son los de 16x16 en todos los planetas: la celda
+// vuelve a medir 16 px, asi que ocupan exactamente una y no hay que
+// descentrarlos. El arte de 8x8 (playerShip/enemyShip) se queda sin usar.
+static void setShipArt(void)
 {
-    const bool big = (preset < BIG_SHIP_PRESETS);
-    bool puesta = FALSE;
+    u8 i;
 
-    // SPR_setDefinition realoja la VRAM del sprite el solo y devuelve FALSE si
-    // no cabe. El desplazamiento va atado a que la del jugador haya entrado:
-    // ponerlo con el arte viejo puesto descentraria el dibujo medio tile.
+    // SPR_setDefinition realoja la VRAM del sprite el solo.
     if (playerSprite)
-        puesta = SPR_setDefinition(playerSprite, big ? &playerShip16 : &playerShip);
-    if (enemySprite)
-        SPR_setDefinition(enemySprite, big ? &enemyShip16 : &enemyShip);
+        SPR_setDefinition(playerSprite, &playerShip16);
+    for (i = 0; i < ENEMIES_MAX; i++)
+        if (enemySprites[i])
+        {
+            SPR_setDefinition(enemySprites[i], &enemyShip16);
+            enemyFrameShown[i] = 0xFF; // el sprite nuevo viene en el 0 y la cache no lo sabe
+        }
 
-    shipDrawOffset = (big && puesta) ? -4 : 0;
     squashShown = 0xFF; // el sprite nuevo viene en el 0 y la cache no lo sabe
 }
 
@@ -604,12 +612,14 @@ typedef struct
     u8 collectedCount;
     u16 plantsCollected;
     u16 plantsMask[MAX_MAP_ROWS][MAX_MAP_COLS];
-    // Which rooms' enemies are already dead (user request: a planet being
-    // resumed keeps "sus enemigos ya desaparecidos"). Nothing else in this
-    // struct implies it -- a killed enemy leaves no trace in the letter or
-    // plant counters -- and GuideMap_generate() wipes the live bits every
-    // time a planet is set up, so they have to travel in the save.
-    bool enemyDead[MAX_MAP_ROWS][MAX_MAP_COLS];
+    // Which of each room's enemies are already dead, one bit per index
+    // (user request: a planet being resumed keeps "sus enemigos ya
+    // desaparecidos"). Nothing else in this struct implies it -- a killed
+    // enemy leaves no trace in the letter or plant counters -- and
+    // GuideMap_generate() wipes the live bits every time a planet is set
+    // up, so they have to travel in the save. Was one bool per room back
+    // when a room had one enemy; same size either way.
+    u8 enemyKilled[MAX_MAP_ROWS][MAX_MAP_COLS];
     // Rooms already walked into, one bit per room (guidemap.h's
     // GuideMap_saveVisited). Without this the map came back blank after
     // dying, so a player returning to finish a planet lost every bit of
@@ -668,8 +678,9 @@ static u32 scoreFor(u8 i)
 }
 
 // Rooms this planet's map really has (after guidemap's own leaf pruning),
-// and whether every one of their enemies is dead. The enemy count is one
-// per room by construction, so the two walk the same grid.
+// and how many of their enemies estan muertos. Ya no es uno por sala:
+// enemiesPerRoom[planeta] por sala, de ahi que los enemigos se cuenten
+// aparte de las salas.
 static u8 countPlanetRooms(void)
 {
     u8 col, row, n = 0;
@@ -682,25 +693,46 @@ static u8 countPlanetRooms(void)
     return n;
 }
 
-static u8 countDeadEnemies(void)
+// Cuantos enemigos lleva una sala de este planeta, y la mascara que los
+// cubre todos.
+static u8 roomEnemyCount(void)
 {
-    u8 col, row, n = 0;
+    return enemiesPerRoom[sizePresetIndex];
+}
+
+static u8 roomEnemyFullMask(void)
+{
+    return (u8) ((1u << roomEnemyCount()) - 1);
+}
+
+static u16 countDeadEnemies(void)
+{
+    u16 n = 0;
+    u8 col, row, i;
 
     for (row = 0; row < mapRows; row++)
         for (col = 0; col < mapCols; col++)
-            if ((guideMap[row][col].type == CELL_ROOM) && GuideMap_isEnemyDead(col, row))
-                n++;
+            if (guideMap[row][col].type == CELL_ROOM)
+            {
+                const u8 m = GuideMap_enemyKilledMask(col, row);
+
+                for (i = 0; i < ENEMIES_MAX; i++)
+                    if (m & (1u << i))
+                        n++;
+            }
 
     return n;
 }
 
 static bool allEnemiesDead(void)
 {
+    const u8 full = roomEnemyFullMask();
     u8 col, row;
 
     for (row = 0; row < mapRows; row++)
         for (col = 0; col < mapCols; col++)
-            if ((guideMap[row][col].type == CELL_ROOM) && !GuideMap_isEnemyDead(col, row))
+            if ((guideMap[row][col].type == CELL_ROOM) &&
+                ((GuideMap_enemyKilledMask(col, row) & full) != full))
                 return FALSE;
 
     return TRUE;
@@ -709,6 +741,50 @@ static bool allEnemiesDead(void)
 static u8 lettersFor(u8 i)
 {
     return presetSave[i].lettersActual ? presetSave[i].lettersActual : sizePresets[i].letters;
+}
+
+// Esconde los enemigos de golpe: lo piden todas las pantallas que tapan la
+// partida (el mapa, los dos visores, el game over, el menu).
+static void hideEnemySprites(void)
+{
+    u8 i;
+
+    for (i = 0; i < ENEMIES_MAX; i++)
+        SPR_setVisibility(enemySprites[i], HIDDEN);
+}
+
+// Posicion, fotograma y visibilidad de cada uno a partir de su estado. El
+// fotograma solo se toca cuando cambia de verdad: SPR_setFrame resube las
+// teselas del sprite.
+static void drawEnemySprites(void)
+{
+    u8 i;
+
+    if (inInsertRoom)
+    {
+        hideEnemySprites(); // la sala de insercion no tiene enemigos (spec §27)
+        return;
+    }
+
+    for (i = 0; i < ENEMIES_MAX; i++)
+    {
+        const Enemy *e = &enemies[i];
+
+        if (Enemy_isGone(e))
+        {
+            SPR_setVisibility(enemySprites[i], HIDDEN);
+            continue;
+        }
+
+        if (enemyFrameShown[i] != Enemy_frame(e))
+        {
+            enemyFrameShown[i] = Enemy_frame(e);
+            SPR_setFrame(enemySprites[i], enemyFrameShown[i]);
+        }
+        SPR_setPosition(enemySprites[i], (s16) (e->x + Maze_originPxX()),
+                        (s16) (e->y + Maze_originPxY()));
+        SPR_setVisibility(enemySprites[i], Enemy_blinkVisible(e) ? VISIBLE : HIDDEN);
+    }
 }
 
 // Deterministic per-room seed (spec §5): same (col,row) under the same
@@ -812,7 +888,7 @@ static void positionPlayerEnteringViaDoorDir(u8 doorDir, u8 offset)
 static void drawInsertRoomArrow(void)
 {
     char s[2] = { 0, '\0' };
-    const u16 ox = Maze_originColumn(); // a maze cell is one VDP tile now (maze.h)
+    const u16 ox = Maze_originColumn();
     const u16 oy = Maze_originRow();
     u16 tx, ty;
 
@@ -820,23 +896,23 @@ static void drawInsertRoomArrow(void)
     {
         case DOOR_N:
             s[0] = '^';
-            tx = (u16) (ox + insertLinkOffset);
-            ty = (u16) (oy + 2);
+            tx = Maze_cellColumn(insertLinkOffset);
+            ty = (u16) (oy + 4);
             break;
         case DOOR_S:
             s[0] = 'v';
-            tx = (u16) (ox + insertLinkOffset);
-            ty = (u16) (oy + MAZE_H - 3);
+            tx = Maze_cellColumn(insertLinkOffset);
+            ty = Maze_cellRow(MAZE_H - 3);
             break;
         case DOOR_E:
             s[0] = '>';
-            tx = (u16) (ox + MAZE_W - 3);
-            ty = (u16) (oy + insertLinkOffset);
+            tx = Maze_cellColumn(MAZE_W - 3);
+            ty = Maze_cellRow(insertLinkOffset);
             break;
         default: // DOOR_W
             s[0] = '<';
-            tx = (u16) (ox + 2);
-            ty = (u16) (oy + insertLinkOffset);
+            tx = (u16) (ox + 4);
+            ty = Maze_cellRow(insertLinkOffset);
             break;
     }
 
@@ -999,7 +1075,7 @@ static u16 scanPlanetPlantTotal(u8 presetIndex)
     Maze_setRoomSize(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
                      sizePresets[presetIndex].variety);
     Maze_setPlanetTint(presetIndex);   // el color de los muros de este planeta
-    setShipArt(presetIndex);           // la nave de 16x16 en los cuatro primeros
+    setShipArt();
     GuideMap_setShape(sizePresets[presetIndex].map, sizePresets[presetIndex].cols,
                       sizePresets[presetIndex].rows);
     GuideMap_generate();
@@ -1305,7 +1381,7 @@ static void introSetUpPlanet(u8 presetIndex)
     Maze_setRoomSize(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
                      sizePresets[presetIndex].variety);
     Maze_setPlanetTint(presetIndex);   // el color de los muros de este planeta
-    setShipArt(presetIndex);           // la nave de 16x16 en los cuatro primeros
+    setShipArt();
     GuideMap_setShape(sizePresets[presetIndex].map, sizePresets[presetIndex].cols,
                       sizePresets[presetIndex].rows);
     GuideMap_generate();
@@ -1875,33 +1951,33 @@ static void loadRoom(u8 col, u8 row)
 
     guideMap[row][col].visited = TRUE;
 
-    // One enemy per room (user request), same seed the room's own maze
-    // uses -- deterministic per room, same persistence philosophy as the
-    // layout itself (re-entering always spawns the identical enemy, same
-    // lane/position/direction). BUG FIX (user report: "los enemigos no
-    // reaparecen, si los matas en una room no vuelven a aparecer en esa
-    // room") -- a room whose enemy was already killed (GuideMap_markEnemyDead,
-    // called on a successful melee) never spawns a fresh one again: just
-    // mark it dead-on-arrival (alive/deathTimer both FALSE/0, so
-    // Enemy_isGone is immediately TRUE) and keep the sprite hidden, rather
-    // than calling Enemy_spawnForRoom at all.
-    if (GuideMap_isEnemyDead(col, row))
+    // Los enemigos de la sala (peticion del usuario: varios y de especies
+    // distintas), con el mismo roomSeed que el laberinto -- la sala trae
+    // siempre los mismos, en el mismo sitio, igual que su trazado. Los que
+    // ya mataste no vuelven: la mascara de guidemap entra en el sorteo y
+    // esos indices salen muertos. Un indice sin sitio legal (todas las
+    // celdas libres en un pasillo de puerta) sale muerto tambien, y se
+    // apunta como tal para que la sala pueda darse por limpia alguna vez.
     {
-        enemy.alive = FALSE;
-        enemy.deathTimer = 0;
-        SPR_setVisibility(enemySprite, HIDDEN);
-    }
-    else
-    {
-        Enemy_spawnForRoom(&enemy, seed, doorN, doorE, doorS, doorW, doorOffsets);
-        PAL_setColor(ENEMY_INK_INDEX, ENEMY_DANGEROUS_COLOR);
-        SPR_setPosition(enemySprite, enemy.x + Maze_originPxX() + shipDrawOffset,
-                    enemy.y + Maze_originPxY() + shipDrawOffset);
-        // Not always alive: a room with nowhere legal to put an enemy (every
-        // open cell on a door trajectory) gets none -- see Enemy_spawnForRoom.
-        SPR_setVisibility(enemySprite, enemy.alive ? VISIBLE : HIDDEN);
-    }
+        const u8 count = roomEnemyCount();
+        const u8 killed = GuideMap_enemyKilledMask(col, row);
+        u8 i;
 
+        for (i = 0; i < ENEMIES_MAX; i++)
+        {
+            enemies[i].alive = FALSE;
+            enemies[i].deathTimer = 0;
+        }
+
+        Enemy_spawnGroup(enemies, count, enemySpeciesCap[sizePresetIndex], killed, seed,
+                          doorN, doorE, doorS, doorW, doorOffsets);
+
+        for (i = 0; i < count; i++)
+            if (!enemies[i].alive && !(killed & (1u << i)))
+                GuideMap_markEnemyKilled(col, row, i);
+
+        drawEnemySprites();
+    }
 }
 
 // Room transition (spec §7): move to the neighboring cell, regenerate its
@@ -2001,7 +2077,7 @@ static void newGame(void)
     // accesible") -- holding A reads Items_collectedCount(), so a planet
     // whose letter A is already in hand shows the real overlay instead of
     // the static, death or no death.
-    GuideMap_restoreEnemyDead(save.enemyDead);
+    GuideMap_restoreEnemyKilled(save.enemyKilled);
     GuideMap_restoreVisited(save.visitedMask); // the map comes back as the player left it
     GuideMap_recomputeLocks(); // unlocks up through whichever letter is now due (spec §16)
 
@@ -2067,10 +2143,10 @@ static void newGame(void)
         case DOOR_E: player.dir = DIR_LEFT;  break;
         default:     player.dir = DIR_RIGHT; break; // DOOR_W
     }
-    SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
-                    player.y + Maze_originPxY() + shipDrawOffset + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+    SPR_setPosition(playerSprite, player.x + Maze_originPxX(),
+                    player.y + Maze_originPxY() + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
     SPR_setVisibility(playerSprite, VISIBLE);
-    SPR_setVisibility(enemySprite, HIDDEN); // no enemy in the insertion room (spec §27)
+    hideEnemySprites(); // no enemy in the insertion room (spec §27)
 }
 
 // Solar-system start menu (spec §31): each planet is one of
@@ -2142,7 +2218,8 @@ static void gameOverBegin(void)
     typeLine(buf, 11, 13);
     sprintf(buf, "LETTERS %3d OF %3d", Items_collectedCount(), lettersFor(p));
     typeLine(buf, 11, 15);
-    sprintf(buf, "ENEMIES %3d OF %3d", countDeadEnemies(), presetSave[p].scoreRooms);
+    sprintf(buf, "ENEMIES %3u OF %3u", countDeadEnemies(),
+            (u16) (presetSave[p].scoreRooms * enemiesPerRoom[p]));
     typeLine(buf, 11, 17);
     typeLine("SCORE", 11, GAMEOVER_SCORE_ROW);
 
@@ -2917,7 +2994,7 @@ static void resetToMenu(void)
         presetSave[sizePresetIndex].collectedCount = Items_collectedCount();
         presetSave[sizePresetIndex].plantsCollected = Plants_collectedCount(); // spec §51
         Plants_saveMask(presetSave[sizePresetIndex].plantsMask); // bug fix, see PresetSave's own doc comment
-        GuideMap_saveEnemyDead(presetSave[sizePresetIndex].enemyDead);
+        GuideMap_saveEnemyKilled(presetSave[sizePresetIndex].enemyKilled);
         GuideMap_saveVisited(presetSave[sizePresetIndex].visitedMask);
     }
 
@@ -2937,7 +3014,7 @@ static void resetToMenu(void)
 
     SPR_setVisibility(playerSprite, HIDDEN);
     SPR_setVisibility(mapShipSprite, HIDDEN);
-    SPR_setVisibility(enemySprite, HIDDEN);
+    hideEnemySprites();
 
     // Items_drawHud's letter tracker and drawInsertRoomStatus's message
     // (both BG_B, high priority) are only ever refreshed during gameplay
@@ -3174,13 +3251,16 @@ static void drawEntityHitbox(s16 x, s16 y)
 // leftover marks the moment it's turned off instead of waiting for this).
 static void drawCollisionGizmos(void)
 {
+    u8 i;
+
     if (!hitboxDebugOn || (gameState != STATE_PLAYING) || roomViewerOn || sweepOn)
         return;
 
     clearHitboxMarks();
     drawEntityHitbox(player.x, player.y);
-    if (enemy.alive)
-        drawEntityHitbox(enemy.x, enemy.y);
+    for (i = 0; i < ENEMIES_MAX; i++)
+        if (enemies[i].alive)
+            drawEntityHitbox(enemies[i].x, enemies[i].y);
 }
 
 // "PLANTA", the route to the nearest plant (see PLANTPATH_BUTTON's own
@@ -3287,8 +3367,8 @@ static void clearPlantPathMarks(void)
 static void markPlantPathCell(s16 cx, s16 cy, u8 dir)
 {
     static const char *const arrow[5] = { "^", ">", "v", "<", "o" }; // 4 = the route's own start cell
-    const u16 tx = (u16) (Maze_originColumn() + cx);
-    const u16 ty = (u16) (Maze_originRow() + cy); // room cells -> screen tiles, 1:1 now (maze.h)
+    const u16 tx = Maze_cellColumn(cx);
+    const u16 ty = Maze_cellRow(cy); // la celda son 2x2 teselas (maze.h)
 
     if (plantPathMarkCount >= PLANTPATH_MAX_MARKS)
         return;
@@ -3508,10 +3588,9 @@ static void drawPlantPath(void)
 // invisible against the backdrop, so between pulses there is simply
 // nothing there, and the pulse itself fades in and out instead of
 // snapping on.
-// El icono de 16x16 del objeto que aun esta en esta sala, centrado en su celda
-// de 8 (de ahi el -4, igual que shipDrawOffset con la nave grande). Una sola
-// llamada por frame decide si se ve: asi no hay que acordarse de esconderlo en
-// cada pantalla que tapa la partida.
+// El icono de 16x16 del objeto que aun esta en esta sala, que mide justo una
+// celda. Una sola llamada por frame decide si se ve: asi no hay que acordarse
+// de esconderlo en cada pantalla que tapa la partida.
 static void updateItemIcon(void)
 {
     static u16 frameShown = 0xFFFF;
@@ -3533,8 +3612,8 @@ static void updateItemIcon(void)
         SPR_setFrame(itemIconSprite, frameShown); // resube sus teselas: solo al cambiar
     }
     SPR_setPosition(itemIconSprite,
-                    (s16) ((MAZE_DOOR_COL * MAZE_TILE_PX) + Maze_originPxX() - 4),
-                    (s16) ((MAZE_DOOR_ROW * MAZE_TILE_PX) + Maze_originPxY() - 4));
+                    (s16) ((MAZE_DOOR_COL * MAZE_TILE_PX) + Maze_originPxX()),
+                    (s16) ((MAZE_DOOR_ROW * MAZE_TILE_PX) + Maze_originPxY()));
     SPR_setVisibility(itemIconSprite, VISIBLE);
 }
 
@@ -3771,7 +3850,7 @@ static void restoreLiveRoomAfterDebugScreen(void)
     PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR); // the map overlay left it white
     SPR_setVisibility(playerSprite, VISIBLE);
     SPR_setVisibility(mapShipSprite, HIDDEN);
-    SPR_setVisibility(enemySprite, Enemy_blinkVisible(&enemy) ? VISIBLE : HIDDEN);
+    drawEnemySprites();
     plantPathDirty = TRUE; // whatever PLANTA had cached is from before all this
 }
 
@@ -3790,7 +3869,7 @@ static void beginDebugScreen(void)
     mapShowingNoise = FALSE;
     SPR_setVisibility(playerSprite, HIDDEN);
     SPR_setVisibility(mapShipSprite, HIDDEN);
-    SPR_setVisibility(enemySprite, HIDDEN);
+    hideEnemySprites();
     PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR);
     clearPlantPathMarks();
 }
@@ -4610,14 +4689,24 @@ static void drawDebugView(void)
     VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 4);
 
     {
-        static const char *const enemyStateNames[] = { "DNG", "VUL" };
+        // Uno por hueco: las tres letras de la especie y D peligroso,
+        // V vulnerable, - ni esta.
+        char *w = buf;
+        u8 i;
 
-        sprintf(buf, "ENM A:%d ST:%s X:%d Y:%d",
-                enemy.alive, enemyStateNames[enemy.state], enemy.x, enemy.y);
+        for (i = 0; i < ENEMIES_MAX; i++)
+        {
+            const Enemy *e = &enemies[i];
+            const char st = Enemy_isGone(e) ? '-' : ((e->state == ENEMY_DANGEROUS) ? 'D' : 'V');
+
+            w += sprintf(w, "%s%c ", Enemy_speciesTag(e->species), st);
+        }
         VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 5);
     }
 
-    sprintf(buf, "ENM STMR:%d DTMR:%d GONE:%d", enemy.stateTimer, enemy.deathTimer, Enemy_isGone(&enemy));
+    sprintf(buf, "ENM MASK:%02X DEAD:%u/%u N:%d", GuideMap_enemyKilledMask(currentCol, currentRow),
+            countDeadEnemies(), (u16) (presetSave[sizePresetIndex].scoreRooms * roomEnemyCount()),
+            roomEnemyCount());
     VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 6);
 
     sprintf(buf, "ITM %d/%d ALL:%d", Items_collectedCount(), itemCount, Items_allCollected());
@@ -4701,10 +4790,19 @@ int main(bool hardReset)
     itemIconSprite = SPR_addSprite(&itemIcons, 0, 0, TILE_ATTR(PAL0, TRUE, FALSE, FALSE));
     SPR_setVisibility(itemIconSprite, HIDDEN);
 
-    // PAL2 is enemyShip's own palette (also reused by the menu's
-    // "completed planet" yellow -- ENEMY_INK_INDEX's own doc comment).
+    // PAL2 la trae entera enemyShip: una tinta por especie y el blanco del
+    // nucleo (ver enemiesPerRoom arriba). El menu le pisa el indice 1 y lo
+    // devuelve al salir, y "BACK TO SPACE" el 15.
     PAL_setPalette(PAL2, enemyShip.palette->data, DMA);
-    enemySprite = SPR_addSprite(&enemyShip, 0, 0, TILE_ATTR(PAL2, TRUE, FALSE, FALSE));
+    {
+        u8 i;
+
+        for (i = 0; i < ENEMIES_MAX; i++)
+        {
+            enemySprites[i] = SPR_addSprite(&enemyShip, 0, 0, TILE_ATTR(PAL2, TRUE, FALSE, FALSE));
+            enemyFrameShown[i] = 0;
+        }
+    }
 
     JOY_init();
 
@@ -4715,7 +4813,7 @@ int main(bool hardReset)
     gameState = STATE_INTRO;
     SPR_setVisibility(playerSprite, HIDDEN);
     SPR_setVisibility(mapShipSprite, HIDDEN);
-    SPR_setVisibility(enemySprite, HIDDEN);
+    hideEnemySprites();
     drawIntroPrompt();
 
     while (TRUE)
@@ -5116,7 +5214,7 @@ int main(bool hardReset)
                             // room-related.
                             SPR_setVisibility(playerSprite, HIDDEN);
                             SPR_setVisibility(mapShipSprite, HIDDEN);
-                            SPR_setVisibility(enemySprite, HIDDEN);
+                            hideEnemySprites();
                             PAL_setColor(PLAYER_SHIP_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF));
                             PSG_setNoise(PSG_NOISE_TYPE_WHITE, PSG_NOISE_FREQ_CLOCK2);
                             PSG_setEnvelope(3, 0); // 0 = loudest (PSG_ENVELOPE_MAX)
@@ -5144,7 +5242,7 @@ int main(bool hardReset)
                             PAL_setColor(PLAYER_SHIP_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFFFF));
                             SPR_setVisibility(playerSprite, HIDDEN);
                             SPR_setVisibility(mapShipSprite, VISIBLE);
-                            SPR_setVisibility(enemySprite, HIDDEN); // frozen with everything else while the map is open
+                            hideEnemySprites(); // frozen with everything else while the map is open
                             mapBlinkTimer = 0;
                         }
                     }
@@ -5238,8 +5336,7 @@ int main(bool hardReset)
                     // is still whatever the last real room left in it, so
                     // asking it whether to show the sprite would conjure
                     // one up in a room that never had one.
-                    SPR_setVisibility(enemySprite,
-                                       (!inInsertRoom && Enemy_blinkVisible(&enemy)) ? VISIBLE : HIDDEN);
+                    drawEnemySprites(); // esconde los suyos solo si es la sala de insercion
                     mapViewOpen = FALSE;
                     mapShowingNoise = FALSE;
                 }
@@ -5360,8 +5457,8 @@ int main(bool hardReset)
                     resetToMenu();
                 }
 
-                SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
-                    player.y + Maze_originPxY() + shipDrawOffset + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+                SPR_setPosition(playerSprite, player.x + Maze_originPxX(),
+                    player.y + Maze_originPxY() + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
             }
             else
             {
@@ -5384,18 +5481,19 @@ int main(bool hardReset)
                 bool playerDied = FALSE;
                 u8 step;
 
-                // Enemy moves once per visual frame (its own placeholder
-                // pace, see enemy.c), BEFORE the ship's own sub-step loop
-                // below -- so every one of this frame's collision checks
-                // sees the same, already-advanced enemy position. Its ink
-                // color is set every frame too (cheap, one PAL_setColor)
-                // rather than only on a state change, simplest way to keep
-                // it in sync with enemy.state.
-                Enemy_update(&enemy);
-                PAL_setColor(ENEMY_INK_INDEX, (enemy.state == ENEMY_DANGEROUS) ? ENEMY_DANGEROUS_COLOR : ENEMY_VULNERABLE_COLOR);
-                SPR_setPosition(enemySprite, enemy.x + Maze_originPxX() + shipDrawOffset,
-                    enemy.y + Maze_originPxY() + shipDrawOffset);
-                SPR_setVisibility(enemySprite, Enemy_blinkVisible(&enemy) ? VISIBLE : HIDDEN);
+                // Los enemigos se mueven una vez por fotograma visible,
+                // ANTES del bucle de subpasos de la nave: asi todas las
+                // comprobaciones de choque de este fotograma ven la misma
+                // posicion, ya avanzada. tombMoving es todavia el del
+                // fotograma anterior aqui (se recalcula al final), que es
+                // justo lo que el acecho necesita: "la nave estaba parada".
+                {
+                    u8 i;
+
+                    for (i = 0; i < ENEMIES_MAX; i++)
+                        Enemy_update(&enemies[i], player.x, player.y, !tombMoving);
+                }
+                drawEnemySprites();
 
                 // One 1px sub-step at a time, checking for the letter (and
                 // the enemy) after EACH one instead of once per frame. A
@@ -5507,30 +5605,42 @@ int main(bool hardReset)
                     // after this loop); ENEMY_VULNERABLE is the other way
                     // around -- running it over ("atropellarlo... como si
                     // fuese una melee") kills IT instead, via Enemy_kill's
-                    // own placeholder death blink.
-                    if ((exitDir == EXIT_NONE) && enemy.alive && Enemy_overlapsBox(&enemy, player.x, player.y))
+                    // own placeholder death blink. Con varios en la sala se
+                    // mira el primero que toque: el peligroso ya mata y en
+                    // el mismo subpaso no se puede chocar con dos.
                     {
-                        triggerShake(slideDistance); // user request: shake on hitting an enemy too, either outcome
+                        u8 i;
 
-                        if (enemy.state == ENEMY_DANGEROUS)
-                            playerDied = TRUE;
-                        else
+                        for (i = 0; (i < ENEMIES_MAX) && (exitDir == EXIT_NONE) && !playerDied; i++)
                         {
-                            Enemy_kill(&enemy);
-                            Sfx_playEnemyKill(); // user request -- placeholder, see sfx.h
-                            // Remember it for good (user request: "los
-                            // enemigos no reaparecen") -- loadRoom() checks
-                            // this on every future visit to this room.
-                            GuideMap_markEnemyDead(currentCol, currentRow);
-                            // Bounce (user request: "cuando haga melee...
-                            // y lo mate, la nave rebota") -- reverses
-                            // p->dir on the spot (UP<->DOWN, LEFT<->RIGHT),
-                            // same "+2 mod 4" opposite every other pairing
-                            // in this codebase uses. Takes effect on the
-                            // very next sub-step, still this same frame:
-                            // the ship recoils away from where the enemy
-                            // was instead of sliding on through it.
-                            player.dir = (u8) ((player.dir + 2) & 3);
+                            Enemy *e = &enemies[i];
+
+                            if (!e->alive || !Enemy_overlapsBox(e, player.x, player.y))
+                                continue;
+
+                            triggerShake(slideDistance); // user request: shake on hitting an enemy too, either outcome
+
+                            if (e->state == ENEMY_DANGEROUS)
+                                playerDied = TRUE;
+                            else
+                            {
+                                Enemy_kill(e);
+                                Sfx_playEnemyKill(); // user request -- placeholder, see sfx.h
+                                // Remember it for good (user request: "los
+                                // enemigos no reaparecen") -- loadRoom() checks
+                                // this on every future visit to this room.
+                                GuideMap_markEnemyKilled(currentCol, currentRow, i);
+                                // Bounce (user request: "cuando haga melee...
+                                // y lo mate, la nave rebota") -- reverses
+                                // p->dir on the spot (UP<->DOWN, LEFT<->RIGHT),
+                                // same "+2 mod 4" opposite every other pairing
+                                // in this codebase uses. Takes effect on the
+                                // very next sub-step, still this same frame:
+                                // the ship recoils away from where the enemy
+                                // was instead of sliding on through it.
+                                player.dir = (u8) ((player.dir + 2) & 3);
+                                break; // un atropello por subpaso: el rebote ya cambio el rumbo
+                            }
                         }
                     }
                 }
@@ -5544,7 +5654,7 @@ int main(bool hardReset)
                     gameState = STATE_GAMEOVER;
 
                     SPR_setVisibility(playerSprite, HIDDEN);
-                    SPR_setVisibility(enemySprite, HIDDEN);
+                    hideEnemySprites();
                     drawInsertRoomStatus(FALSE);
 
                     gameOverBegin();
@@ -5576,7 +5686,7 @@ int main(bool hardReset)
                         drawInsertRoomArrow(); // spec §37
                         positionPlayerEnteringViaDoorDir(insertRoomDoorDir, insertLinkOffset);
                         drawInsertRoomStatus(TRUE); // spec §34
-                        SPR_setVisibility(enemySprite, HIDDEN); // no enemy in the insertion room (spec §27)
+                        hideEnemySprites(); // no enemy in the insertion room (spec §27)
                     }
                     else
                     {
@@ -5584,8 +5694,8 @@ int main(bool hardReset)
                     }
                 }
 
-                SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
-                    player.y + Maze_originPxY() + shipDrawOffset + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+                SPR_setPosition(playerSprite, player.x + Maze_originPxX(),
+                    player.y + Maze_originPxY() + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
             }
 
             // Did the ship travel this frame? (The steering lock,
@@ -5609,9 +5719,15 @@ int main(bool hardReset)
 
                     presetSave[sizePresetIndex].scoreFrames++;
 
+                    // Los objetivos del planeta son las letras y las
+                    // plantas, los mismos que encienden "BACK TO SPACE".
+                    // Antes pedia tambien matar a todos los enemigos, que
+                    // con uno por sala era exigente y con seis es
+                    // inalcanzable: el reloj no se paraba nunca y el
+                    // marcador se iba a cero en los planetas grandes.
+                    // allEnemiesDead() sigue ahi para el recuento.
                     if (Items_allCollected() &&
-                        (Plants_collectedCount() >= presetSave[sizePresetIndex].plantsTotal) &&
-                        allEnemiesDead())
+                        (Plants_collectedCount() >= presetSave[sizePresetIndex].plantsTotal))
                         presetSave[sizePresetIndex].scoreDone = TRUE;
                 }
             }

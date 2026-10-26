@@ -1,4 +1,9 @@
-TILESET mazeTiles "sprite/maze_tiles_auto.png" NONE NONE ROW
+# La hoja del laberinto: celdas de 16x16, una fila; las tramas las genera
+# tools/maze_tiles16.py desde el arte de sprite/maze_tiles_dither.png. ROW y
+# sin dedup para que el orden de las teselas sea el que supone Maze_draw.
+# (La de 8x8 de la epoca de la celda pequena, sprite/maze_tiles_auto.png y
+# tools/maze_tiles.py, sigue en el arbol sin usarse.)
+TILESET mazeTiles "sprite/maze_tiles16.png" NONE NONE ROW
 TILESET mapTiles "sprite/map_tiles.png" NONE NONE ROW
 # La fuente del juego: 128x48 px = 16 columnas x 6 filas de caracteres de
 # 8x8, en orden ASCII desde el espacio (0x20). Dos colores: indice 0 el
@@ -19,13 +24,17 @@ TILESET hudFont "sprite/font_hud.png" NONE NONE ROW
 # Sin comprimir: son 160 bytes de tiles y comprimida habria que
 # descomprimirla en el heap, que es lo que va justo en esta consola.
 SPRITE playerShip "sprite/player.png" 1 1 NONE
-SPRITE enemyShip "sprite/enemy.png" 1 1 BEST
+# 12 fotogramas de 8x8 en una fila (tools/enemy_tiles.py): por cada especie
+# de enemy.h el par peligroso/vulnerable, en ese orden. Sin comprimir a
+# proposito, como la nave: una tileset comprimida se descomprime en el heap
+# al cargarla y de heap vamos justos.
+SPRITE enemyShip "sprite/enemy.png" 1 1 NONE
 
-# Las de 16x16, de antes del paso a celdas de 8 px. Las usan los cuatro
-# primeros planetas, que son los de habitacion pequena. La caja de colision
-# sigue siendo la celda (player.c, BOX): esto solo cambia el dibujo.
+# Las de 16x16: la celda vuelve a medir 16 px, asi que las usan TODOS los
+# planetas y cada una ocupa exactamente una celda (main.c, setShipArt). Las de
+# 8x8 de aqui arriba se quedan sin usar, por si hubiera que volver.
 SPRITE playerShip16 "sprite/player16.png" 2 2 NONE
-SPRITE enemyShip16 "sprite/enemy16.png" 2 2 BEST
+SPRITE enemyShip16 "sprite/enemy16.png" 2 2 NONE
 # Los iconos de los objetos, 16x16 (tools/item_icons.py). Van con las tintas
 # de las plantas, asi que el sprite se pinta con PAL0 y no gasta linea.
 SPRITE itemIcons "sprite/item_icons.png" 2 2 NONE

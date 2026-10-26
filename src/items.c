@@ -129,7 +129,9 @@ void Items_drawInRoom(u8 col, u8 row)
         // Default text colour: the player is physically standing in this
         // room, so by construction its door can't currently be locked --
         // never the Maze_setTextColorLocked() look.
-        VDP_drawText(s, Maze_originColumn() + MAZE_DOOR_COL, Maze_originRow() + MAZE_DOOR_ROW); // a maze cell is one VDP tile now; the origin carries the HUD band and the centring (maze.h)
+        // La celda son 2x2 teselas: la letra va en el cuarto de arriba a la
+        // izquierda, que es donde la busca la caja de recogida de aqui arriba.
+        VDP_drawText(s, Maze_cellColumn(MAZE_DOOR_COL), Maze_cellRow(MAZE_DOOR_ROW));
     }
 }
 

@@ -564,12 +564,13 @@ void Plants_drawInRoom(u8 col, u8 row)
             if (collectedMask[row][col] & (u16) (1u << bit))
                 continue;
 
-            // a maze cell is one VDP tile now; the origin carries the HUD band and the centring, same convention as items.c
+            // El cuarto de arriba a la izquierda de la celda, misma esquina que
+            // la caja de recogida y que la letra de items.c.
             VDP_setTileMapXY(BG_A,
                              TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE,
                                             (u16) (PLANT_TILE_BASE + (line * PLANTS_MAX_PER_LINE) + i)),
-                             Maze_originColumn() + curCol[line][i],
-                             Maze_originRow() + curRow[line][i]);
+                             Maze_cellColumn(curCol[line][i]),
+                             Maze_cellRow(curRow[line][i]));
         }
     }
 }

@@ -194,7 +194,7 @@ static void clearMap(void)
             guideMap[row][col].doorS   = FALSE;
             guideMap[row][col].doorW   = FALSE;
             guideMap[row][col].visited = FALSE;
-            guideMap[row][col].enemyDead = FALSE;
+            guideMap[row][col].enemyKilled = 0;
         }
     }
 }
@@ -392,14 +392,14 @@ bool GuideMap_isRoomLocked(u8 col, u8 row)
     return roomLocked[row][col];
 }
 
-bool GuideMap_isEnemyDead(u8 col, u8 row)
+u8 GuideMap_enemyKilledMask(u8 col, u8 row)
 {
-    return guideMap[row][col].enemyDead;
+    return guideMap[row][col].enemyKilled;
 }
 
-void GuideMap_markEnemyDead(u8 col, u8 row)
+void GuideMap_markEnemyKilled(u8 col, u8 row, u8 index)
 {
-    guideMap[row][col].enemyDead = TRUE;
+    guideMap[row][col].enemyKilled |= (u8) (1u << index);
 }
 
 void GuideMap_saveVisited(u16 out[MAX_MAP_ROWS])
@@ -424,22 +424,22 @@ void GuideMap_restoreVisited(const u16 in[MAX_MAP_ROWS])
             guideMap[r][c].visited = (in[r] & (u16) (1u << c)) ? TRUE : FALSE;
 }
 
-void GuideMap_saveEnemyDead(bool out[MAX_MAP_ROWS][MAX_MAP_COLS])
+void GuideMap_saveEnemyKilled(u8 out[MAX_MAP_ROWS][MAX_MAP_COLS])
 {
     u8 r, c;
 
     for (r = 0; r < MAX_MAP_ROWS; r++)
         for (c = 0; c < MAX_MAP_COLS; c++)
-            out[r][c] = guideMap[r][c].enemyDead;
+            out[r][c] = guideMap[r][c].enemyKilled;
 }
 
-void GuideMap_restoreEnemyDead(const bool in[MAX_MAP_ROWS][MAX_MAP_COLS])
+void GuideMap_restoreEnemyKilled(const u8 in[MAX_MAP_ROWS][MAX_MAP_COLS])
 {
     u8 r, c;
 
     for (r = 0; r < MAX_MAP_ROWS; r++)
         for (c = 0; c < MAX_MAP_COLS; c++)
-            guideMap[r][c].enemyDead = in[r][c];
+            guideMap[r][c].enemyKilled = in[r][c];
 }
 
 // Picks (goalCol,goalRow) among rooms at >= GOAL_MIN_DISTANCE_PERCENT of the
