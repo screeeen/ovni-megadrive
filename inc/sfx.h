@@ -65,6 +65,13 @@ void Sfx_playPlantPickup(void);
 // different mono 16-bit 16kHz wav over res/sound/enemykill0.wav /
 // res/sound/letter0.wav; nothing here needs to change.
 //
+// El de la muerte ya no es el zap de barrido original (peticion del usuario:
+// "que suene mas splash"): lo rehace tools/enemykill_splash.py como ruido con
+// el brillo cayendo, y el zap viejo queda en res/sound/enemykill_src0.wav.
+// Y son SEIS muestras rotando, una por pitch ("varia siempre el pitch ... que
+// sea menos monotono"), porque ningun driver sabe cambiar la velocidad de
+// reproduccion: el pitch hay que cocerlo en el fichero.
+//
 // Both no-op while Sfx_isEnabled() is FALSE, and both let the PCM4 driver
 // auto-pick a free channel, same as Sfx_playPlantPickup (neither has a
 // per-hit volume, so neither needs to know which channel it landed on).
@@ -118,6 +125,12 @@ void Sfx_setPlanet(u8 planet);
 // SALIR de la partida -- resetToMenu y gameOverBegin lo hacen -- y lo llama
 // tambien Sfx_setEnabled(FALSE).
 void Sfx_musicStop(void);
+
+// Igual que la de arriba pero dejando la cancion donde esta: al volver a la
+// misma fase sigue por donde iba en vez de empezar de cero (peticion del
+// usuario). Es la que hay que usar al salir de una partida que se puede
+// retomar -- al menu o al game over.
+void Sfx_musicPause(void);
 
 // Una vez por frame desde el bucle principal, al lado de updateShake(). Hace
 // poco: baja la cuenta atras con la que el visor sabe que muestra sigue

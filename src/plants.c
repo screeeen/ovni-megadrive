@@ -18,6 +18,10 @@
 #define PLANTS_LINES_PER_ROOM 3
 #define PLANTS_MAX_PER_LINE   5
 #define PLANTS_LINE_MIN       3
+// Celdas de una planta a la siguiente dentro de una fila. A 1 van pegadas, que
+// es lo que toca ahora que la planta mide una celda justa y no se solapa con
+// la de al lado.
+#define PLANTS_SPACING        1
 // Una planta es una tesela de 8x8, y esa es su caja.
 #define PLANTS_GLYPH_PX       8
 // Random (anchor,axis,dir) tries before giving up on ONE line -- tombo
@@ -66,7 +70,7 @@ static u16 planetTotal;
 // unico de cada una. PLANTS_CACHE_SLOTS cuando la celda no es habitacion.
 static u16 curSlot = PLANTS_CACHE_SLOTS;
 static u16 tilesSlot = 0xFFFF;
-static u32 plantTileData[PLANTS_PER_ROOM * 8];   // u32: el DMA quiere alineado
+static u32 plantTileData[PLANTS_PER_ROOM * 4 * 8];   // 4 teselas por planta; u32: el DMA quiere alineado
 
 // Own tiny xorshift PRNG, seeded from roomSeed, instead of the shared
 // random() stream: Maze_generateRoom's accepted-attempt cache (maze.h)
@@ -288,6 +292,46 @@ void Plants_buildTile(u16 shape, u8 *dst)
     buildTile(shape, dst, FALSE, FALSE);
 }
 
+// La misma planta en una celda entera: 16x16, o sea 2x2 teselas, cada pixel
+// del dibujo de 8x8 en un cuadro de 2x2 (peticion del usuario: "las plantas
+// dejalas en 16x16"). Van de tesela de fondo, no de sprite: a 16 ocupan
+// exactamente la celda, asi que no pisan nada de alrededor y no hace falta
+// catalogo en ROM -- siguen saliendo del dibujo de siempre, con sus
+// PLANT_SHAPE_COUNT formas distintas.
+//
+// dst recibe las 4 teselas seguidas, en el orden que las quiere VRAM:
+// arriba-izquierda, arriba-derecha, abajo-izquierda, abajo-derecha.
+static void buildTile16(u16 shape, u8 *dst)
+{
+    u8 chico[32];
+    u8 grande[16][16];
+    u8 t, x, y;
+
+    buildTile(shape, chico, FALSE, FALSE);
+
+    for (y = 0; y < 8; y++)
+        for (x = 0; x < 8; x++)
+        {
+            const u8 b = chico[(y * 4) + (x >> 1)];
+            const u8 c = (x & 1) ? (u8) (b & 15) : (u8) (b >> 4);
+
+            grande[y * 2][x * 2] = c;
+            grande[y * 2][(x * 2) + 1] = c;
+            grande[(y * 2) + 1][x * 2] = c;
+            grande[(y * 2) + 1][(x * 2) + 1] = c;
+        }
+
+    for (t = 0; t < 4; t++)
+    {
+        const u8 ox = (u8) ((t & 1) * 8);
+        const u8 oy = (u8) ((t >> 1) * 8);
+
+        for (y = 0; y < 8; y++)
+            for (x = 0; x < 8; x += 2)
+                *dst++ = (u8) ((grande[oy + y][ox + x] << 4) | grande[oy + y][ox + x + 1]);
+    }
+}
+
 // La de la coleccion: lleva la marca del spot, y apagada mientras no se tenga.
 void Plants_buildSpot(u16 shape, u8 *dst, bool recogida)
 {
@@ -310,9 +354,9 @@ static void uploadRoomTiles(void)
         return;
 
     for (i = 0; i < PLANTS_PER_ROOM; i++)
-        Plants_buildTile((u16) ((curSlot * PLANTS_PER_ROOM) + i), (u8 *) &plantTileData[i * 8]);
+        buildTile16((u16) ((curSlot * PLANTS_PER_ROOM) + i), (u8 *) &plantTileData[i * 32]);
 
-    VDP_loadTileData(plantTileData, PLANT_TILE_BASE, PLANTS_PER_ROOM, DMA);
+    VDP_loadTileData(plantTileData, PLANT_TILE_BASE, PLANTS_PER_ROOM * 4, DMA);
     tilesSlot = curSlot;
 }
 
@@ -358,7 +402,7 @@ void Plants_name(u16 shape, char *out)
 
 u16 Plants_tilesEnd(void)
 {
-    return (u16) (PLANT_TILE_BASE + PLANTS_PER_ROOM);
+    return (u16) (PLANT_TILE_BASE + (PLANTS_PER_ROOM * 4));
 }
 
 void Plants_loadGraphics(void)
@@ -486,21 +530,25 @@ void Plants_spawnForRoom(u16 roomSeed, u16 slot)
                 y = (s16) (y + dirDY[dir]);
             }
 
-            if (hitHub || (pathLen < PLANTS_LINE_MIN))
+            if (hitHub || (pathLen < ((PLANTS_LINE_MIN - 1) * PLANTS_SPACING) + 1))
                 continue;
 
             {
-                const u8 cap = (pathLen < PLANTS_MAX_PER_LINE) ? pathLen : PLANTS_MAX_PER_LINE;
+                const u8 caben = (u8) (((pathLen - 1) / PLANTS_SPACING) + 1);
+                const u8 cap = (caben < PLANTS_MAX_PER_LINE) ? caben : PLANTS_MAX_PER_LINE;
                 const u8 len = (u8) (PLANTS_LINE_MIN + (rngNext() % ((cap - PLANTS_LINE_MIN) + 1)));
-                const u8 startAt = (u8) (rngNext() % (pathLen - len + 1));
+                const u8 tramo = (u8) (((len - 1) * PLANTS_SPACING) + 1);
+                const u8 startAt = (u8) (rngNext() % (pathLen - tramo + 1));
                 u8 i;
 
                 for (i = 0; i < len; i++)
                 {
-                    curCol[line][i] = (u8) px[startAt + i];
-                    curRow[line][i] = (u8) py[startAt + i];
-                    occCol[occCount] = (u8) px[startAt + i];
-                    occRow[occCount] = (u8) py[startAt + i];
+                    const u8 k = (u8) (startAt + (i * PLANTS_SPACING));
+
+                    curCol[line][i] = (u8) px[k];
+                    curRow[line][i] = (u8) py[k];
+                    occCol[occCount] = (u8) px[k];
+                    occRow[occCount] = (u8) py[k];
                     occCount++;
                 }
                 curCount[line] = len;
@@ -560,17 +608,19 @@ void Plants_drawInRoom(u8 col, u8 row)
         for (i = 0; i < curCount[line]; i++)
         {
             const u8 bit = (u8) ((line * PLANTS_MAX_PER_LINE) + i);
+            const u16 base = (u16) (PLANT_TILE_BASE + (bit * 4));
+            const u16 cx = Maze_cellColumn(curCol[line][i]);
+            const u16 cy = Maze_cellRow(curRow[line][i]);
+            u8 t;
 
             if (collectedMask[row][col] & (u16) (1u << bit))
                 continue;
 
-            // El cuarto de arriba a la izquierda de la celda, misma esquina que
-            // la caja de recogida y que la letra de items.c.
-            VDP_setTileMapXY(BG_A,
-                             TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE,
-                                            (u16) (PLANT_TILE_BASE + (line * PLANTS_MAX_PER_LINE) + i)),
-                             Maze_cellColumn(curCol[line][i]),
-                             Maze_cellRow(curRow[line][i]));
+            // Las 4 teselas de la planta llenan la celda entera.
+            for (t = 0; t < 4; t++)
+                VDP_setTileMapXY(BG_A,
+                                 TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, (u16) (base + t)),
+                                 (u16) (cx + (t & 1)), (u16) (cy + (t >> 1)));
         }
     }
 }

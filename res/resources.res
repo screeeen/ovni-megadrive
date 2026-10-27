@@ -30,9 +30,12 @@ SPRITE playerShip "sprite/player.png" 1 1 NONE
 # al cargarla y de heap vamos justos.
 SPRITE enemyShip "sprite/enemy.png" 1 1 NONE
 
-# Las de 16x16: la celda vuelve a medir 16 px, asi que las usan TODOS los
-# planetas y cada una ocupa exactamente una celda (main.c, setShipArt). Las de
-# 8x8 de aqui arriba se quedan sin usar, por si hubiera que volver.
+# La nave gigante: el arte de 32x32 (tools/player_tiles.py) que main.c pone en
+# cuanto el jugador coge la C, el primer power-up. La caja de colision sigue
+# siendo la celda de 16 px, asi que el dibujo sobresale 8 px por lado.
+SPRITE playerShip32 "sprite/player32.png" 4 4 NONE
+# Las de 16x16, que son las de siempre: la celda mide 16 y ocupan una justa.
+# Las de 8x8 de aqui arriba se quedan sin usar, por si hubiera que volver.
 SPRITE playerShip16 "sprite/player16.png" 2 2 NONE
 SPRITE enemyShip16 "sprite/enemy16.png" 2 2 NONE
 # Los iconos de los objetos, 16x16 (tools/item_icons.py). Van con las tintas
@@ -56,9 +59,18 @@ WAV hihat2 "sound/hihat2.wav" PCM4
 WAV hihat3 "sound/hihat3.wav" PCM4
 
 # Placeholders, to be replaced with real art (user request: "que sea
-# placeholder, ya lo pondre yo a mi gusto") -- one sample each, no
-# variant rotation like the kick/hihat have.
-WAV enemyKill "sound/enemykill0.wav" PCM4
+# placeholder, ya lo pondre yo a mi gusto").
+#
+# El splash de matar lleva SEIS variantes, una por pitch (peticion del usuario:
+# "varia siempre el pitch del sfx splash cuando mata enemigo"): ni el PCM4 ni el
+# XGM saben cambiar la velocidad de reproduccion, asi que el pitch va cocido en
+# el fichero y sfx.c las rota. Las hace tools/enemykill_splash.py.
+WAV enemyKill0 "sound/enemykill0.wav" PCM4
+WAV enemyKill1 "sound/enemykill1.wav" PCM4
+WAV enemyKill2 "sound/enemykill2.wav" PCM4
+WAV enemyKill3 "sound/enemykill3.wav" PCM4
+WAV enemyKill4 "sound/enemykill4.wav" PCM4
+WAV enemyKill5 "sound/enemykill5.wav" PCM4
 WAV letterPickup "sound/letter0.wav" PCM4
 
 # Clic del typewriter (peticion del usuario: "un sonido muy muy discreto").
@@ -88,5 +100,25 @@ WAV xgmHihat0 "sound/hihat0.wav" XGM
 WAV xgmHihat1 "sound/hihat1.wav" XGM
 WAV xgmHihat2 "sound/hihat2.wav" XGM
 WAV xgmHihat3 "sound/hihat3.wav" XGM
-WAV xgmEnemyKill "sound/enemykill0.wav" XGM
+WAV xgmEnemyKill0 "sound/enemykill0.wav" XGM
+WAV xgmEnemyKill1 "sound/enemykill1.wav" XGM
+WAV xgmEnemyKill2 "sound/enemykill2.wav" XGM
+WAV xgmEnemyKill3 "sound/enemykill3.wav" XGM
+WAV xgmEnemyKill4 "sound/enemykill4.wav" XGM
+WAV xgmEnemyKill5 "sound/enemykill5.wav" XGM
 WAV xgmLetterPickup "sound/letter0.wav" XGM
+# Para que el driver XGM no haya que descargarlo al salir de la partida (y con
+# el se pierda por donde iba la cancion), todo lo que suena FUERA de la partida
+# tiene que poder salir tambien por XGM: el tic del typewriter y la percusion
+# del jazz del game over, estas dos con su nivel ya cocido (tools/kick_sharpen.py).
+WAV xgmTypeTick "sound/typetick0.wav" XGM
+# El jazz lleva el bombo LARGO (el afilado es el del muro) y rota platos, igual
+# que cuando sonaba por PCM4. Las dos copias, para los dos drivers.
+WAV xgmJazzKick0 "sound/kick_jazz0.wav" XGM
+WAV xgmJazzKick1 "sound/kick_jazz1.wav" XGM
+WAV xgmJazzRide0 "sound/hihat_jazz0.wav" XGM
+WAV xgmJazzRide1 "sound/hihat_jazz1.wav" XGM
+WAV xgmJazzRide2 "sound/hihat_jazz2.wav" XGM
+WAV xgmJazzRide3 "sound/hihat_jazz3.wav" XGM
+WAV jazzKick0 "sound/kick_jazz0.wav" PCM4
+WAV jazzKick1 "sound/kick_jazz1.wav" PCM4

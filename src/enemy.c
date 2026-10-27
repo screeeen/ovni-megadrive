@@ -545,10 +545,25 @@ bool Enemy_blinkVisible(const Enemy *e)
     return ((e->deathTimer / ENEMY_DEATH_BLINK_PERIOD) & 1) != 0;
 }
 
+// Lo que se encoge cada caja por lado para el CONTACTO (reporte del usuario:
+// "a veces a la izquierda y abajo te matan sin tocar el enemigo"). La caja de
+// una celda son 16x16 enteros, pero ningun dibujo los llena: la nave de 16x16
+// tiene las dos filas de abajo vacias salvo las patas, y el rombo o el
+// triangulo del enemigo dejan las esquinas al aire. Chocaban las celdas, no
+// los dibujos. Encogiendo las dos el contacto pide solape de verdad.
+//
+// Solo afecta a esto: el muro se sigue midiendo con la celda entera (player.c
+// y enemy.c, BOX), que es lo que mantiene la nave cuadrada con la rejilla.
+#define HIT_INSET 3
+
 bool Enemy_overlapsBox(const Enemy *e, s16 boxX, s16 boxY)
 {
-    return (boxX < e->x + MAZE_TILE_PX) && (e->x < boxX + MAZE_TILE_PX) &&
-           (boxY < e->y + MAZE_TILE_PX) && (e->y < boxY + MAZE_TILE_PX);
+    const s16 ax0 = (s16) (boxX + HIT_INSET), ax1 = (s16) (boxX + MAZE_TILE_PX - HIT_INSET);
+    const s16 ay0 = (s16) (boxY + HIT_INSET), ay1 = (s16) (boxY + MAZE_TILE_PX - HIT_INSET);
+    const s16 bx0 = (s16) (e->x + HIT_INSET), bx1 = (s16) (e->x + MAZE_TILE_PX - HIT_INSET);
+    const s16 by0 = (s16) (e->y + HIT_INSET), by1 = (s16) (e->y + MAZE_TILE_PX - HIT_INSET);
+
+    return (ax0 < bx1) && (bx0 < ax1) && (ay0 < by1) && (by0 < ay1);
 }
 
 u8 Enemy_frame(const Enemy *e)

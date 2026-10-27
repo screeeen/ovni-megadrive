@@ -14,7 +14,7 @@ static u8 sfxSolo = SFX_ID_NONE;
 //
 // Con un SUELO de 12 frames (0,2 s), que no es cosmetico: TYPE dura 18 ms, o
 // sea UN frame, y un parpadeo de un frame no se ve. El resto si llegan solos
-// (KICK 36 frames, KILL 23, LETTER 19, HAT 10). O sea que para las muestras la
+// (KICK 36 frames, KILL 19, LETTER 19, HAT 10). O sea que para las muestras la
 // barra dice "acaba de sonar" y no "esta sonando"; para las voces FM y el
 // siseo, que son sostenidas, si dice el nivel de verdad.
 #define SFX_SHOT_MIN_FRAMES 12
@@ -37,13 +37,31 @@ static u8 nextKickChannel = 0;
 // nextHihatVariant solo elige el sample: el hi-hat no tiene volumen por
 // golpe, su canal es fijo (CH3) como el del resto de sonidos cortos.
 static u8 nextHihatVariant = 0;
+#define KILL_VARIANTS 6
+static u8 nextKillVariant = 0;
 
 // Las muestras y sus tamanos, aqui arriba porque las tocan DOS sitios: el
-// juego (el muro y las plantas) y la percusion del jazz, que son las mismas
-// mas flojo y en otros canales.
+// juego (el muro y las plantas) y la percusion del jazz, que lleva las SUYAS:
+// el bombo del muro esta afilado (110 ms) y el del jazz es el largo de siempre
+// (300 ms) con su nivel ya cocido -- ver tools/kick_sharpen.py.
 static const u8 *const kicks[4] = { kick0, kick1, kick2, kick3 };
 static const u32 kickLens[4] = {
     sizeof(kick0), sizeof(kick1), sizeof(kick2), sizeof(kick3)
+};
+static const u8 *const jazzKicks[2] = { jazzKick0, jazzKick1 };
+static const u32 jazzKickLens[2] = { sizeof(jazzKick0), sizeof(jazzKick1) };
+// El splash de matar enemigo: seis muestras, una por pitch, rotando (peticion
+// del usuario: "varia siempre el pitch ... que sea menos monotono"). El pitch
+// no se puede cambiar al disparar -- el PCM4 reproduce a 16 kHz y el XGM a 14,
+// y ninguno tiene mando de velocidad -- asi que va cocido, ver
+// tools/enemykill_splash.py. El orden NO es de grave a agudo a proposito: asi
+// el ciclo de seis no se oye como una escala.
+static const u8 *const enemyKills[KILL_VARIANTS] = {
+    enemyKill0, enemyKill1, enemyKill2, enemyKill3, enemyKill4, enemyKill5
+};
+static const u32 enemyKillLens[KILL_VARIANTS] = {
+    sizeof(enemyKill0), sizeof(enemyKill1), sizeof(enemyKill2),
+    sizeof(enemyKill3), sizeof(enemyKill4), sizeof(enemyKill5)
 };
 static const u8 *const hihats[4] = { hihat0, hihat1, hihat2, hihat3 };
 static const u32 hihatLens[4] = {
@@ -83,6 +101,10 @@ static const u32 hihatLens[4] = {
 // en cada vuelta pero la cancion no, asi que el planeta 3 suena igual en todas
 // las partidas.
 #define MUSIC_TRACKS 7  // siete canciones para ocho planetas: el 7 repite la 0
+#define MENU_PLANETS 8
+#if MUSIC_TRACKS > MENU_PLANETS
+#error "planetMusic[] tiene mas canciones que planetas"
+#endif
 
 static const u8 *const planetMusic[MUSIC_TRACKS] = {
     musPattern, musAventura, musHouse1,
@@ -95,23 +117,89 @@ static const char *const planetMusicName[MUSIC_TRACKS] = {
     "house2", "house3", "house4", "house5"
 };
 
+// Que cancion le toca a cada fase. Era el indice de la fase tal cual; ahora es
+// una tabla para poder cambiarle la cancion a una sola sin tocar a las demas
+// (peticion del usuario: otra para la fase 2). La 2 y la 7 estan cambiadas
+// entre si, asi que las siete canciones se siguen usando todas.
+static const u8 planetTrack[MENU_PLANETS] = {
+    0,  // fase 1  pattern
+    6,  // fase 2  house5   (era aventura)
+    2,  // fase 3  house1
+    3,  // fase 4  house2
+    4,  // fase 5  house3
+    5,  // fase 6  house4
+    1,  // fase 7  aventura (era house5)
+    0,  // fase 8  pattern
+};
+
 static u8 musicTrack = 0; // lo apunta Sfx_setPlanet
 
 #define XGM_SMP_KICK0    64  // 64..67, las cuatro variantes
 #define XGM_SMP_HAT0     68  // 68..71
-#define XGM_SMP_KILL     72
 #define XGM_SMP_LETTER   73
+#define XGM_SMP_TYPE     74
+#define XGM_SMP_JKICK0   75  // 75..76, los dos bombos del jazz
+#define XGM_SMP_JRIDE0   77  // 77..80, los cuatro platos
+#define XGM_SMP_KILL0    81  // 81..86, los seis pitches del splash (el 72
+                             // quedo libre cuando el splash dejo de ser uno)
 #define XGM_SFX_PRIORITY 1
 
 static bool musicOn = FALSE;
 
+// LA CANCION SE PAUSA, NO SE PARA (peticion del usuario: "conserva la musica
+// en el estado en el que estaba cuando mueres y vuelves a la fase"). Parar
+// descarga el driver XGM, y con el se va por donde iba la cancion: no hay
+// forma de volver a ese punto, XGM no sabe buscar dentro de un tema. Asi que
+// al salir de la partida se pausa y el driver se queda puesto, y al volver a
+// la misma cancion se reanuda donde estaba. Lo que cuesta es que todo lo que
+// suena por el camino -- el jazz del game over y el tic del typewriter --
+// tiene que salir por XGM, que es lo que hacen sus ramas de musicOn.
+static bool musicPaused = FALSE;
+static u8 pausedTrack = 0;
+
+// Si alguien ha reprogramado las voces FM desde que se pauso la cancion. Lo
+// hacen el ambiente del menu y el jazz del game over, que usan las MISMAS
+// cinco voces que la musica: reanudar despues de eso deja al tema tocando con
+// los timbres del otro hasta que vuelva a mandar instrumento, y eso es el
+// pitido que se oia (reporte del usuario). Cuando pasa, la cancion se
+// reinicia en vez de reanudarse -- que suene desde el principio es mejor que
+// que suene mal. El YM2612 es de solo escritura, asi que no hay forma de
+// guardar y devolver los registros.
+static bool fmDirty = FALSE;
+
+static void musicStop(void);
+
+static void musicPause(void)
+{
+    if (!musicOn || musicPaused)
+        return;
+
+    XGM_pausePlay();
+    musicPaused = TRUE;
+    pausedTrack = musicTrack;
+}
+
 static void musicStart(void)
 {
-    if (musicOn || !enabled)
+    if (!enabled)
         return;
+
+    if (musicOn)
+    {
+        if (!musicPaused)
+            return;
+        if ((pausedTrack == musicTrack) && !fmDirty)
+        {
+            XGM_resumePlay();   // la misma cancion y el FM intacto: sigue por donde iba
+            musicPaused = FALSE;
+            return;
+        }
+        musicStop();            // otra cancion, o el FM pisado: de cero
+    }
 
     XGM_startPlay(planetMusic[musicTrack]); // carga el driver XGM y resetea los dos chips
     musicOn = TRUE;
+    fmDirty = FALSE;   // el driver acaba de reprogramar el chip entero
 
     // Despues de arrancar: el driver recien cargado borra su RAM, y
     // XGM_startPlay solo sube la tabla del tema (ids 1..63). Con las
@@ -127,8 +215,22 @@ static void musicStart(void)
     XGM_setPCMFast(XGM_SMP_HAT0 + 1, xgmHihat1, sizeof(xgmHihat1));
     XGM_setPCMFast(XGM_SMP_HAT0 + 2, xgmHihat2, sizeof(xgmHihat2));
     XGM_setPCMFast(XGM_SMP_HAT0 + 3, xgmHihat3, sizeof(xgmHihat3));
-    XGM_setPCMFast(XGM_SMP_KILL, xgmEnemyKill, sizeof(xgmEnemyKill));
+    XGM_setPCMFast(XGM_SMP_KILL0 + 0, xgmEnemyKill0, sizeof(xgmEnemyKill0));
+    XGM_setPCMFast(XGM_SMP_KILL0 + 1, xgmEnemyKill1, sizeof(xgmEnemyKill1));
+    XGM_setPCMFast(XGM_SMP_KILL0 + 2, xgmEnemyKill2, sizeof(xgmEnemyKill2));
+    XGM_setPCMFast(XGM_SMP_KILL0 + 3, xgmEnemyKill3, sizeof(xgmEnemyKill3));
+    XGM_setPCMFast(XGM_SMP_KILL0 + 4, xgmEnemyKill4, sizeof(xgmEnemyKill4));
+    XGM_setPCMFast(XGM_SMP_KILL0 + 5, xgmEnemyKill5, sizeof(xgmEnemyKill5));
     XGM_setPCMFast(XGM_SMP_LETTER, xgmLetterPickup, sizeof(xgmLetterPickup));
+    // Las de fuera de la partida: sin estas habria que descargar el driver
+    // XGM para que sonaran, y con el se va por donde iba la cancion.
+    XGM_setPCMFast(XGM_SMP_TYPE, xgmTypeTick, sizeof(xgmTypeTick));
+    XGM_setPCMFast(XGM_SMP_JKICK0 + 0, xgmJazzKick0, sizeof(xgmJazzKick0));
+    XGM_setPCMFast(XGM_SMP_JKICK0 + 1, xgmJazzKick1, sizeof(xgmJazzKick1));
+    XGM_setPCMFast(XGM_SMP_JRIDE0 + 0, xgmJazzRide0, sizeof(xgmJazzRide0));
+    XGM_setPCMFast(XGM_SMP_JRIDE0 + 1, xgmJazzRide1, sizeof(xgmJazzRide1));
+    XGM_setPCMFast(XGM_SMP_JRIDE0 + 2, xgmJazzRide2, sizeof(xgmJazzRide2));
+    XGM_setPCMFast(XGM_SMP_JRIDE0 + 3, xgmJazzRide3, sizeof(xgmJazzRide3));
     Z80_releaseBus();
     SYS_enableInts();
 }
@@ -140,6 +242,7 @@ static void musicStop(void)
 
     XGM_stopPlay();
     musicOn = FALSE;
+    musicPaused = FALSE;
     Sfx_loadDriver(); // el PCM4 de vuelta, con su reset del YM
 }
 
@@ -207,8 +310,10 @@ void Sfx_playPlantPickup(void)
 
 // Placeholders -- see their doc comments in sfx.h. Synthesized at the
 // same mono/16-bit/16kHz the other samples use:
-//   enemyKill    a square tone sweeping 970 -> 70 Hz with a noise burst
-//                over it, both decaying fast (~190 ms)
+//   enemyKill    un splash: ruido con el brillo cayendo de 4200 a 1100 Hz,
+//                chasquido ancho y golpe corto debajo (~300 ms), en seis
+//                pitches que rotan. Lo hace tools/enemykill_splash.py, el
+//                zap de antes esta en res/sound/enemykill_src0.wav
 //   letterPickup two square blips a fifth apart, A5 then E6 (~160 ms)
 #define SFX_VOL_TYPE_TICK 2 // lo mas bajo que sigue oyendose, ver sfx.h
 
@@ -216,14 +321,19 @@ void Sfx_playTypeTick(void)
 {
     // Con la musica puesta no suena: no tiene copia para el driver XGM, y las
     // pantallas que escriben solas estan todas fuera de la partida.
-    if (!enabled || musicOn)
+    if (!enabled)
         return;
 
     // Canal fijo, no AUTO: asi un tick corta al anterior en vez de
     // apilarse con el. Si dos llegan muy seguidos se quiere uno, no dos
     // sonando a la vez.
-    SND_PCM4_setVolume(SFX_SHORT_CHANNEL, SFX_VOL_TYPE_TICK);
-    SND_PCM4_startPlay(typeTick, sizeof(typeTick), SFX_SHORT_CHANNEL, FALSE);
+    if (musicOn)
+        XGM_startPlayPCM(XGM_SMP_TYPE, XGM_SFX_PRIORITY, SFX_SHORT_CHANNEL);
+    else
+    {
+        SND_PCM4_setVolume(SFX_SHORT_CHANNEL, SFX_VOL_TYPE_TICK);
+        SND_PCM4_startPlay(typeTick, sizeof(typeTick), SFX_SHORT_CHANNEL, FALSE);
+    }
     sfxShotLeft[SFX_ID_TYPE] = SFX_SHOT_FRAMES(sizeof(typeTick));
 }
 
@@ -233,13 +343,17 @@ void Sfx_playEnemyKill(void)
         return;
 
     if (musicOn)
-        XGM_startPlayPCM(XGM_SMP_KILL, XGM_SFX_PRIORITY, SFX_SHORT_CHANNEL);
+        XGM_startPlayPCM((u8) (XGM_SMP_KILL0 + nextKillVariant), XGM_SFX_PRIORITY,
+                         SFX_SHORT_CHANNEL);
     else
     {
         SND_PCM4_setVolume(SFX_SHORT_CHANNEL, SFX_VOL_MAX);
-        SND_PCM4_startPlay(enemyKill, sizeof(enemyKill), SFX_SHORT_CHANNEL, FALSE);
+        SND_PCM4_startPlay(enemyKills[nextKillVariant], enemyKillLens[nextKillVariant],
+                           SFX_SHORT_CHANNEL, FALSE);
     }
-    sfxShotLeft[SFX_ID_KILL] = SFX_SHOT_FRAMES(sizeof(enemyKill));
+    sfxShotLeft[SFX_ID_KILL] = SFX_SHOT_FRAMES(enemyKillLens[nextKillVariant]);
+    if (++nextKillVariant >= KILL_VARIANTS)
+        nextKillVariant = 0;
 }
 
 void Sfx_playLetterPickup(void)
@@ -341,10 +455,6 @@ void Sfx_playLetterPickup(void)
 // planeta CORTA lo que hubiera y deja sonando una sola voz, la 0, reprogramada
 // con esta fila. Lo que distingue un planeta de otro es la nota, el ritmo y el
 // timbre, por ese orden de peso para el oido.
-#define MENU_PLANETS 8
-#if MUSIC_TRACKS > MENU_PLANETS
-#error "planetMusic[] tiene mas canciones que planetas"
-#endif
 #define MAQ_PSG_OFF 16        // esta fila no lleva siseo (la escala llega a 15)
 
 typedef struct {
@@ -520,6 +630,7 @@ static void slopFlush(void)
 // 0 en cada planeta.
 static void slopVoiceTimbre(u8 v, u8 modTL, u8 modMul, u8 modDT, u8 fb, u8 pms)
 {
+    fmDirty = TRUE;   // ver donde se declara: la cancion ya no se puede reanudar
     static const u8 ops[4] = { SLOP_OP_S1, SLOP_OP_S3, SLOP_OP_S2, SLOP_OP_S4 };
     const u8 part = fmPart[v];
     const u8 c = fmCh[v];
@@ -596,6 +707,19 @@ static void chipsSilence(void)
 
 // Calla lo que este sonando que no sea un efecto suelto. Se pasa por aqui al
 // volver al menu, al acabar la partida y al apagar el sonido con la C.
+// Deja la cancion donde esta y calla todo lo demas. Es lo que se usa al salir
+// de la partida -- al menu o al game over -- para que al volver siga por donde
+// iba; Sfx_musicStop, el de verdad, es para cuando ya da igual (fase acabada).
+void Sfx_musicPause(void)
+{
+    musicPause();
+
+    if (jazzOn)
+        jazzSilence();
+
+    chipsSilence();
+}
+
 void Sfx_musicStop(void)
 {
     musicStop();
@@ -812,9 +936,19 @@ static u8 jazzBlockOf(u8 v)
 // nunca son el mismo sample) pero con su volumen y en su canal.
 static void jazzKick(void)
 {
-    SND_PCM4_setVolume(SOUND_PCM_CH1, JAZZ_VOL_KICK);
-    SND_PCM4_startPlay(kicks[nextKickVariant], kickLens[nextKickVariant],
-                       SOUND_PCM_CH1, FALSE);
+    // El bombo del jazz es el LARGO, no el afilado del muro: son dos sonidos
+    // distintos y el jazz se queda con el suyo. Rota dos variantes, como antes.
+    const u8 v = (u8) (nextKickVariant & 1);
+
+    if (musicOn)
+        // Con el nivel de JAZZ_VOL_KICK ya cocido: el driver XGM no tiene
+        // volumen por canal.
+        XGM_startPlayPCM((u8) (XGM_SMP_JKICK0 + v), XGM_SFX_PRIORITY, SOUND_PCM_CH2);
+    else
+    {
+        SND_PCM4_setVolume(SOUND_PCM_CH1, SFX_VOL_MAX); // el nivel ya va en la muestra
+        SND_PCM4_startPlay(jazzKicks[v], jazzKickLens[v], SOUND_PCM_CH1, FALSE);
+    }
     sfxShotLeft[SFX_ID_KICK] = SFX_SHOT_FRAMES(kickLens[nextKickVariant]);
     nextKickVariant = (u8) ((nextKickVariant + 1) & 3);
 }
@@ -826,9 +960,15 @@ static void jazzRide(void)
     const SoundPCMChannel ch = (SoundPCMChannel) (jazzRideCh ? SOUND_PCM_CH3
                                                              : SOUND_PCM_CH2);
 
-    SND_PCM4_setVolume((u8) ch, JAZZ_VOL_RIDE);
-    SND_PCM4_startPlay(hihats[nextHihatVariant], hihatLens[nextHihatVariant],
-                       ch, FALSE);
+    if (musicOn)
+        XGM_startPlayPCM((u8) (XGM_SMP_JRIDE0 + nextHihatVariant), XGM_SFX_PRIORITY,
+                         (SoundPCMChannel) (jazzRideCh ? SOUND_PCM_CH3 : SOUND_PCM_CH4));
+    else
+    {
+        SND_PCM4_setVolume((u8) ch, JAZZ_VOL_RIDE);
+        SND_PCM4_startPlay(hihats[nextHihatVariant], hihatLens[nextHihatVariant],
+                           ch, FALSE);
+    }
     sfxShotLeft[SFX_ID_HAT] = SFX_SHOT_FRAMES(hihatLens[nextHihatVariant]);
     nextHihatVariant = (u8) ((nextHihatVariant + 1) & 3);
     jazzRideCh ^= 1;
@@ -1040,8 +1180,9 @@ void Sfx_jazzGameOver(void)
 
     // Primero el ambiente fuera, y en seco: detras se reescribe el modulador
     // de estas mismas voces, y cambiarselo sonando es un chasquido. Es el
-    // mismo corte y por la misma razon.
-    Sfx_musicStop();
+    // mismo corte y por la misma razon. La cancion se PAUSA, no se para: al
+    // volver a la fase sigue por donde iba (ver musicPause).
+    Sfx_musicPause();
     slopReleasing = FALSE;
     psgNoiseStop(); // el canal de ruido tambien: el jazz lo va a querer
     slopCutVoices(TRUE);
@@ -1088,7 +1229,7 @@ static void psgNoiseStop(void)
 // despues. Va por el planeta y no por la fila sorteada, ver planetMusic[].
 void Sfx_setPlanet(u8 planet)
 {
-    musicTrack = (u8) ((planet % MENU_PLANETS) % MUSIC_TRACKS);
+    musicTrack = (u8) (planetTrack[planet % MENU_PLANETS] % MUSIC_TRACKS);
 }
 
 // La musica entra y sale con la escena. No convive con el PCM4, asi que cada
@@ -1096,7 +1237,7 @@ void Sfx_setPlanet(u8 planet)
 void Sfx_musicScene(bool menu)
 {
     if (menu)
-        musicStop();
+        musicPause();   // el menu calla, pero la cancion se queda donde esta
     else
         musicStart();   // volver a entrar a la partida la relanza
 }

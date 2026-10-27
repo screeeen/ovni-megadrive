@@ -116,6 +116,11 @@ bool Plants_tryCollect(u8 col, u8 row, s16 playerX, s16 playerY);
 // Items_drawInRoom, this only touches those tiles, not the rest of the
 // plane. col/row select which room's collected-state to check (the
 // caller's current room).
+// Dibuja las plantas sin recoger de esa sala: cada una, 2x2 teselas de fondo
+// que llenan su celda de 16 px (peticion del usuario: "las plantas dejalas en
+// 16x16"). Por eso no pisan nada de alrededor, y por eso siguen saliendo del
+// dibujo de siempre -- con sus PLANT_SHAPE_COUNT formas, ninguna repetida --
+// en vez de un catalogo de sprites hecho en ROM.
 void Plants_drawInRoom(u8 col, u8 row);
 
 // Draws the running total against this planet's real total ("PLANTAS:

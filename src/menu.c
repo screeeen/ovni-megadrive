@@ -636,7 +636,7 @@ static u16 mixColor(u16 from, u16 to, u16 num, u16 den)
 // slots still hold exactly the background colour and there is nothing to
 // see, and then those four are ramped to their real values. The sun, the
 // cursor and all three planet looks come up together.
-#define MENU_SPRITE_FADE_FRAMES 20
+#define MENU_SPRITE_FADE_FRAMES 10  // el doble de rapido (peticion del usuario), era 20
 
 void Menu_fadeInSprites(u8 selectedIndex, u8 unlockedCount, const bool *completed)
 {

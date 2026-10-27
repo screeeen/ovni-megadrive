@@ -7,7 +7,9 @@ mixta, que es inyectivo, y aqui se comprueba ademas que las PLANT_SHAPE_COUNT
 combinaciones dan PLANT_SHAPE_COUNT dibujos distintos.
 
 La planta se dibuja en C (Plants_buildTile); esto solo elige y verifica las
-siluetas. Si se cambia una regla hay que cambiarla en los dos sitios.
+siluetas. Si se cambia una regla hay que cambiarla en los dos sitios. La de
+16x16 que se ve en la sala es ese mismo dibujo a 2x, y tambien se hace en C
+(buildTile16), asi que aqui no hay nada de ella.
 """
 import os, random, struct, subprocess, sys, zlib
 
@@ -155,6 +157,7 @@ def escribir_h(perfiles):
 def main():
     perfiles, distintos = elegir_perfiles()
     escribir_h(perfiles)
+
     print("%d perfiles x %d rellenos x %d tallos = %d formas, %d dibujos distintos"
           % (PERFILES, RELLENOS, TALLOS, PERFILES * RELLENOS * TALLOS, distintos))
     assert distintos == PERFILES * RELLENOS * TALLOS

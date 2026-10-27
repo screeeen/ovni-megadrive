@@ -278,16 +278,31 @@ static s16 shipBob(void)
     return (s16) idleBob[idleStep];
 }
 
-// La nave y los enemigos son los de 16x16 en todos los planetas: la celda
-// vuelve a medir 16 px, asi que ocupan exactamente una y no hay que
-// descentrarlos. El arte de 8x8 (playerShip/enemyShip) se queda sin usar.
+// LA NAVE GIGANTE (peticion del usuario: "si coge la letra C se convierte en
+// sprite gigante"). Es el primer power-up: con la C en el bolsillo la nave
+// pasa a dibujarse con el arte de 32x32 en vez del de 16, y como la celda --
+// y con ella la caja de colision -- sigue midiendo 16, el dibujo sobresale 8
+// px por lado y hay que descentrarlo (shipDrawOffset). Nada del juego se
+// entera: player.c mide contra MAZE_TILE_PX, no contra el sprite.
+//
+// Las letras se recogen en orden (items.c: la N esta cerrada hasta tener la
+// N-1), asi que tener 3 o mas es exactamente tener la C. Por eso el power-up
+// sobrevive a salir al menu y volver: el recuento viaja en la partida
+// guardada y no hace falta un bit propio.
+#define BIG_SHIP_LETTER 3
+
+static bool bigShip = FALSE;
+static s16 shipDrawOffset = 0;
+
 static void setShipArt(void)
 {
     u8 i;
 
+    bigShip = (Items_collectedCount() >= BIG_SHIP_LETTER);
+
     // SPR_setDefinition realoja la VRAM del sprite el solo.
     if (playerSprite)
-        SPR_setDefinition(playerSprite, &playerShip16);
+        SPR_setDefinition(playerSprite, bigShip ? &playerShip32 : &playerShip16);
     for (i = 0; i < ENEMIES_MAX; i++)
         if (enemySprites[i])
         {
@@ -295,11 +310,15 @@ static void setShipArt(void)
             enemyFrameShown[i] = 0xFF; // el sprite nuevo viene en el 0 y la cache no lo sabe
         }
 
+    shipDrawOffset = bigShip ? -8 : 0;
     squashShown = 0xFF; // el sprite nuevo viene en el 0 y la cache no lo sabe
 }
 
 static u16 mapSeed;
 static u8 currentCol, currentRow;
+// La puerta por la que se entro a (currentCol,currentRow). La guarda la
+// partida al morir, para volver a entrar por el mismo sitio.
+static u8 currentEnterDoor = DOOR_N;
 // TRUE while the player is still in the special insertion room (spec
 // §27), before currentCol/currentRow are ever set -- gates every place
 // that would otherwise read a stale/meaningless (currentCol,currentRow).
@@ -327,6 +346,15 @@ static u8 insertRoomDoorDir;
 static u8 menuDoorDir;
 static u8 menuDoorOffset;
 static bool mapViewOpen;
+// El mapa se abre con A MANTENIDA, no con la pulsacion -- se va en cuanto se
+// suelta y eso es lo que se quiere jugando. Pero a la fase se entra pulsando A
+// desde el menu, asi que el primer frame de la partida llegaba con A todavia
+// apretada: el mapa se pintaba encima de la sala recien hecha y al soltar se
+// repintaba todo (reporte del usuario: "el comienzo de las fases esta
+// glitcheando"). Con los fundidos a la mitad de largos pasaba casi siempre.
+// Asi que al empezar una partida el mapa queda DESARMADO y no se arma hasta
+// que A se suelta: el boton con el que entraste no abre nada.
+static bool mapArmed;
 // The map screen's own two debug tools (implemented far below, next to
 // the room viewer's own doc comment) -- up here with mapViewOpen because
 // they are the same kind of flag: whoever owns the screen, the game
@@ -656,6 +684,14 @@ typedef struct
     u16 scoreMoves;   // slides started (a press into a wall is not a move)
     u8  scoreRooms;   // rooms this planet's map really has, what the start value scales by
     bool scoreDone;   // objectives met: the clock has stopped
+    // Donde se quedo la nave la ultima vez que la mataron en este planeta
+    // (peticion del usuario: "cuando muere el player, comienza en la misma
+    // habitacion que fallo"). deathDoor es la puerta por la que habia
+    // entrado a esa sala: se vuelve a entrar por ahi, que es una celda que
+    // el generador deja abierta siempre. Se gasta al usarlo -- si despues
+    // sale al menu por su propio pie y vuelve, empieza donde siempre.
+    bool deathSaved;
+    u8 deathCol, deathRow, deathDoor;
 } PresetSave;
 static PresetSave presetSave[SIZE_PRESET_COUNT];
 
@@ -2018,6 +2054,7 @@ static void enterRoomFrom(u8 exitDir)
     latchDoorOpen(currentCol, currentRow, enterDoorDir);
     loadRoom(currentCol, currentRow);
     positionPlayerEnteringViaDoorDir(enterDoorDir, doorOffsetFor(currentCol, currentRow, enterDoorDir));
+    currentEnterDoor = enterDoorDir;
 }
 
 static void newGame(void)
@@ -2026,6 +2063,7 @@ static void newGame(void)
 
 
     mapViewOpen = FALSE;
+    mapArmed = FALSE;   // la A con la que se ha entrado no abre el mapa
 
     // Decides (if not already decided -- e.g. by browsing this planet in
     // the menu first, user request: "en el menu, enseña el total de
@@ -2072,6 +2110,12 @@ static void newGame(void)
     // NOT cleared: that cached work is exactly what eliminates the
     // per-room pause this spec is about.
     Maze_setActiveMapSlot(sizePresetIndex);
+    // BUG (reporte del usuario: "a veces al morir y volver a la fase el suelo
+    // es de distinto color"): el tinte solo se ponia al cartografiar, y una
+    // fase que ya tiene su total de plantas sabido no se vuelve a cartografiar
+    // -- asi que se jugaba con el color del ultimo planeta que hubiera mirado
+    // el menu. Ponerlo aqui es ponerlo SIEMPRE que empieza una partida.
+    Maze_setPlanetTint(sizePresetIndex);
     tombMoving = FALSE;
     tombQueuedDir = DIR_NONE;
     Items_reset();
@@ -2083,6 +2127,7 @@ static void newGame(void)
     // all-zero state, identical to what Items_reset()/Plants_reset() already
     // left, so there's no separate "fresh start" branch to skip it in anymore.
     Items_fastForward(save.collectedCount); // spec §35 -- restore prior progress on this planet
+    setShipArt(); // con la C ya en el bolsillo, la nave vuelve gigante (ver setShipArt)
     Plants_setCollected(save.plantsCollected); // spec §51
     Plants_restoreMask(save.plantsMask); // bug fix, see PresetSave's own doc comment
     // After GuideMap_generate() above, which cleared every one of them.
@@ -2121,47 +2166,69 @@ static void newGame(void)
     // above for why this never needs to be randomized.
     menuDoorDir = (u8) ((insertRoomDoorDir + 1) & 3);
     menuDoorOffset = ((menuDoorDir == DOOR_N) || (menuDoorDir == DOOR_S)) ? (MAZE_W / 2) : (MAZE_H / 2);
-    // Same offset as insertLinkOffset (spec §30): opposite directions
-    // (N<->S, E<->W) share the same axis, so no translation is needed.
-    Maze_generateInsertionRoom(insertRoomDoorDir, insertLinkOffset, menuDoorDir, menuDoorOffset, mapSeed);
-    Maze_draw();
-    drawInsertRoomArrow(); // spec §37
-    Items_drawHud();
-    Plants_drawHud();
-    drawInsertRoomStatus(TRUE); // spec §34 -- always true here, itemCount is always >= 1
-    // BUG FIX (user report + screenshot: still looked wrong after routing
-    // the corridor through the center -- "coloca el principio de la nave
-    // en la entrada moviendose en una direccion"). Spawning at the room's
-    // CENTER made the very first frame of a run depend on that exact cell
-    // being on the path -- fragile, and the actual root cause of the
-    // "ship embedded in a wall" bug fixed earlier. Spawning at a door
-    // instead needs no such guarantee at all: it's the same "just inside
-    // this door" cell doorPunch/punchBorderDoor always keeps open, the
-    // exact spot every LATER re-entry into this room already uses
-    // (positionPlayerEnteringViaDoorDir below). Facing inward and already
-    // moving (not DIR_NONE) -- true for every control mode, not just
-    // -- so the very first thing the player sees is the ship
-    // sliding in from the door, not sitting still in the middle.
+    // LO QUE SE MONTA ES LO QUE SE VE, y nada mas (peticion del usuario:
+    // "calculalo todo y cuando estes preparado ensenas la pantalla"). Si la
+    // ultima vez lo mataron, la partida empieza en ESA sala, asi que la de
+    // extraccion no se monta ni se dibuja: solo se dejan puestos sus
+    // parametros de aqui arriba, que es lo que hace falta para cuando vuelva
+    // andando a salir -- al entrar en ella se genera entera otra vez, como
+    // despues de cualquier otra visita.
     //
-    // BUG FIX (user report: "la nave ahora entra por la entrada al juego.
-    // Es al reves. Tiene que entrar por la salida del juego") -- spawning
-    // at insertRoomDoorDir (the mission door, which leads OUT to the grid)
-    // had it backwards: a fresh run should appear at the door that leads
-    // BACK to the menu (menuDoorDir, "la salida del juego") and cross the
-    // room toward the mission door, not the other way around -- the ship
-    // "launches" in from the menu side and heads out into the field.
-    positionPlayerEnteringViaDoorDir(menuDoorDir, menuDoorOffset);
-    switch (menuDoorDir)
+    // Antes se montaba y se pintaba la de extraccion SIEMPRE y luego, si
+    // habia que revivir, se tiraba y se montaba la otra encima. Quedaba
+    // detras del fundido y no se veia, pero eran dos salas de trabajo para
+    // ensenar una.
+    if (save.deathSaved)
     {
-        case DOOR_N: player.dir = DIR_DOWN;  break;
-        case DOOR_S: player.dir = DIR_UP;    break;
-        case DOOR_E: player.dir = DIR_LEFT;  break;
-        default:     player.dir = DIR_RIGHT; break; // DOOR_W
+        inInsertRoom = FALSE;
+        currentCol = save.deathCol;
+        currentRow = save.deathRow;
+        currentEnterDoor = save.deathDoor;
+        latchDoorOpen(currentCol, currentRow, currentEnterDoor);
+        loadRoom(currentCol, currentRow);   // genera, dibuja y levanta sus enemigos
+        positionPlayerEnteringViaDoorDir(currentEnterDoor,
+                                         doorOffsetFor(currentCol, currentRow, currentEnterDoor));
+        Items_drawHud();
+        Plants_drawHud();
+        drawInsertRoomStatus(FALSE);        // no esta en la sala de extraccion
+        presetSave[sizePresetIndex].deathSaved = FALSE; // se gasta al usarlo
     }
-    SPR_setPosition(playerSprite, player.x + Maze_originPxX(),
-                    player.y + Maze_originPxY() + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+    else
+    {
+        // Same offset as insertLinkOffset (spec §30): opposite directions
+        // (N<->S, E<->W) share the same axis, so no translation is needed.
+        Maze_generateInsertionRoom(insertRoomDoorDir, insertLinkOffset, menuDoorDir, menuDoorOffset, mapSeed);
+        Maze_draw();
+        drawInsertRoomArrow(); // spec §37
+        Items_drawHud();
+        Plants_drawHud();
+        drawInsertRoomStatus(TRUE); // spec §34 -- always true here, itemCount is always >= 1
+        // BUG FIX (user report + screenshot: "coloca el principio de la nave
+        // en la entrada moviendose en una direccion"). Aparecer en el CENTRO
+        // hacia que el primer frame dependiera de que esa celda estuviera en
+        // el camino -- fragil, y la raiz del bug de la nave metida en un muro.
+        // En una puerta no hace falta esa garantia: es la misma celda que
+        // deja abierta el generador y la que usa cualquier entrada posterior.
+        // Mirando hacia dentro y ya en marcha (no DIR_NONE), asi lo primero
+        // que se ve es la nave entrando y no parada en medio.
+        //
+        // BUG FIX (user report: "la nave ahora entra por la entrada al juego.
+        // Es al reves. Tiene que entrar por la salida del juego") -- entra por
+        // la puerta que lleva de vuelta al menu y cruza hacia la de mision.
+        positionPlayerEnteringViaDoorDir(menuDoorDir, menuDoorOffset);
+        switch (menuDoorDir)
+        {
+            case DOOR_N: player.dir = DIR_DOWN;  break;
+            case DOOR_S: player.dir = DIR_UP;    break;
+            case DOOR_E: player.dir = DIR_LEFT;  break;
+            default:     player.dir = DIR_RIGHT; break; // DOOR_W
+        }
+        hideEnemySprites(); // no enemy in the insertion room (spec §27)
+    }
+
+    SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
+                    player.y + Maze_originPxY() + shipDrawOffset + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
     SPR_setVisibility(playerSprite, VISIBLE);
-    hideEnemySprites(); // no enemy in the insertion room (spec §27)
 }
 
 // Solar-system start menu (spec §31): each planet is one of
@@ -2210,6 +2277,16 @@ static void drawMenu(void);       // all three defined below
 #define GAMEOVER_SCORE_ROW    21
 #define GAMEOVER_SCORE_RIGHT  30   // el numero se alinea a la derecha aqui
 
+// El bloque de datos de las dos pantallas de resumen (el game over y la de
+// fase completada): misma columna y una fila de por medio entre linea y
+// linea, SIEMPRE (peticion del usuario: "cuida la interlinea"). Cada una
+// arranca donde le toca para acabar junto al marcador -- la del game over
+// lleva tres lineas y la de fase completada cinco.
+#define SUMMARY_COL         11
+#define SUMMARY_ROW_STEP     2
+#define GAMEOVER_FIRST_ROW  13
+#define REWARD_FIRST_ROW    11
+
 static u32 goShown, goTarget, goStep;
 static bool goSettled;
 static u8 goTick;
@@ -2229,14 +2306,15 @@ static void gameOverBegin(void)
     typeReset();
     typeLine("GAME OVER", 15, 8);
 
+    // Mismo paso que la pantalla de fase completada, con tres lineas.
     sprintf(buf, "PLANTS  %3d OF %3d", Plants_collectedCount(), presetSave[p].plantsTotal);
-    typeLine(buf, 11, 13);
+    typeLine(buf, SUMMARY_COL, GAMEOVER_FIRST_ROW);
     sprintf(buf, "LETTERS %3d OF %3d", Items_collectedCount(), lettersFor(p));
-    typeLine(buf, 11, 15);
+    typeLine(buf, SUMMARY_COL, GAMEOVER_FIRST_ROW + SUMMARY_ROW_STEP);
     sprintf(buf, "ENEMIES %3u OF %3u", countDeadEnemies(),
             (u16) (presetSave[p].scoreRooms * enemiesPerRoom[p]));
-    typeLine(buf, 11, 17);
-    typeLine("SCORE", 11, GAMEOVER_SCORE_ROW);
+    typeLine(buf, SUMMARY_COL, GAMEOVER_FIRST_ROW + (2 * SUMMARY_ROW_STEP));
+    typeLine("SCORE", SUMMARY_COL, GAMEOVER_SCORE_ROW);
 
     goTarget = scoreFor(p);
     goShown = start;
@@ -2265,18 +2343,25 @@ static void rewardBegin(void)
     typeReset();
     typeLine("PLANET CLEARED", 13, 8);
 
-    sprintf(buf, "PLANTS  %3d OF %3d", Plants_collectedCount(), presetSave[p].plantsTotal);
-    typeLine(buf, 11, 12);
-    sprintf(buf, "LETTERS %3d OF %3d", Items_collectedCount(), lettersFor(p));
-    typeLine(buf, 11, 14);
-    sprintf(buf, "ENEMIES %3u OF %3u", countDeadEnemies(),
-            (u16) (presetSave[p].scoreRooms * enemiesPerRoom[p]));
-    typeLine(buf, 11, 16);
-    sprintf(buf, "TIME    %3u:%02u", (u16) (segundos / 60), (u16) (segundos % 60));
-    typeLine(buf, 11, 18);
-    sprintf(buf, "MOVES   %3u", presetSave[p].scoreMoves);
-    typeLine(buf, 11, 19);
-    typeLine("SCORE", 11, GAMEOVER_SCORE_ROW);
+    // Una fila de por medio entre linea y linea, TODAS, incluida la del
+    // marcador (peticion del usuario: "cuida la interlinea"). TIME y MOVES
+    // iban pegadas y cantaba.
+    {
+        u16 fila = REWARD_FIRST_ROW;
+
+        sprintf(buf, "PLANTS  %3d OF %3d", Plants_collectedCount(), presetSave[p].plantsTotal);
+        typeLine(buf, SUMMARY_COL, fila); fila += SUMMARY_ROW_STEP;
+        sprintf(buf, "LETTERS %3d OF %3d", Items_collectedCount(), lettersFor(p));
+        typeLine(buf, SUMMARY_COL, fila); fila += SUMMARY_ROW_STEP;
+        sprintf(buf, "ENEMIES %3u OF %3u", countDeadEnemies(),
+                (u16) (presetSave[p].scoreRooms * enemiesPerRoom[p]));
+        typeLine(buf, SUMMARY_COL, fila); fila += SUMMARY_ROW_STEP;
+        sprintf(buf, "TIME    %3u:%02u", (u16) (segundos / 60), (u16) (segundos % 60));
+        typeLine(buf, SUMMARY_COL, fila); fila += SUMMARY_ROW_STEP;
+        sprintf(buf, "MOVES   %3u", presetSave[p].scoreMoves);
+        typeLine(buf, SUMMARY_COL, fila);
+    }
+    typeLine("SCORE", SUMMARY_COL, GAMEOVER_SCORE_ROW);
 
     goTarget = scoreFor(p);
     goShown = start;
@@ -2906,8 +2991,10 @@ static void drawMenu(void)
 // console being switched off. Blocking on purpose -- SGDK runs its own
 // vblank loop inside, and nothing should be moving across a screen
 // change anyway.
-#define FADE_FRAMES 24 // each way, 0.4s
-#define FADE_HOLD   15 // a quarter second sitting on the backdrop
+// El doble de rapido que antes (peticion del usuario): el fundido pasa de 24
+// frames a 12 (0,2 s) y la parada en el fondo de 15 a 8.
+#define FADE_FRAMES 12 // each way, 0.2s
+#define FADE_HOLD    8 // la parada sobre el fondo
 
 static u16 fadePal[64];
 static u16 fadeFlat;
@@ -3018,7 +3105,7 @@ static void planetCompletedFlags(bool *out)
 
 static void resetToMenu(void)
 {
-    Sfx_musicStop(); // la cancion de la partida no sigue sonando en el menu
+    Sfx_musicPause(); // calla, pero la cancion se queda donde estaba: al volver sigue
 
     const GameState previousState = gameState; // capture before overwriting below
 
@@ -4801,6 +4888,17 @@ static void startSelectedPlanet(void)
     // full strength. fadeFromBackdrop flattens CRAM as its
     // first act, so from here there is no vblank in between.
     Menu_setVisible(FALSE);
+    // BUG (reporte del usuario: "veo el mismo juego en donde cambian los
+    // colores"): la fila de recuadros del menu pinta su violeta con la entrada
+    // 2 de PAL0 -- la MISMA que el suelo del laberinto (maze.h, PAL_SUELO) --
+    // y al ocultarse le devuelve el valor que guardo al abrirse, que es de
+    // antes de que esta partida tintara nada. Encima fadeFromBackdrop cambia
+    // por el color de antes del fundido toda entrada que siga valiendo el
+    // plano, asi que el suelo acababa pintado del violeta del menu. Por eso el
+    // tinte va AQUI, despues del que lo pisa y pegado al fundido: ni un frame
+    // con el color equivocado. (La pantalla de coleccion ya se guardaba y
+    // devolvia este mismo indice a mano por el mismo choque.)
+    Maze_setPlanetTint(sizePresetIndex);
     fadeFromBackdrop();
     SPR_setVisibility(playerSprite, VISIBLE);
 }
@@ -4833,7 +4931,7 @@ int main(bool hardReset)
 
     PAL_setPalette(PAL1, playerShip.palette->data, DMA);
     PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR);
-    playerSprite = SPR_addSprite(&playerShip, 0, 0, TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
+    playerSprite = SPR_addSprite(&playerShip16, 0, 0, TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
     // mapShip (spec §24): same PAL1, same 2 colors as playerShip, so no
     // separate palette load -- just a smaller (1 tile, 8x8) silhouette
     // shown instead of playerShip while the guide map is open.
@@ -4852,7 +4950,7 @@ int main(bool hardReset)
 
         for (i = 0; i < ENEMIES_MAX; i++)
         {
-            enemySprites[i] = SPR_addSprite(&enemyShip, 0, 0, TILE_ATTR(PAL2, TRUE, FALSE, FALSE));
+            enemySprites[i] = SPR_addSprite(&enemyShip16, 0, 0, TILE_ATTR(PAL2, TRUE, FALSE, FALSE));
             enemyFrameShown[i] = 0;
         }
     }
@@ -5233,7 +5331,11 @@ int main(bool hardReset)
             // The room is drawn on the map already; what it never had was
             // a way to open it from inside.
             {
-                if (state & BUTTON_A)
+                // Se arma al soltar: desde aqui, A abre el mapa como siempre.
+                if (!(state & BUTTON_A))
+                    mapArmed = TRUE;
+
+                if ((state & BUTTON_A) && mapArmed)
                 {
                     if (!mapViewOpen)
                     {
@@ -5491,6 +5593,7 @@ int main(bool hardReset)
                     latchDoorOpen(currentCol, currentRow, insertLinkDir); // crossed for real -- open from here on
                     loadRoom(currentCol, currentRow);
                     positionPlayerEnteringViaDoorDir(insertLinkDir, insertLinkOffset);
+                    currentEnterDoor = insertLinkDir;
                     drawInsertRoomStatus(FALSE); // spec §34 -- only relevant while actually in the insertion room
 
                 }
@@ -5510,8 +5613,8 @@ int main(bool hardReset)
                     resetToMenu();
                 }
 
-                SPR_setPosition(playerSprite, player.x + Maze_originPxX(),
-                    player.y + Maze_originPxY() + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+                SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
+                    player.y + Maze_originPxY() + shipDrawOffset + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
             }
             else
             {
@@ -5597,6 +5700,10 @@ int main(bool hardReset)
                     {
                         Sfx_playLetterPickup(); // user request -- placeholder, see sfx.h
                         plantPathDirty = TRUE;  // the route may have been pointing at exactly this letter
+                        // La C hace gigante a la nave (ver setShipArt). Se
+                        // llama siempre: la funcion mira el recuento y solo
+                        // cambia el arte si de verdad toca.
+                        setShipArt();
 
                         // Unlocks the next branch (spec §16) -- affects
                         // rooms not yet loaded, they pick up the new lock
@@ -5701,6 +5808,19 @@ int main(bool hardReset)
 
                 if (playerDied)
                 {
+                    // Donde se quedo: al volver a entrar en este planeta se
+                    // empieza aqui y no en la sala de extraccion (peticion
+                    // del usuario). Solo si murio en una sala de verdad --
+                    // en la de extraccion no hay enemigos, pero esto no se
+                    // fia y lo comprueba igual.
+                    if (!inInsertRoom)
+                    {
+                        presetSave[sizePresetIndex].deathSaved = TRUE;
+                        presetSave[sizePresetIndex].deathCol = currentCol;
+                        presetSave[sizePresetIndex].deathRow = currentRow;
+                        presetSave[sizePresetIndex].deathDoor = currentEnterDoor;
+                    }
+
                     // STATE_GAMEOVER (user request): "hold the state
                     // until BUTTON_A" -- see its own enum doc comment for
                     // why resetToMenu() below won't save this attempt's
@@ -5748,8 +5868,8 @@ int main(bool hardReset)
                     }
                 }
 
-                SPR_setPosition(playerSprite, player.x + Maze_originPxX(),
-                    player.y + Maze_originPxY() + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+                SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
+                    player.y + Maze_originPxY() + shipDrawOffset + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
             }
 
             // Did the ship travel this frame? (The steering lock,
