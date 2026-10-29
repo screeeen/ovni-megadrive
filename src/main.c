@@ -9,6 +9,7 @@
 #include "enemy.h"
 #include "sfx.h"
 #include "plants.h"
+#include "levels.h"
 
 // STATE_GAMEOVER (user request: "un enemigo por habitacion... si te mata
 // sale una pantalla game over") -- a static screen waiting for BUTTON_A,
@@ -29,15 +30,16 @@
 // terminal de un ordenador vintage... durante ese tiempo cargas todos
 // los planetas") -- the very first state, before STATE_MENU. Shows a
 // static "press a button" prompt (drawIntroPrompt(), main()'s own boot
-// code) until the first real press, then introBegin()/introTick() do the
-// actual work, one room per frame: picks a galaxy name and, livestreamed
-// as scrolling vintage-terminal text, precomputes all SIZE_PRESET_COUNT
-// planets (the exact "all 8 at boot" work spec §52 tried once and
-// spec §55 reverted, because back then it needed an UNEXPLAINED,
-// non-functional button-wait screen just to dodge spec §54's
-// random()-before-any-press bug; this time the button-wait is the
-// explicit point of the screen, asked for on its own merits, and it
-// actually has to work this time).
+// code) and, on the first real press, goes straight to the menu.
+//
+// Ya no carga nada: los niveles vienen horneados en el cartucho
+// (inc/levels.h), asi que la pantalla de cartografiado -- la barra, la
+// inundacion de glifos y la generacion de una sala por frame -- se fue
+// entera (peticion del usuario: "quita las pantallas de mapping"). Lo
+// que queda es la espera de un boton, que sigue teniendo una razon
+// tecnica: hasta la primera pulsacion real el random() de SGDK no esta
+// sembrado (spec 54), y de el salen el nombre de la galaxia y la semilla
+// con la que se elige el planeta horneado de cada preset.
 // STATE_SCORES is the high-score table, which the menu alternates with on
 // its own (user request: "haz una tabla high scores que alterne con el
 // menu de los planetas"). Added at the end so the debug view's own
@@ -49,7 +51,7 @@
 // menu con A. Es la misma pantalla del game over con otro titulo, asi que
 // comparte el contador de score que baja (summaryStep).
 typedef enum { STATE_INTRO, STATE_MENU, STATE_PLAYING, STATE_GAMEOVER, STATE_SCORES,
-               STATE_COLLECTION, STATE_REWARD } GameState;
+               STATE_COLLECTION, STATE_REWARD, STATE_GALAXIES } GameState;
 
 // The ship slides in a straight line until a wall stops it, turning only
 // from a stop -- the only control scheme the room generator's slide-graph
@@ -198,7 +200,6 @@ static const SizePreset sizePresets[] = {
 // them, through the same one-room-per-frame screen (see the menu's own
 // plantsTotalKnown check), so nothing is ever mapped twice and no planet
 // can be entered uncharted.
-#define BOOT_CARTOGRAPHY_COUNT 2
 
 // playerShip's palette (spec §13bis) is 2 colors: index0 (never rendered
 // -- Genesis sprite hardware always treats palette index0 as transparent)
@@ -314,6 +315,13 @@ static void setShipArt(void)
 }
 
 static u16 mapSeed;
+// El planeta horneado con el que se juega: su registro dentro de `levels`
+// (res/levels.bin). Lo pone setUpPlanetFromRom y de el sale cada sala.
+static const u8 *curPlanet;
+// LA GALAXIA. El cartucho lleva varias, y cada una son los ocho planetas que
+// ensena el menu, uno por tamano (inc/levels.h). El eje vertical del menu la
+// elige; el horizontal sigue eligiendo el tamano dentro de ella.
+static u8 curGalaxy;
 static u8 currentCol, currentRow;
 // La puerta por la que se entro a (currentCol,currentRow). La guarda la
 // partida al morir, para volver a entrar por el mismo sitio.
@@ -367,7 +375,6 @@ static u8 shakeFramesLeft;
 // Set when the cartography screen was opened by pressing A rather than
 // by booting: its completion hands straight over to the run instead of
 // going back to the menu.
-static bool cartographyThenPlay;
 static u8 squashFramesLeft;
 static u8 squashDir;
 // BUG FIX (user report: "al golpear el muro se queda permanente"). A ship
@@ -837,18 +844,34 @@ static void drawEnemySprites(void)
     }
 }
 
-// Deterministic per-room seed (spec §5): same (col,row) under the same
-// mapSeed always yields the same roomSeed, so Maze_generateRoom's layout
-// persists across re-entries without ever storing it.
+// El planeta de este tamano en la galaxia en curso. El cartucho los guarda en
+// orden de galaxia, asi que es una cuenta y no una busqueda.
+static const u8 *bakedPlanetData(u8 presetIndex)
+{
+    if ((curGalaxy >= Levels_galaxyCount(levels)) ||
+        (presetIndex >= Levels_planetsPerGalaxy(levels)))
+        return Levels_planet(levels, 0);
+
+    return Levels_planetIn(levels, curGalaxy, presetIndex);
+}
+
+// El registro de esa sala del planeta en curso, o NULL si ahi no hay sala.
+static const u8 *bakedRoom(u8 col, u8 row)
+{
+    if (curPlanet == NULL)
+        return NULL;
+
+    return Levels_room(levels, curPlanet, col, row);
+}
+
+// La semilla de la sala ya no se calcula: viene horneada en su registro y es
+// la que uso el generador que la tallo, asi que de ella salen las tramas de
+// sus muros y sus enemigos, igual que antes.
 static u16 roomSeedFor(u8 col, u8 row)
 {
-    u32 h = mapSeed;
+    const u8 *sala = bakedRoom(col, row);
 
-    h = h * 374761393u + col;
-    h = h * 668265263u + row;
-    h ^= h >> 15;
-
-    return (u16) h;
+    return (sala != NULL) ? Levels_u16(sala) : 0;
 }
 
 // EXIT_NORTH/EAST/SOUTH/WEST (player.h) and DOOR_N/E/S/W (guidemap.h) are
@@ -1059,23 +1082,17 @@ _Static_assert(MAZE_MAP_SLOTS == SIZE_PRESET_COUNT, "MAZE_MAP_SLOTS must equal S
 // too, nothing reads them while gameState is STATE_MENU.
 // Pooled progress over the planets already available: plants and letters
 // counted together into one percentage (user request). A planet nobody
-// has mapped yet has no totals to divide by, so it doesn't contribute --
-// and it BLOCKS the next unlock until it does, which is the point: a
-// planet that just opened would otherwise be free progress, since it adds
-// nothing to the denominator while it stays uncharted, and every planet
-// left would open at once. Going to look at it in the menu is enough to
-// map it (that's what the cartography screen is for), so this never
-// deadlocks.
-static bool planetUnlockProgress(u16 *outPercent, u16 *outMissing)
+// sin totales no tiene denominador y bloquea el siguiente desbloqueo. Desde
+// que los niveles vienen horneados eso no llega a pasar: la primera pulsacion
+// cuenta las plantas de los ocho planetas de golpe, asi que todos tienen
+// denominador antes de que se vea el menu.
+static void planetUnlockProgress(u16 *outPercent, u16 *outMissing)
 {
     u16 got = 0, total = 0, needed;
     u8 i;
 
     for (i = 0; i < unlockedPlanets; i++)
     {
-        if (!presetSave[i].plantsTotalKnown)
-            return FALSE; // uncharted: no denominator, no answer
-
         got = (u16) (got + presetSave[i].plantsCollected + presetSave[i].collectedCount);
         total = (u16) (total + presetSave[i].plantsTotal + lettersFor(i));
     }
@@ -1088,14 +1105,10 @@ static bool planetUnlockProgress(u16 *outPercent, u16 *outMissing)
     // up says more than a percentage does.
     needed = (u16) (((u32) total * PLANET_UNLOCK_PERCENT + 99) / 100);
     *outMissing = (needed > got) ? (u16) (needed - got) : 0;
-
-    return TRUE;
 }
 
 // Opens at most ONE planet per call -- the next one along, never a run of
-// them: the planet that just opened is uncharted, so planetUnlockProgress
-// above refuses to answer again until the player has at least been to the
-// menu and looked at it. Cheap enough to call every menu frame.
+// them. Cheap enough to call every menu frame.
 static void updatePlanetUnlocks(void)
 {
     if (unlockedPlanets >= SIZE_PRESET_COUNT)
@@ -1104,9 +1117,28 @@ static void updatePlanetUnlocks(void)
     {
         u16 percent, missing;
 
-        if (planetUnlockProgress(&percent, &missing) && (percent >= PLANET_UNLOCK_PERCENT))
+        planetUnlockProgress(&percent, &missing);
+        if (percent >= PLANET_UNLOCK_PERCENT)
             unlockedPlanets++;
     }
+}
+
+// Deja puesto el planeta `presetIndex` leyendolo de res/levels.bin: la
+// rejilla, las puertas con sus offsets y las letras. Sustituye al par
+// GuideMap_setShape/GuideMap_generate y, al contrario que aquel, no toca
+// random(): el planeta no se sortea aqui, ya venia sorteado en el cartucho.
+static void setUpPlanetFromRom(u8 presetIndex)
+{
+    mapSeed = presetSave[presetIndex].mapSeed;
+    curPlanet = bakedPlanetData(presetIndex);
+
+    // El tamano de sala es del preset y no del fichero: es lo que miran los que
+    // dibujan hasta que entra la primera sala, que ya trae el suyo.
+    Maze_setRoomSize(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
+                     sizePresets[presetIndex].variety);
+    GuideMap_load(levels, curPlanet);
+    presetSave[presetIndex].lettersActual = itemCount; // el planeta puede traer menos letras que el preset
+    Maze_setActiveMapSlot(presetIndex);
 }
 
 static u16 scanPlanetPlantTotal(u8 presetIndex)
@@ -1114,55 +1146,24 @@ static u16 scanPlanetPlantTotal(u8 presetIndex)
     u16 total = 0;
     u8 col, row;
 
-    mapCols = sizePresets[presetIndex].cols;
-    mapRows = sizePresets[presetIndex].rows;
-    itemCount = sizePresets[presetIndex].letters;
-    mapSeed = presetSave[presetIndex].mapSeed; // roomSeedFor() reads this global directly
-    setRandomSeed(mapSeed);
-    // Before GuideMap_generate(): the door offsets it picks depend on
-    // this planet's room footprint (Maze_doorOffsetRange), and every
-    // room generated afterwards is carved at this size.
-    Maze_setRoomSize(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
-                     sizePresets[presetIndex].variety);
+    setUpPlanetFromRom(presetIndex);
     Maze_setPlanetTint(presetIndex);   // el color de los muros de este planeta
     setShipArt();
-    GuideMap_setShape(sizePresets[presetIndex].map, sizePresets[presetIndex].cols,
-                      sizePresets[presetIndex].rows);
-    GuideMap_generate();
-    presetSave[presetIndex].lettersActual = itemCount; // generate may have lowered it
-    Maze_setActiveMapSlot(presetIndex);
-    Maze_clearRoomCache(); // fresh bank (boot time: always empty anyway) -- defensive, cheap
 
     for (row = 0; row < mapRows; row++)
     {
         for (col = 0; col < mapCols; col++)
         {
-            const MapCell cell = guideMap[row][col];
-            bool doorN, doorE, doorS, doorW;
-            u8 doorOffsets[4];
-            u16 seed;
-            bool isInsertLinkRoom;
+            const u8 *sala = bakedRoom(col, row);
+            const u16 slot = plantCacheSlot(presetIndex, col, row);
 
-            if (cell.type != CELL_ROOM)
+            if (sala == NULL)
                 continue;
 
-            isInsertLinkRoom = (col == insertLinkCol) && (row == insertLinkRow);
-            doorN = cell.doorN || (isInsertLinkRoom && (insertLinkDir == DOOR_N));
-            doorE = cell.doorE || (isInsertLinkRoom && (insertLinkDir == DOOR_E));
-            doorS = cell.doorS || (isInsertLinkRoom && (insertLinkDir == DOOR_S));
-            doorW = cell.doorW || (isInsertLinkRoom && (insertLinkDir == DOOR_W));
-            doorOffsets[DOOR_N] = doorOffsetFor(col, row, DOOR_N);
-            doorOffsets[DOOR_E] = doorOffsetFor(col, row, DOOR_E);
-            doorOffsets[DOOR_S] = doorOffsetFor(col, row, DOOR_S);
-            doorOffsets[DOOR_W] = doorOffsetFor(col, row, DOOR_W);
-            seed = roomSeedFor(col, row);
-
-            Maze_generateRoom(doorN, doorE, doorS, doorW, doorN, doorE, doorS, doorW,
-                               doorOffsets, seed, (u8) ((row * MAX_MAP_COLS) + col));
-            Plants_spawnForRoom(seed, plantCacheSlot(presetIndex, col, row));
-            // Keep what this pass already computed instead of throwing it
-            // away: that is what spares the room its first-visit flood.
-            Plants_cacheCurrentRoom(plantCacheSlot(presetIndex, col, row));
+            // Las plantas vienen horneadas con la sala: meterlas en la cache es
+            // lo que antes costaba una generacion entera por habitacion.
+            Plants_loadForRoom(sala, slot);
+            Plants_cacheCurrentRoom(slot);
             total += Plants_lastRoomCount();
         }
     }
@@ -1202,10 +1203,8 @@ static void ensurePlantsTotalKnown(u8 presetIndex)
         presetSave[presetIndex].hasSave = TRUE;
     }
 
-    VDP_drawText("LOADING...", 15, 13);
     presetSave[presetIndex].plantsTotal = scanPlanetPlantTotal(presetIndex);
     presetSave[presetIndex].plantsTotalKnown = TRUE;
-    VDP_clearPlane(BG_A, TRUE);
 }
 
 // The cartography page lives inside a margin of a fifth of the screen on
@@ -1371,98 +1370,17 @@ static void drawIntroPrompt(void)
 }
 
 
-// Frame-chunked planet precompute, STATE_INTRO only (user request:
-// "empieza a soltar numeros y caracteres raros que puedes sacar del
-// proceso de generar los planetas... durante ese tiempo cargas todos los
-// planetas", refined further -- "en la pantalla de carga tiene que salir
-// datos cada frame no simplemente una linea": a first version called
-// ensurePlantsTotalKnown() once per planet, which blocks for that
-// planet's ENTIRE scan before returning, so the screen could only ever
-// update 8 times total, not every frame. introBegin()/introTick() below
-// instead process exactly ONE ROOM per call -- the same per-room body
-// scanPlanetPlantTotal() already has, just resumable across frames
-// instead of looped in one blocking call -- so main()'s STATE_INTRO
-// dispatch can call introTick() once per frame and have fresh, real data
-// land on screen every single frame while it runs.
-//
-// The real per-room data lands on a single fixed BG_A status line
-// (overwritten each time a room finishes, not accumulated) -- the fun,
-// ever-changing part is a SEPARATE flood effect (introFloodStep(), own
-// section below), refined once more -- "quiero que la cartografia
-// animada... suelte un caracter cada frame y se inunde la pantalla de
-// caracteres cambiantes... tiene que ser entretenido divertido verlo" --
-// which fills the rest of BG_B with constantly-changing glyphs, one new
-// one per frame, independent of how fast the real per-room work happens
-// to land.
-static u8 introPlanetIndex;
-// One past the last planet this cartography run maps. At boot it is
-// PLANETS_AT_START (user request: "haz que cargue solo en el buffer los 3
-// primeros mundos" -- the rest are locked, so mapping them would be work
-// for places nobody can go yet). Later the SAME screen runs again for a
-// single planet, the moment one that just unlocked is first looked at in
-// the menu: introPlanetIndex is that planet and this is one past it.
-static u8 introPlanetLimit = PLANETS_AT_START;
-// Las celdas de todos los planetas de esta tanda y las ya hechas: lo que mide
-// la barra. Son cols*filas del preset, que se sabe sin generar nada.
-static u16 introCellsTotal;
-static u16 introCellsDone;
-static u16 introRoomCursor; // flattened row*mapCols+col into introPlanetIndex's own grid
-static u16 introPlanetTotal;
-// FALSE while still waiting for the prompt's first press; TRUE from
-// introBegin() until introTick() reports every planet done. main()'s
-// STATE_INTRO dispatch is the only reader/writer.
-static bool introGenerating;
-
-static void introSetUpPlanet(u8 presetIndex)
-{
-    mapCols = sizePresets[presetIndex].cols;
-    mapRows = sizePresets[presetIndex].rows;
-    itemCount = sizePresets[presetIndex].letters;
-    if (!presetSave[presetIndex].hasSave)
-    {
-        presetSave[presetIndex].mapSeed = random();
-        presetSave[presetIndex].hasSave = TRUE;
-    }
-    mapSeed = presetSave[presetIndex].mapSeed;
-    setRandomSeed(mapSeed);
-    // Before GuideMap_generate(): the door offsets it picks depend on
-    // this planet's room footprint (Maze_doorOffsetRange), and every
-    // room generated afterwards is carved at this size.
-    Maze_setRoomSize(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
-                     sizePresets[presetIndex].variety);
-    Maze_setPlanetTint(presetIndex);   // el color de los muros de este planeta
-    setShipArt();
-    GuideMap_setShape(sizePresets[presetIndex].map, sizePresets[presetIndex].cols,
-                      sizePresets[presetIndex].rows);
-    GuideMap_generate();
-    presetSave[presetIndex].lettersActual = itemCount; // generate may have lowered it
-    Maze_setActiveMapSlot(presetIndex);
-    Maze_clearRoomCache();
-    introRoomCursor = 0;
-    introPlanetTotal = 0;
-}
-
-// Call once, right after the player's first press on the STATE_INTRO
-// prompt. Picks the galaxy name, draws the (fixed) BG_A header, and sets
-// up planet 0 for introTick() to start chewing through.
-static void introFloodReset(void); // defined below, next to introFloodStep -- introBegin() needs it first
-
-// showGalaxy: the "RUMBO: GALAXIA x" header belongs to the boot run, the
-// one that charts the sky you are arriving at. Charting one more planet
-// later is not a journey anywhere (user request: "cuando cargas un nuevo
-// planeta, no indiques que viajas a esa galaxia, solo cartografiando"),
-// so that line is left off and only the work itself is announced.
-// Invents a galaxy name from the shared random() stream -- 2 syllables
-// plus a sector digit, e.g. "XENYN-4".
-static void pickGalaxyName(char *out)
+// El nombre de una galaxia: dos silabas y un digito de sector, "XENYN-1".
+// Sale de su INDICE y no de random(), que es lo que lo convierte en la senas
+// de esa galaxia: el mismo nombre son siempre los mismos ocho planetas, en
+// este cartucho y en el de cualquiera. Multiplicar el indice por 3 contra
+// ocho sufijos es biyectivo, asi que las ocho galaxias tienen nombre propio.
+static void pickGalaxyName(u8 galaxia, char *out)
 {
     static const char *const pre[] = { "XEN", "VOR", "KRY", "ZAL", "MYR", "TAU", "ORI", "CYG" };
     static const char *const suf[] = { "YN", "AX", "OR", "IS", "UM", "EL", "AR", "OS" };
-    const u16 i = random() & 7;
-    const u16 j = random() & 7;
-    const u16 n = 1 + (random() % 9);
 
-    sprintf(out, "%s%s-%d", pre[i], suf[j], n);
+    sprintf(out, "%s%s-%d", pre[galaxia & 7], suf[(galaxia * 3) & 7], 1 + (galaxia & 7));
 }
 
 // Se inventa un nombre de planeta de CUATRO letras, que es lo que cabe debajo
@@ -1532,198 +1450,56 @@ static void rerollPlanets(void)
     }
 }
 
-// Decides this session's galaxy name, once. Both screens that show it
-// read it back from menu.c afterwards.
-static bool galaxyNamePicked;
+static void applyGalaxyName(void);
+static void rerollPlanets(void);
+static void drawMenu(void);
+static void planetCompletedFlags(bool *out);
+static u8 galaxyDoneCount(u8 galaxia);
 
-static void ensureGalaxyName(void)
+// CAMBIAR DE GALAXIA ES EMPEZAR DE CERO, y no por capricho: el progreso de la
+// sesion son 280 B por planeta (presetSave), que solo dan para los ocho de UNA
+// galaxia -- los 64 del cartucho serian 18 KB, casi todo el heap que queda. No
+// se pierde nada que fuera a sobrevivir al apagado, porque no hay SRAM: la
+// partida ya se muere al apagar la consola.
+//
+// El cursor de planeta se queda donde estaba: cambia la galaxia debajo, no el
+// tamano que se estaba mirando.
+static void switchGalaxy(u8 galaxia, s16 dir)
+{
+    bool completed[SIZE_PRESET_COUNT];
+    u8 p;
+
+    // Los ocho que estan ahora se van todos a la vez por donde apunta el
+    // mando, y los nuevos entran por el lado contrario. Entre las dos mitades
+    // va el cambio de galaxia entero: el arte, los nombres y la barra.
+    planetCompletedFlags(completed);
+    Menu_galaxySweepOut(dir, sizePresetIndex, unlockedPlanets, completed);
+
+    curGalaxy = (u8) (galaxia % Levels_galaxyCount(levels));
+    memset(presetSave, 0, sizeof presetSave);
+    Plants_invalidateCache(); // sus ranuras eran de los planetas de la otra
+    Plants_reset();
+    unlockedPlanets = PLANETS_AT_START;
+    applyGalaxyName();
+    for (p = 0; p < SIZE_PRESET_COUNT; p++)
+        ensurePlantsTotalKnown(p);
+    rerollPlanets();                 // otros ocho planetas, otros nombres
+    Sfx_setPlanet(sizePresetIndex);
+    drawMenu();
+
+    planetCompletedFlags(completed);  // otra galaxia, otro estado de cada uno
+    Menu_galaxySweepIn(dir, sizePresetIndex, unlockedPlanets, completed);
+}
+
+// Pone en menu.c el nombre de la galaxia en curso, que es lo que la barra de
+// planetas ensena. Se llama al arrancar y cada vez que se cambia de galaxia.
+static void applyGalaxyName(void)
 {
     char galaxy[20];
 
-    if (galaxyNamePicked)
-        return;
-
-    pickGalaxyName(galaxy);
+    pickGalaxyName(curGalaxy, galaxy);
     Menu_setGalaxyName(galaxy);
-    galaxyNamePicked = TRUE;
-}
-
-// Lo que se ve mientras mapea (peticion del usuario: una barra, no los
-// numeros de cada habitacion). Fila 6, el ancho entero de la banda de texto.
-#define INTRO_BAR_ROW 6
-
-static void introDrawBar(void)
-{
-    const u16 llenas = introCellsTotal
-        ? (u16) (((u32) introCellsDone * INTRO_TEXT_COLS) / introCellsTotal) : 0;
-
-    Maze_drawProgressBar(INTRO_MARGIN_COLS, INTRO_BAR_ROW, INTRO_TEXT_COLS, llenas);
-}
-
-static void beginCartography(u8 firstPlanet, u8 limit, bool showGalaxy)
-{
-    char buf[40];
-    int len;
-
-    VDP_clearPlane(BG_A, TRUE);
-    typeReset(); // olvida lo que escribio la terminal de arranque
-    if (showGalaxy)
-    {
-        // Se inventa UNA vez por sesion y se guarda en menu.c, para que
-        // esta pantalla y la barra de planetas muestren la misma (user
-        // request: "que coincidan, no que siempre sea el mismo"). Antes
-        // cada una tenia la suya y se contradecian. Aqui es seguro
-        // sortearla: beginCartography solo corre despues de la primera
-        // pulsacion real, que es cuando random() queda sembrado (spec 54).
-        ensureGalaxyName();
-        len = sprintf(buf, "%s", Menu_galaxyName());
-        typeLine(buf, introTextX(len), 2);
-    }
-    typeLine("MAPPING...", introTextX(10), 5);
-
-    introPlanetIndex = firstPlanet;
-    introPlanetLimit = limit;
-    introCellsDone = 0;
-    introCellsTotal = 0;
-    {
-        u8 p;
-
-        for (p = firstPlanet; p < limit; p++)
-            introCellsTotal = (u16) (introCellsTotal +
-                                     (sizePresets[p].cols * sizePresets[p].rows));
-    }
-    introDrawBar();
-    introSetUpPlanet(firstPlanet);
-    introFloodReset();
-}
-
-static void introBegin(void)
-{
-    u8 limit = (u8) (DEBUG_FIRST_PLANET + BOOT_CARTOGRAPHY_COUNT);
-
-    if (limit > SIZE_PRESET_COUNT)
-        limit = SIZE_PRESET_COUNT;
-
-    beginCartography(DEBUG_FIRST_PLANET, limit, TRUE);
-}
-
-// Processes exactly one cell of introPlanetIndex's grid (a real room, or
-// a quick skip for a non-room cell) and, when it was a real room,
-// overwrites the ONE fixed BG_A status line (row 6) with that room's own
-// real data -- not accumulated/scrolled, just the latest. Call once per
-// frame while STATE_INTRO is still generating. Returns TRUE once every
-// planet is fully done (presetSave[].plantsTotal/plantsTotalKnown
-// committed for all of them).
-static bool introTick(void)
-{
-    const u16 cellCount = (u16) (mapCols * mapRows);
-    const u8 col = (u8) (introRoomCursor % mapCols);
-    const u8 row = (u8) (introRoomCursor / mapCols);
-
-    if (introRoomCursor >= cellCount)
-    {
-        presetSave[introPlanetIndex].plantsTotal = introPlanetTotal;
-        presetSave[introPlanetIndex].plantsTotalKnown = TRUE;
-
-        introPlanetIndex++;
-        if (introPlanetIndex >= introPlanetLimit)
-            return TRUE;
-
-        introSetUpPlanet(introPlanetIndex);
-        return FALSE;
-    }
-
-    {
-        const MapCell cell = guideMap[row][col];
-
-        if (cell.type == CELL_ROOM)
-        {
-            const bool isInsertLinkRoom = (col == insertLinkCol) && (row == insertLinkRow);
-            const bool doorN = cell.doorN || (isInsertLinkRoom && (insertLinkDir == DOOR_N));
-            const bool doorE = cell.doorE || (isInsertLinkRoom && (insertLinkDir == DOOR_E));
-            const bool doorS = cell.doorS || (isInsertLinkRoom && (insertLinkDir == DOOR_S));
-            const bool doorW = cell.doorW || (isInsertLinkRoom && (insertLinkDir == DOOR_W));
-            const u8 doorOffsets[4] = {
-                doorOffsetFor(col, row, DOOR_N), doorOffsetFor(col, row, DOOR_E),
-                doorOffsetFor(col, row, DOOR_S), doorOffsetFor(col, row, DOOR_W),
-            };
-            const u16 seed = roomSeedFor(col, row);
-            u16 roomPlants;
-
-            Maze_generateRoom(doorN, doorE, doorS, doorW, doorN, doorE, doorS, doorW,
-                               doorOffsets, seed, (u8) ((row * MAX_MAP_COLS) + col));
-            Plants_spawnForRoom(seed, plantCacheSlot(introPlanetIndex, col, row));
-            Plants_cacheCurrentRoom(plantCacheSlot(introPlanetIndex, col, row)); // same reason as the scan above
-            roomPlants = Plants_lastRoomCount();
-            introPlanetTotal = (u16) (introPlanetTotal + roomPlants);
-
-        }
-    }
-
-    introRoomCursor++;
-    introCellsDone++;
-    introDrawBar();
-    return FALSE;
-}
-
-// Flood effect (user request: "quiero que la cartografia animada del
-// principio suelte un caracter cada frame y se inunde la pantalla de
-// caracteres cambiantes... tiene que ser entretenido divertido verlo") --
-// purely decorative, one glyph per frame at a sweeping cursor that wraps
-// forever (so the screen stays busy for however long the real
-// precompute above actually takes, independent of it). BG_B, below
-// introTick()'s own BG_A status line so the two never overlap.
-//
-// Its own tiny xorshift PRNG, NOT the shared random()/setRandomSeed()
-// stream introSetUpPlanet() above seeds per planet -- introTick() is
-// interleaved with this every frame, and drawing from the SAME stream
-// for cosmetic noise would desync the deterministic map/room generation
-// from its own mapSeed (same reasoning plants.c's own independent PRNG
-// doc comment gives). Fixed seed: this is pure decoration, nothing
-// depends on it varying between boots.
-#define INTRO_FLOOD_FIRST_ROW 8
-#define INTRO_FLOOD_ROWS      (28 - INTRO_FLOOD_FIRST_ROW)
-#define INTRO_FLOOD_CELLS     (INTRO_TEXT_COLS * INTRO_FLOOD_ROWS)
-
-static u32 introFloodRng;
-static u16 introFloodCursor;
-
-static u32 introFloodNext(void)
-{
-    u32 x = introFloodRng;
-
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    introFloodRng = x;
-
-    return x;
-}
-
-static void introFloodReset(void)
-{
-    introFloodRng = 2463534242u; // nonzero -- xorshift's one hard requirement
-    introFloodCursor = 0;
-    VDP_clearPlane(BG_B, TRUE);
-    invalidateHudLines();
-}
-
-// Call once per frame while STATE_INTRO is generating, alongside
-// introTick() -- independent of it, always exactly one glyph.
-static void introFloodStep(void)
-{
-    static const char glyphs[] = "0123456789ABCDEF*#%&+-/.:;<>=~^";
-    char s[2];
-    const u16 x = (u16) (INTRO_MARGIN_COLS + (introFloodCursor % INTRO_TEXT_COLS));
-    const u16 y = (u16) (INTRO_FLOOD_FIRST_ROW + (introFloodCursor / INTRO_TEXT_COLS));
-
-    s[0] = glyphs[introFloodNext() % (sizeof(glyphs) - 1)];
-    s[1] = '\0';
-    VDP_drawTextBG(BG_B, s, x, y);
-
-    introFloodCursor++;
-    if (introFloodCursor >= INTRO_FLOOD_CELLS)
-        introFloodCursor = 0;
+    Menu_setGalaxyLook(curGalaxy); // otros planetas: otra silueta, otro anillo, otro tinte
 }
 
 // TRUE once THIS room's own letter (if it has one) and every one of its
@@ -1828,15 +1604,6 @@ static void applyRoomDoorLocks(u8 col, u8 row)
     const bool doorE = cell.doorE || (isInsertLinkRoom && (insertLinkDir == DOOR_E));
     const bool doorS = cell.doorS || (isInsertLinkRoom && (insertLinkDir == DOOR_S));
     const bool doorW = cell.doorW || (isInsertLinkRoom && (insertLinkDir == DOOR_W));
-    // Where each of those doors sits along its border (spec §30) --
-    // array indices match guidemap.h's DOOR_N/E/S/W numbering (0/1/2/3),
-    // same convention maze.c's doorOffsets[4] parameter expects.
-    const u8 doorOffsets[4] = {
-        doorOffsetFor(col, row, DOOR_N),
-        doorOffsetFor(col, row, DOOR_E),
-        doorOffsetFor(col, row, DOOR_S),
-        doorOffsetFor(col, row, DOOR_W),
-    };
     // Locked branches (spec §16): a door that exists in the room graph but
     // leads only to letters not due yet gets sealed -- short-circuit skips
     // GuideMap_isRoomLocked when there's no door at all in that direction,
@@ -1859,19 +1626,22 @@ static void applyRoomDoorLocks(u8 col, u8 row)
     const bool openE = doorE && (doorIsLatchedOpen(col, row, DOOR_E) || (cleared && !orderLockedE));
     const bool openS = doorS && (doorIsLatchedOpen(col, row, DOOR_S) || (cleared && !orderLockedS));
     const bool openW = doorW && (doorIsLatchedOpen(col, row, DOOR_W) || (cleared && !orderLockedW));
-    const bool lockedN = !openN;
-    const bool lockedE = !openE;
-    const bool lockedS = !openS;
-    const bool lockedW = !openW;
-
     if (openN) latchDoorOpen(col, row, DOOR_N);
     if (openE) latchDoorOpen(col, row, DOOR_E);
     if (openS) latchDoorOpen(col, row, DOOR_S);
     if (openW) latchDoorOpen(col, row, DOOR_W);
 
-    Maze_generateRoom(doorN, doorE, doorS, doorW,
-                       lockedN, lockedE, lockedS, lockedW, doorOffsets, roomSeedFor(col, row),
-                       (u8) ((row * MAX_MAP_COLS) + col));
+    // La sala sale del cartucho ya tallada (inc/levels.h): lo unico que queda
+    // por decidir es que vanos van abiertos, que es progreso de partida.
+    {
+        const u8 *sala = bakedRoom(col, row);
+        const bool abierta[4] = { openN, openE, openS, openW };
+
+        if (sala == NULL)
+            return;
+
+        Maze_loadRoom(sala, FALSE, abierta);
+    }
     Maze_draw();
     Items_drawInRoom(col, row);
     Plants_drawInRoom(col, row);
@@ -1932,6 +1702,17 @@ static u16 plantCacheSlot(u8 planet, u8 col, u8 row)
     return slot;
 }
 
+// La sala de extraccion, que vive fuera de la rejilla y tiene su propia ranura
+// en el planeta horneado. Sus dos puertas no se cierran nunca -- es el pasillo
+// entre el menu y la mision -- asi que se carga con los vanos abiertos.
+static void loadExtractionRoom(void)
+{
+    static const bool abiertas[4] = { TRUE, TRUE, TRUE, TRUE };
+
+    if (curPlanet != NULL)
+        Maze_loadRoom(Levels_extractionRoom(levels, curPlanet), TRUE, abiertas);
+}
+
 static void loadRoom(u8 col, u8 row)
 {
     const u16 seed = roomSeedFor(col, row);
@@ -1948,54 +1729,20 @@ static void loadRoom(u8 col, u8 row)
         doorOffsetFor(col, row, DOOR_W),
     };
 
-    // First pass: build the interior/slide-graph with every ACTIVE door
-    // provisionally LOCKED (not open) -- so Plants_spawnForRoom() below
-    // places plants against the grid shape this room will actually have
-    // by default (sealed until cleared, user request), same as it always
-    // used to spawn against whatever the FINAL lock state already was
-    // under the old single-pass design.
-    //
-    // BUG FIX (host-tested: 1529 of 6000 generated rooms had at least one
-    // plant end up entombed inside a sealed door's own threshold cells --
-    // an unrecoverable soft-lock, since a plant walled off can never be
-    // collected, so the room could never clear, so its doors could never
-    // open). Root cause: plants.c's own spawn-time Maze_isWall() recheck
-    // (its own doc comment: a locked door's threshold can turn a real
-    // slide-graph cell into a wall AFTER the graph is built) only
-    // protects against whatever's ALREADY sealed at the exact moment
-    // Plants_spawnForRoom() runs. Spawning against every door open first
-    // (the previous version of this comment) left every door's threshold
-    // cells free to place plants, then applyRoomDoorLocks() right after
-    // sealed them anyway. Locking every active door here instead, before
-    // ever spawning plants, makes that recheck actually keep plants off
-    // every cell any door's sealing could ever claim. Plants_spawnForRoom
-    // is already proven stable under locked-door grids (plants.c's own
-    // earlier doc comment -- host fuzzed across every door/lock
-    // combination); this is just one more valid combination, now the
-    // representative one instead of an edge case.
-    //
-    // applyRoomDoorLocks() right after rebuilds the real graph/plants
-    // against the ACTUAL combined lock state and redraws -- replays this
-    // same cached attempt, cheap, no new search (maze.h's own doc
-    // comment: a locked door can unlock later without the interior ever
-    // being regenerated).
-    // Second and later visits take the room's plant lines straight out of
-    // plants.c's cache (user request: crossing a door stalled for a few
-    // frames). Both passes above exist only to feed Plants_spawnForRoom
-    // the grid it has to place against -- with the lines already known
-    // there is nothing to place, so the first pass goes away too and
-    // applyRoomDoorLocks' own generation is the only one left. It replays
-    // the same cached attempt either way (maze.h), so the grid it
-    // produces is identical.
+    // Las plantas de la sala vienen horneadas con ella: la cache sigue siendo
+    // el camino normal (la cartografia la deja llena), y esto es el respaldo.
     if (!Plants_loadCachedRoom(plantCacheSlot(sizePresetIndex, col, row)))
     {
-        Maze_generateRoom(doorN, doorE, doorS, doorW, doorN, doorE, doorS, doorW, doorOffsets, seed,
-                           (u8) ((row * MAX_MAP_COLS) + col));
-        Plants_spawnForRoom(seed, plantCacheSlot(sizePresetIndex, col, row)); // spec §48 -- own line per room, same roomSeed as the layout itself
-        Plants_cacheCurrentRoom(plantCacheSlot(sizePresetIndex, col, row)); // never again for this room, this session
+        const u8 *sala = bakedRoom(col, row);
+
+        if (sala != NULL)
+        {
+            Plants_loadForRoom(sala, plantCacheSlot(sizePresetIndex, col, row));
+            Plants_cacheCurrentRoom(plantCacheSlot(sizePresetIndex, col, row));
+        }
     }
 
-    applyRoomDoorLocks(col, row); // final generate + draw (Maze_draw/Items_drawInRoom/Plants_drawInRoom), see its own doc comment
+    applyRoomDoorLocks(col, row); // carga la sala, decide sus vanos y la dibuja
     squashFramesLeft = 0; // a wall hit does not carry over into the next room
     plantPathDirty = TRUE; // different room, different plants: the cached route is meaningless now
 
@@ -2079,26 +1826,12 @@ static void newGame(void)
 
     mapSeed = save.mapSeed;
 
-    // Reseed explicitly from mapSeed so GuideMap_generate()'s own
-    // random() sequence becomes reproducible from mapSeed alone (see the
-    // presetSave doc comment above) -- needed for a resume (or a planet
-    // whose seed ensurePlantsTotalKnown() just decided above) to
-    // regenerate the identical map every time.
+    // El mapa ya no sale de aqui, pero la corriente compartida si: sembrarla
+    // con el mapSeed es lo que hace que el parpadeo de los enemigos (enemy.c)
+    // sea el mismo cada vez que se entra a este planeta.
     setRandomSeed(mapSeed);
 
-    mapCols = sizePresets[sizePresetIndex].cols;
-    mapRows = sizePresets[sizePresetIndex].rows;
-    itemCount = sizePresets[sizePresetIndex].letters; // spec §33
-
-    // Before GuideMap_generate(): the door offsets it picks depend on
-    // this planet's room footprint (Maze_doorOffsetRange), and every
-    // room generated afterwards is carved at this size.
-    Maze_setRoomSize(sizePresets[sizePresetIndex].roomW, sizePresets[sizePresetIndex].roomH,
-                     sizePresets[sizePresetIndex].variety);
-    GuideMap_setShape(sizePresets[sizePresetIndex].map, sizePresets[sizePresetIndex].cols,
-                      sizePresets[sizePresetIndex].rows);
-    GuideMap_generate();
-    presetSave[sizePresetIndex].lettersActual = itemCount; // generate may have lowered it
+    setUpPlanetFromRom(sizePresetIndex);
     if (presetSave[sizePresetIndex].scoreRooms == 0)
         presetSave[sizePresetIndex].scoreRooms = countPlanetRooms(); // what the start value scales by
     // Switches to THIS planet's own room-attempt-cache bank (spec §52) --
@@ -2196,7 +1929,7 @@ static void newGame(void)
     {
         // Same offset as insertLinkOffset (spec §30): opposite directions
         // (N<->S, E<->W) share the same axis, so no translation is needed.
-        Maze_generateInsertionRoom(insertRoomDoorDir, insertLinkOffset, menuDoorDir, menuDoorOffset, mapSeed);
+        loadExtractionRoom();
         Maze_draw();
         drawInsertRoomArrow(); // spec §37
         Items_drawHud();
@@ -2769,6 +2502,93 @@ static void drawCollection(void)
     collDrawName();
 }
 
+// ---------------------------------------------------------------------
+// LA PAGINA DE GALAXIAS (peticion del usuario: "un menu que se activa
+// pulsando C y que tiene todos los nombres de las galaxias, misma estructura
+// que la coleccion de plantas"). Misma forma que aquella: titulo, lista con
+// cursor y una linea de ayuda abajo. Con ocho entradas no hay que desplazar
+// nada, asi que no lleva el tejemaneje de ventana que si necesita la
+// coleccion con sus 2565 plantas.
+//
+// Lo que cuenta de cada galaxia va EN TEXTO y no en color: cuantos de sus
+// ocho planetas estan terminados, y cual es la que se esta jugando.
+// ---------------------------------------------------------------------
+#define GAL_TITLE_ROW 3
+#define GAL_FIRST_ROW 7
+#define GAL_PITCH     2
+#define GAL_X         8
+#define GAL_HINT_ROW  25
+
+static u8 galCursor;
+
+static void galDrawRow(u8 i, bool conCursor)
+{
+    char buf[40];
+    char nombre[20];
+    const u8 hechos = galaxyDoneCount(i);
+    const u16 y = (u16) (GAL_FIRST_ROW + (i * GAL_PITCH));
+    int len;
+
+    pickGalaxyName(i, nombre);
+
+    // El estado en palabras: "COMPLETA" cuando estan los ocho, y "AQUI" la que
+    // se esta jugando ahora. Nada de esto se fia del color.
+    if (hechos >= SIZE_PRESET_COUNT)
+        len = sprintf(buf, "%c %-8s %d DE %d  COMPLETA", conCursor ? 16 : ' ',
+                      nombre, hechos, SIZE_PRESET_COUNT);
+    else if (i == curGalaxy)
+        len = sprintf(buf, "%c %-8s %d DE %d  AQUI", conCursor ? 16 : ' ',
+                      nombre, hechos, SIZE_PRESET_COUNT);
+    else
+        len = sprintf(buf, "%c %-8s %d DE %d", conCursor ? 16 : ' ',
+                      nombre, hechos, SIZE_PRESET_COUNT);
+
+    // Se rellena hasta el ancho fijo para borrar lo que hubiera antes.
+    while (len < 30)
+        buf[len++] = ' ';
+    buf[len] = '\0';
+
+    VDP_drawText(buf, GAL_X, y);
+}
+
+static void drawGalaxies(void)
+{
+    const u8 n = Levels_galaxyCount(levels);
+    u8 i;
+
+    VDP_clearPlane(BG_A, TRUE);
+    VDP_setTextPalette(PAL0);
+    VDP_drawText("GALAXIAS", (40 - 8) / 2, GAL_TITLE_ROW);
+
+    for (i = 0; i < n; i++)
+        galDrawRow(i, i == galCursor);
+
+    VDP_drawText("A VIAJAR   B VOLVER", (40 - 19) / 2, GAL_HINT_ROW);
+}
+
+static void enterGalaxies(void)
+{
+    gameState = STATE_GALAXIES;
+    screenAlternateTimer = 0;
+    galCursor = curGalaxy;
+    Menu_setVisible(FALSE);
+    flushSprites();
+    drawGalaxies();
+}
+
+static void leaveGalaxies(void)
+{
+    bool completed[SIZE_PRESET_COUNT];
+
+    gameState = STATE_MENU;
+    screenAlternateTimer = 0;
+    Menu_setVisible(TRUE);
+    Menu_hideSprites();
+    drawMenu();
+    planetCompletedFlags(completed);
+    Menu_fadeInSprites(sizePresetIndex, unlockedPlanets, completed);
+}
+
 // Menu -> coleccion. Menu_setVisible(FALSE) es lo que devuelve el indice 2 de
 // PAL0 al suelo del planeta: el menu lo tiene prestado para el violeta de su
 // barra, y el fondo de cada tesela de planta es justo ese indice.
@@ -2922,18 +2742,15 @@ static void drawMenu(void)
     // A planet still locked says what it costs instead of what's in it
     // (user request: "planetas bloqueados son seleccionables, pero te
     // indica que objetos necesitan ser [recogidos] para entrar"). It has
-    // no numbers of its own to show anyway -- a locked planet is never
-    // charted, precisely because nobody can go there yet.
+    // no numbers of its own to show here.
     if (sizePresetIndex >= unlockedPlanets)
     {
         u16 percent, missing;
 
         VDP_drawText("- LOCKED -", (40 - 10) / 2, MENU_ROW_B);
 
-        if (planetUnlockProgress(&percent, &missing))
-            len = sprintf(buf, "COLLECT %d MORE ITEMS TO OPEN IT", missing);
-        else
-            len = sprintf(buf, "VISIT THE PLANETS ALREADY OPEN");
+        planetUnlockProgress(&percent, &missing);
+        len = sprintf(buf, "COLLECT %d MORE ITEMS TO OPEN IT", missing);
 
         VDP_drawText(buf, (40 - len) / 2, MENU_ROW_C);
     }
@@ -2964,10 +2781,8 @@ static void drawMenu(void)
     {
         u16 percent, missing;
 
-        if (planetUnlockProgress(&percent, &missing))
-            len = sprintf(buf, "NEXT PLANET: %d%% OF %d%%", percent, PLANET_UNLOCK_PERCENT);
-        else
-            len = sprintf(buf, "MAPPING INCOMPLETE");
+        planetUnlockProgress(&percent, &missing);
+        len = sprintf(buf, "NEXT PLANET: %d%% OF %d%%", percent, PLANET_UNLOCK_PERCENT);
 
         VDP_drawText(buf, (40 - len) / 2, MENU_ROW_A);
     }
@@ -3094,12 +2909,45 @@ static void fadeFromBackdrop(void)
 // collected. Derived fresh from presetSave rather than tracked, which is
 // cheap at SIZE_PRESET_COUNT checks and never goes stale. Both the menu's
 // own per-frame update and the sprite fade-in need it.
+// LOS PLANETAS TERMINADOS, POR GALAXIA. Cambiar de galaxia borra presetSave
+// entero -- son 280 B por planeta y solo dan para los ocho de UNA --, asi que
+// sin esto volver a una galaxia la encontraba como nueva. Un bit por planeta y
+// un byte por galaxia: ocho bytes para todo el cartucho, que si caben.
+//
+// Sigue sin haber SRAM: esto dura lo que dure la consola encendida, igual que
+// el resto de la partida.
+#define GALAXY_SAVE_MAX 16
+static u8 galaxyDone[GALAXY_SAVE_MAX];
+
+static u8 galaxyDoneCount(u8 galaxia)
+{
+    const u8 bits = galaxyDone[galaxia % GALAXY_SAVE_MAX];
+    u8 n = 0, i;
+
+    for (i = 0; i < SIZE_PRESET_COUNT; i++)
+        if ((bits >> i) & 1)
+            n++;
+
+    return n;
+}
+
+// Apunta de paso lo que encuentra: un planeta que acaba de terminarse queda
+// anotado en su galaxia aqui mismo, que es el unico sitio por el que pasa
+// siempre (el menu lo llama cada frame y las transiciones tambien).
 static void planetCompletedFlags(bool *out)
 {
+    const u8 g = (u8) (curGalaxy % GALAXY_SAVE_MAX);
     u8 i;
 
     for (i = 0; i < SIZE_PRESET_COUNT; i++)
-        out[i] = presetSave[i].hasSave && (presetSave[i].collectedCount >= lettersFor(i));
+    {
+        const bool vivo = presetSave[i].hasSave && (presetSave[i].collectedCount >= lettersFor(i));
+
+        if (vivo)
+            galaxyDone[g] |= (u8) (1u << i);
+
+        out[i] = vivo || (((galaxyDone[g] >> i) & 1) != 0);
+    }
 }
 
 static void resetToMenu(void)
@@ -3146,7 +2994,6 @@ static void resetToMenu(void)
     Sfx_musicScene(TRUE);
     Sfx_setPlanet(sizePresetIndex);
     mapViewOpen = FALSE;
-    cartographyThenPlay = FALSE; // a reset mid-cartography goes to the menu, not into a run
     roomViewerOn = FALSE; // RESET_COMBO can fire from inside either map-screen tool
     sweepOn = FALSE;
     inInsertRoom = FALSE; // harmless either way -- newGame() sets it back to TRUE when a new run starts
@@ -3925,16 +3772,20 @@ static void roomBuildFor(u8 col, u8 row, u8 lockMode, RoomBuild *out)
 // putting the live room back afterwards is just another call for it.
 static void buildRoomForInspection(u8 col, u8 row, u8 lockMode)
 {
+    const u8 *sala = bakedRoom(col, row);
     RoomBuild rb;
 
+    if (sala == NULL)
+        return;
+
     roomBuildFor(col, row, lockMode, &rb);
-    Maze_generateRoom(rb.door[DOOR_N], rb.door[DOOR_E], rb.door[DOOR_S], rb.door[DOOR_W],
-                       rb.door[DOOR_N], rb.door[DOOR_E], rb.door[DOOR_S], rb.door[DOOR_W],
-                       rb.off, rb.seed, rb.slot);
-    Plants_spawnForRoom(rb.seed, plantCacheSlot(sizePresetIndex, col, row));
-    Maze_generateRoom(rb.door[DOOR_N], rb.door[DOOR_E], rb.door[DOOR_S], rb.door[DOOR_W],
-                       rb.locked[DOOR_N], rb.locked[DOOR_E], rb.locked[DOOR_S], rb.locked[DOOR_W],
-                       rb.off, rb.seed, rb.slot);
+    {
+        const bool abierta[4] = { !rb.locked[DOOR_N], !rb.locked[DOOR_E],
+                                  !rb.locked[DOOR_S], !rb.locked[DOOR_W] };
+
+        Maze_loadRoom(sala, FALSE, abierta);
+    }
+    Plants_loadForRoom(sala, plantCacheSlot(sizePresetIndex, col, row));
 }
 
 // Where the ship first stands having come in through door `dir`: the cell
@@ -4140,7 +3991,7 @@ static void updateRoomViewer(u16 state, u16 prevState)
 #define SWEEP_LAST_REPORT_ROW 24
 
 static bool sweepDone;
-static u16 sweepCursor; // room index into the map grid, mapCols-major like introTick's
+static u16 sweepCursor; // room index into the map grid, mapCols-major
 static u8 sweepDoor;
 static u16 sweepRooms, sweepBadRooms, sweepBadPlants;
 static u8 sweepReportRow;
@@ -4652,7 +4503,7 @@ static void clearDebugView(void)
     // maze over the whole screen, which covers those rows too) -- only
     // when BG_A actually holds the maze. In STATE_MENU (and STATE_INTRO,
     // its own boot-time prompt/terminal screen), BG_A holds something
-    // else (drawMenu()/drawIntroPrompt()/introBegin()'s own
+    // else (drawMenu()/drawIntroPrompt()'s own
     // VDP_drawText calls), and Maze_draw() would stomp it with whatever's
     // left in maze.c's grid[][] from the last room visited (or never
     // generated at all, this boot); Maze_drawDebugBackdrop below never
@@ -4793,7 +4644,7 @@ static void drawDebugView(void)
     VDP_setTextPriority(1);
 
     {
-        static const char *const stateNames[] = { "INTR", "MENU", "PLAY", "OVER", "SCOR", "COLL", "WIN " };
+        static const char *const stateNames[] = { "INTR", "MENU", "PLAY", "OVER", "SCOR", "COLL", "WIN ", "GALX" };
 
         sprintf(buf, "ST:%s", stateNames[gameState]);
         VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW);
@@ -4958,10 +4809,12 @@ int main(bool hardReset)
 
     JOY_init();
 
+
+
+
     // STATE_INTRO (user request, see the enum's own doc comment) --
     // Menu_setVisible/drawMenu() are deferred to the main loop's
-    // STATE_INTRO dispatch below, once introBegin()/introTick() (one
-    // room per frame) have worked through every planet.
+    // STATE_INTRO dispatch below, que es donde cae la primera pulsacion.
     gameState = STATE_INTRO;
     SPR_setVisibility(playerSprite, HIDDEN);
     SPR_setVisibility(mapShipSprite, HIDDEN);
@@ -4971,7 +4824,6 @@ int main(bool hardReset)
     while (TRUE)
     {
         const u16 state = JOY_readJoypad(JOY_1);
-
         updateDebugCombo(state, prevState); // checked every frame, any gameState (see its own doc comment)
 
         if (((state & RESET_COMBO) == RESET_COMBO) && ((prevState & RESET_COMBO) != RESET_COMBO))
@@ -4980,62 +4832,48 @@ int main(bool hardReset)
         }
         else if (gameState == STATE_INTRO)
         {
-            if (!introGenerating)
+            typeStep(); // the terminal types itself out, see its own doc comment
+
+            // Any real button: esa primera pulsacion es la que siembra el
+            // random() de SGDK (spec 54), y es la razon por la que esta
+            // pantalla sigue existiendo -- el nombre de la galaxia y las
+            // semillas de planeta de aqui abajo lo necesitan sembrado.
+            //
+            // Deliberately NOT gated on the text having finished: the
+            // reveal is under half a second, and a player who presses
+            // through it wanted to skip it.
+            if ((state & (BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_START)) &&
+                !(prevState & (BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_START)))
             {
-                typeStep(); // the terminal types itself out, see its own doc comment
+                u8 p;
 
-                // Any real button -- same "first press reseeds random()"
-                // moment spec §54 already relies on elsewhere, which is
-                // exactly why this screen exists (introBegin/introTick's
-                // own doc comment): introBegin() below draws on that
-                // safely.
-                //
-                // Deliberately NOT gated on the text having finished: the
-                // reveal is under half a second, and a player who presses
-                // through it wanted to skip it.
-                if ((state & (BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_START)) &&
-                    !(prevState & (BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_START)))
+                applyGalaxyName();
+                fadeToBackdrop();           // el menu se monta detras del negro
+                VDP_clearPlane(BG_B, TRUE); // BG_B is HUD/debug territory during real play
+                invalidateHudLines();
+
+                // Ya no hay nada que cartografiar: las salas vienen
+                // horneadas en el cartucho, asi que decidir la semilla de
+                // cada planeta y contar sus plantas es leer unos bytes.
+                // Los ocho de golpe y aqui, que es lo que le da al menu
+                // sus totales de verdad desde el primer frame -- y lo que
+                // antes costaba una pantalla entera de espera.
+                for (p = 0; p < SIZE_PRESET_COUNT; p++)
+                    ensurePlantsTotalKnown(p);
+
+                gameState = STATE_MENU;
+                rerollPlanets(); // la primera tirada de la sesion
+                Sfx_musicScene(TRUE); // el menu va sin musica
+                Sfx_setPlanet(sizePresetIndex);
+                Menu_setVisible(TRUE);
+                Menu_hideSprites(); // same as resetToMenu: the sprites fade in after the screen
+                drawMenu();
+                fadeFromBackdrop();
                 {
-                    introBegin();
-                    introGenerating = TRUE;
-                }
-            }
-            else
-            {
-                typeStep();       // las cabeceras, que se escriben solas
-                introFloodStep(); // one glyph per frame, every frame -- see its own doc comment
-                if (introTick()) // one room per frame -- see its own doc comment
-                {
-                    fadeToBackdrop(); // whatever comes next is built behind the black
-                    VDP_clearPlane(BG_B, TRUE); // BG_B is HUD/debug territory during real play
-                    invalidateHudLines();
-                    introGenerating = FALSE;
+                    bool completed[SIZE_PRESET_COUNT];
 
-                    if (cartographyThenPlay)
-                    {
-                        // Pressing A brought us here: go straight into the
-                        // run the player already committed to, never back
-                        // to the menu they already left.
-                        cartographyThenPlay = FALSE;
-                        startSelectedPlanet();
-                    }
-                    else
-                    {
-                        gameState = STATE_MENU;
-                        rerollPlanets(); // la primera tirada de la sesion
-                        Sfx_musicScene(TRUE); // el menu va sin musica
-                        Sfx_setPlanet(sizePresetIndex);
-                        Menu_setVisible(TRUE);
-                        Menu_hideSprites(); // same as resetToMenu: the sprites fade in after the screen
-                        drawMenu();
-                        fadeFromBackdrop();
-                        {
-                            bool completed[SIZE_PRESET_COUNT];
-
-                            planetCompletedFlags(completed);
-                            Menu_fadeInSprites(sizePresetIndex, unlockedPlanets, completed);
-                        }
-                    }
+                    planetCompletedFlags(completed);
+                    Menu_fadeInSprites(sizePresetIndex, unlockedPlanets, completed);
                 }
             }
         }
@@ -5055,6 +4893,37 @@ int main(bool hardReset)
                 leaveScoreTable();
             else if (++screenAlternateTimer >= SCREEN_ALTERNATE_FRAMES)
                 leaveScoreTable(); // its turn is over, hand back to the menu
+        }
+        else if (gameState == STATE_GALAXIES)
+        {
+            // ARRIBA/ABAJO mueve el cursor, A viaja a esa galaxia y B vuelve.
+            const u8 n = Levels_galaxyCount(levels);
+            const u8 antes = galCursor;
+
+            if ((state & BUTTON_UP) && !(prevState & BUTTON_UP))
+                galCursor = (u8) ((galCursor + n - 1) % n);
+            if ((state & BUTTON_DOWN) && !(prevState & BUTTON_DOWN))
+                galCursor = (u8) ((galCursor + 1) % n);
+
+            if (galCursor != antes)
+            {
+                galDrawRow(antes, FALSE);
+                galDrawRow(galCursor, TRUE);
+            }
+
+            if ((state & BUTTON_B) && !(prevState & BUTTON_B))
+                leaveGalaxies();
+            else if ((state & BUTTON_A) && !(prevState & BUTTON_A))
+            {
+                const u8 destino = galCursor;
+
+                leaveGalaxies();
+                // El barrido de los planetas necesita el menu puesto, asi que
+                // el viaje va DESPUES de volver a el. Hacia donde se van es
+                // hacia donde esta el destino en la lista.
+                if (destino != curGalaxy)
+                    switchGalaxy(destino, (destino > curGalaxy) ? 1 : -1);
+            }
         }
         else if (gameState == STATE_COLLECTION)
         {
@@ -5150,6 +5019,21 @@ int main(bool hardReset)
             // "planetas bloqueados son seleccionables, pero te indica que
             // objetos necesitan ser [desbloqueados] para entrar") -- what
             // a locked one refuses is A, down below, not the cursor.
+            // El eje vertical es la GALAXIA (peticion del usuario): arriba y
+            // abajo estaban libres en el menu -- ARRIBA solo aparece dentro
+            // del acorde de reinicio A+B+C+ARRIBA, que se mira antes que
+            // esto y tiene prioridad, asi que un ARRIBA a secas es nuestro.
+            if ((state & BUTTON_UP) && !(prevState & BUTTON_UP) &&
+                !(state & (BUTTON_A | BUTTON_B | BUTTON_C)))
+            {
+                const u8 n = Levels_galaxyCount(levels);
+
+                switchGalaxy((u8) ((curGalaxy + n - 1) % n), -1);
+            }
+            if ((state & BUTTON_DOWN) && !(prevState & BUTTON_DOWN))
+            {
+                switchGalaxy((u8) (curGalaxy + 1), 1);
+            }
             if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
             {
                 sizePresetIndex = (u8) (DEBUG_FIRST_PLANET + ((sizePresetIndex - DEBUG_FIRST_PLANET + PLANET_SEL_COUNT - 1) % PLANET_SEL_COUNT));
@@ -5164,25 +5048,8 @@ int main(bool hardReset)
             }
             if ((state & BUTTON_A) && !(prevState & BUTTON_A) && (sizePresetIndex < unlockedPlanets))
             {
-                // Map it now if the boot screen did not (user request:
-                // "quiero que cargue el planeta cuando se pulsa A para
-                // entrar, no cuando se selecciona"). Browsing the bar
-                // stays instant; the wait lands on the one planet the
-                // player actually committed to, and only the first time.
                 fadeToBackdrop();  // the whole run is set up below, behind the flat screen
-                if (!presetSave[sizePresetIndex].plantsTotalKnown)
-                {
-                    Menu_hideSprites();
-                    flushSprites();
-                    Menu_setVisible(FALSE);
-                    gameState = STATE_INTRO;
-                    introGenerating = TRUE;
-                    cartographyThenPlay = TRUE; // its completion starts the run instead of returning to the menu
-                    beginCartography(sizePresetIndex, (u8) (sizePresetIndex + 1), FALSE);
-                    fadeFromBackdrop();
-                }
-                else
-                    startSelectedPlanet();
+                startSelectedPlanet();
             }
             // B abre la coleccion de plantas (peticion del usuario). Solo
             // B: con A o C es parte de un acorde (RESET_COMBO, los de
@@ -5191,12 +5058,16 @@ int main(bool hardReset)
                 !(state & (BUTTON_A | BUTTON_C)))
                 enterCollection();
 
-            // Sound toggle (spec §47, user request: "activable desde el
-            // menu y por defecto apagado") -- BUTTON_C alone, free in the
-            // menu (only ever meaningful as part of the 3-button
-            // RESET_COMBO/DEBUG_VIEW_COMBO chords
-            // above, which a lone C press never satisfies).
-            if ((state & BUTTON_C) && !(prevState & BUTTON_C))
+            // C abre la lista de galaxias (peticion del usuario). Igual que
+            // la B de la coleccion, sola: con A o B es parte de un acorde.
+            if ((state & BUTTON_C) && !(prevState & BUTTON_C) &&
+                !(state & (BUTTON_A | BUTTON_B)))
+                enterGalaxies();
+
+            // Sound toggle (spec §47, user request: "activable desde el menu y
+            // por defecto apagado"). Estaba en C, que ahora abre las galaxias;
+            // START estaba libre en el menu y no entra en ningun acorde.
+            if ((state & BUTTON_START) && !(prevState & BUTTON_START))
             {
                 Sfx_setEnabled(!Sfx_isEnabled());
                 drawMenu();
@@ -5866,7 +5737,7 @@ int main(bool hardReset)
                         // same reason the sibling inInsertRoom branch already
                         // skips that below -- so inInsertRoom flips TRUE.
                         inInsertRoom = TRUE;
-                        Maze_generateInsertionRoom(insertRoomDoorDir, insertLinkOffset, menuDoorDir, menuDoorOffset, mapSeed);
+                        loadExtractionRoom();
                         Maze_draw();
                         drawInsertRoomArrow(); // spec §37
                         positionPlayerEnteringViaDoorDir(insertRoomDoorDir, insertLinkOffset);

@@ -114,3 +114,10 @@ WAV xgmJazzRide2 "sound/hihat_jazz2.wav" XGM
 WAV xgmJazzRide3 "sound/hihat_jazz3.wav" XGM
 WAV jazzKick0 "sound/kick_jazz0.wav" PCM4
 WAV jazzKick1 "sound/kick_jazz1.wav" PCM4
+
+# LOS NIVELES HORNEADOS (res/levels.bin, lo escribe tools/levelgen desde los
+# mismos src/maze.c y src/guidemap.c que lleva la consola -- ver inc/levels.h).
+# Sin comprimir y sin 'far': se lee del cartucho tal cual, celda a celda, asi
+# que descomprimirlo querria un buffer en RAM, que es justo lo que esto viene a
+# ahorrar.
+BIN levels "levels.bin" 2 2 0 NONE FALSE

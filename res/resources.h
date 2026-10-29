@@ -31,6 +31,7 @@ extern const u8 xgmJazzRide2[1280];
 extern const u8 xgmJazzRide3[1280];
 extern const u8 jazzKick0[4864];
 extern const u8 jazzKick1[4864];
+extern const u8 levels[71564];
 extern const u8 musPattern[24576];
 extern const u8 musAventura[40448];
 extern const u8 musHouse1[46336];

@@ -135,6 +135,12 @@ extern u8 itemRow[ITEM_COUNT];
 // never needs recomputing afterwards, unlike the item-dependent lock state.
 void GuideMap_generate(void);
 
+// La otra forma de dejar un planeta puesto: leerlo horneado de res/levels.bin
+// en vez de tallarlo (inc/levels.h). `bin` es el fichero entero y `planeta`
+// uno de sus registros -- hacen falta los dos porque los offsets de sala van
+// relativos al payload. Deja lo mismo que GuideMap_generate y no toca random().
+void GuideMap_load(const u8 *bin, const u8 *planeta);
+
 bool GuideMap_hasDoor(u8 col, u8 row, u8 dir);
 
 // Same value as guideMap[row][col]'s doorOffsetN/E/S/W field for dir

@@ -1,4 +1,5 @@
 #include "plants.h"
+#include "levels.h"
 #include "maze.h"
 #include "hud.h"
 #include "guidemap.h" // MAX_MAP_COLS/MAX_MAP_ROWS
@@ -301,6 +302,21 @@ void Plants_buildTile(u16 shape, u8 *dst)
 //
 // dst recibe las 4 teselas seguidas, en el orden que las quiere VRAM:
 // arriba-izquierda, arriba-derecha, abajo-izquierda, abajo-derecha.
+// EL MARGEN de la planta dentro de su celda (peticion del usuario: "con
+// padding para que no ocupen todo el tile completamente, y centradas dentro
+// del tile"). Antes el dibujo de 8x8 se doblaba a 16x16 justos y la planta
+// tocaba los cuatro bordes: la celda ERA la planta. Con dos pixeles por lado
+// el dibujo queda en 12x12 y se lee como un objeto puesto en medio del suelo.
+//
+// El relleno no cuesta nada: el fondo de estas teselas ya es PAL_SUELO, que es
+// el mismo color que el suelo de alrededor.
+#define PLANT_PAD  2
+#define PLANT_DRAW (16 - (2 * PLANT_PAD))
+
+// Que pixel del dibujo de 8 le toca a cada uno de los PLANT_DRAW: (i * 8) / 12.
+static const u8 plantScale[12] = { 0, 0, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7 };
+_Static_assert(PLANT_DRAW == 12, "plantScale esta calculada para 12 pixeles de ancho");
+
 static void buildTile16(u16 shape, u8 *dst)
 {
     u8 chico[32];
@@ -309,16 +325,25 @@ static void buildTile16(u16 shape, u8 *dst)
 
     buildTile(shape, chico, FALSE, FALSE);
 
-    for (y = 0; y < 8; y++)
-        for (x = 0; x < 8; x++)
-        {
-            const u8 b = chico[(y * 4) + (x >> 1)];
-            const u8 c = (x & 1) ? (u8) (b & 15) : (u8) (b >> 4);
+    for (y = 0; y < 16; y++)
+        for (x = 0; x < 16; x++)
+            grande[y][x] = PAL_SUELO;
 
-            grande[y * 2][x * 2] = c;
-            grande[y * 2][(x * 2) + 1] = c;
-            grande[(y * 2) + 1][x * 2] = c;
-            grande[(y * 2) + 1][(x * 2) + 1] = c;
+    // De 8 a PLANT_DRAW: a 12 el paso es de uno y medio, asi que unas filas
+    // salen dobles y otras sencillas. En un dibujo organico como este no se
+    // nota, y es lo que permite dejar margen sin encoger la planta a la mitad.
+    //
+    // La correspondencia va en tabla por claridad. (Medido: en ROM da igual,
+    // gcc convierte la division por 12 en multiplicacion y desplazamiento.)
+    for (y = 0; y < PLANT_DRAW; y++)
+        for (x = 0; x < PLANT_DRAW; x++)
+        {
+            const u8 sy = plantScale[y];
+            const u8 sx = plantScale[x];
+            const u8 b = chico[(sy * 4) + (sx >> 1)];
+
+            grande[PLANT_PAD + y][PLANT_PAD + x] =
+                (sx & 1) ? (u8) (b & 15) : (u8) (b >> 4);
         }
 
     for (t = 0; t < 4; t++)
@@ -426,15 +451,51 @@ void Plants_reset(void)
     // cacheValid is deliberately NOT cleared here any more. It used to be,
     // because the cache was indexed by map position alone and a different
     // planet put different rooms at those positions. Slots are per planet
-    // now, and a planet's mapSeed is decided once per session, so what is
-    // in there stays true for the rest of the session -- which is the
-    // whole point: it is filled during the cartography screen at boot, so
-    // no room has to pay for its own first visit mid-play.
+    // now, so lo que hay dentro sigue valiendo para el resto de la partida.
+    // Lo que SI lo invalida es cambiar de galaxia, porque entonces esos ocho
+    // planetas son otros: eso lo hace Plants_invalidateCache.
 
     tilesSlot = 0xFFFF;
     total = 0;
     for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
         curCount[line] = 0;
+}
+
+// Tira la cache de plantas entera. Al cambiar de galaxia los ocho planetas son
+// otros, asi que una ranura que era sala en la galaxia de antes puede no serlo
+// en la nueva -- y la pagina de coleccion la leeria (Plants_cachedRoomMask) y
+// ensenaria una planta de una habitacion que ya no existe.
+void Plants_invalidateCache(void)
+{
+    u16 i;
+
+    for (i = 0; i < PLANTS_CACHE_SLOTS; i++)
+        cacheValid[i] = FALSE;
+}
+
+_Static_assert(LVL_PLANT_LINES == PLANTS_LINES_PER_ROOM,
+               "levels.h y plants.c tienen que contar las mismas lineas de plantas");
+
+// CARGA las plantas ya sorteadas (res/levels.bin, formato en levels.h) en vez
+// de sortearlas. Es la que sustituye a Plants_spawnForRoom con los niveles
+// horneados, y es lo que permite borrar el grafo de deslizamiento: el sorteo
+// dependia de el (Maze_slideNodeCount/Maze_slideEdge), la carga no.
+void Plants_loadForRoom(const u8 *datos, u16 slot)
+{
+    const u8 *p = Levels_roomPlants(datos);
+    u8 line, i;
+
+    curSlot = (slot <= PLANTS_CACHE_SLOTS) ? slot : PLANTS_CACHE_SLOTS;
+
+    for (line = 0; line < PLANTS_LINES_PER_ROOM; line++)
+    {
+        curCount[line] = datos[LVL_ROOM_META + line];
+        for (i = 0; i < curCount[line]; i++, p += 2)
+        {
+            curCol[line][i] = p[0];
+            curRow[line][i] = p[1];
+        }
+    }
 }
 
 void Plants_spawnForRoom(u16 roomSeed, u16 slot)

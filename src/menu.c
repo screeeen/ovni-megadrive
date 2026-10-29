@@ -2,6 +2,7 @@
 #include "resources.h"
 #include "player.h"
 #include "maze.h"     // MAZE_TILE_COUNT / MAZE_SCRATCH_TILE_COUNT, for the title tiles
+#include "planetart.h" // el dibujo de los planetas, que cambia con la galaxia
 #include "guidemap.h" // GUIDEMAP_TILE_COUNT, same
 
 // 320x224 screen. Sun sits left of dead-center vertically so the
@@ -149,12 +150,38 @@ static const s16 planetHalfSize[MENU_PLANET_COUNT] = { 4, 4, 4, 4, 8, 8, 12, 12 
 #define CURSOR_HALF_H 4
 
 static Sprite *planetSprites[MENU_PLANET_COUNT];
+// EL BARRIDO AL CAMBIAR DE GALAXIA (peticion del usuario: "cuando se
+// seleccione galaxia, todos los planetas se muevan hacia arriba/abajo al mismo
+// tiempo y desaparezcan"). Se suma a la Y de todo lo que orbita, asi que con
+// una sola variable se van los ocho a la vez y siguen girando mientras se van.
+#define SWEEP_FRAMES 10
+#define SWEEP_DIST   140   // de sobra para sacarlos de la zona de juego
+static s16 sweepOffsetY;
+
 static Sprite *cursorSprite;
 
 // Ping-pong suavizado del cursor: un paso cada 3 tramas, ciclo de 48.
 static const s8 cursorBob[16] = { 0, 1, 1, 2, 2, 2, 1, 1, 0, -1, -1, -2, -2, -2, -1, -1 };
 static u16 cursorBobTick;
 static Sprite *sunSprite;
+
+// QUIEN TAPA A QUIEN. En esta maquina el orden de la lista de sprites es el
+// orden de dibujo, y el primero es el que queda ENCIMA; SPR_addSprite mete
+// cada nuevo al final, asi que el sol, que se crea el ultimo, caia debajo de
+// todo y los planetas le pasaban por delante incluso en la mitad de la orbita
+// que va por detras de el.
+//
+// Con profundidad explicita hay tres capas: el cursor arriba del todo, el sol
+// en medio, y cada planeta por delante o por detras del sol segun por donde
+// vaya. La mitad de arriba de la elipse es la de atras.
+#define DEPTH_CURSOR   (-2)
+#define DEPTH_DELANTE  (-1)
+#define DEPTH_SOL        0
+#define DEPTH_DETRAS     1
+// Solo se llama a SPR_setDepth cuando cambia de capa -- el sprite se reordena
+// en el acto cada vez que se toca, y eso son dos veces por vuelta y no sesenta
+// por segundo.
+static s8 planetDepth[MENU_PLANET_COUNT];
 
 // The big OVNI (user request: "solo OVNI en su lugar, alineado a la
 // derecha y si puedes hacer la fuente mas grande para esa palabra pues
@@ -312,14 +339,40 @@ void Menu_drawTitle(void)
 
 #define BAR_TILE_BASE   (TITLE_TILE_BASE + TITLE_TILES)
 #define BAR_FRAME_SET   8                      // piezas por marco
-#define BAR_CIRCLE_BASE (BAR_TILE_BASE + 48)   // 48 de marco: 3 tintas x 2 grosores x 8
-#define BAR_TILES       (48 + (3 * 3 * 4))
+// 48 de marco: 3 tintas x 2 grosores x 8 piezas. Los 36 que habia detras eran
+// los circulos genericos del hueco de cada celda, y ya no estan: ahora el
+// hueco lo llena el planeta de verdad (CELL_TILE_BASE).
+#define BAR_TILES       48
 
 // Cuatro letras por planeta, mismo orden que sizePresets[]. Ya no son
 // constantes: main.c los sortea de nuevo en cada vuelta al menu (peticion del
 // usuario: "que los nombres y los sonidos sean siempre aleatorios para cada
 // partida"). Estos valores solo se verian si algo dibujase el menu antes del
 // primer sorteo, igual que con galaxyName.
+// EL BANCO DE LOS PLANETAS. Ya no salen de planet_small/medium/large.png:
+// se dibujan en la consola cada vez que se cambia de galaxia (planetart.c), y
+// sus teselas viven aqui, en VRAM que gestionamos nosotros. Los sprites se
+// crean sin reserva ni subida automatica y se les dice que miren a este banco.
+//
+// 4 planetas de 8x8 (1 tesela), 2 de 16x16 (4) y 2 de 24x24 (9) = 30.
+#define PLANET_TILE_BASE (BAR_TILE_BASE + BAR_TILES)
+#define PLANET_ART_TILES 30
+
+// EL MISMO PLANETA EN EL SELECTOR (peticion del usuario: "esos planetas, los
+// mismos que aparecen en la animacion, figuren tambien en el selector"). El
+// hueco de una celda son 2x2 teselas, asi que aqui van los ocho dibujados a
+// 16x16 -- el mismo planeta, al tamano de la celda. Son teselas de FONDO, asi
+// que van en orden de FILAS y no de columnas como las de sprite.
+#define CELL_TILE_BASE (PLANET_TILE_BASE + PLANET_ART_TILES)
+#define CELL_SIDE      16
+#define CELL_TILES     (MENU_PLANET_COUNT * 4)
+
+_Static_assert(TITLE_TILES + BAR_TILES + PLANET_ART_TILES + CELL_TILES == MENU_TILE_COUNT,
+              "MENU_TILE_COUNT tiene que cubrir titulo, barra, planetas y celdas");
+
+static const u8 planetSide[MENU_PLANET_COUNT] = { 8, 8, 8, 8, 16, 16, 24, 24 };
+static const u8 planetTileAt[MENU_PLANET_COUNT] = { 0, 1, 2, 3, 4, 8, 12, 21 };
+
 static char planetNames[MENU_PLANET_COUNT][BAR_NAME_LEN + 1] = {
     "XENU", "ZARG", "QORG", "NYXX", "VOID", "KLOP", "WURM", "ZYGN"
 };
@@ -367,8 +420,6 @@ void Menu_setGalaxyName(const char *name)
     }
     galaxyName[i] = '\0';
 }
-static const u8 planetCircleSize[MENU_PLANET_COUNT] = { 0, 0, 0, 0, 1, 1, 2, 2 };
-static const u8 circleRadius[3] = { 3, 5, 7 };
 
 // Indice 2 = el violeta de los planetas, copiado desde PAL3 por
 // Menu_setVisible; indice 1 = el gris de los bloqueados.
@@ -404,7 +455,7 @@ static void barPackTile(const u8 px[8][8], u16 index)
 static void loadBarTiles(void)
 {
     u8 px[8][8];
-    u8 piece, row, col, grosor, variante, size, ink, quad;
+    u8 piece, row, col, grosor, variante, ink;
 
     for (ink = 0; ink < 3; ink++)
       for (variante = 0; variante < 2; variante++)
@@ -459,27 +510,8 @@ static void loadBarTiles(void)
         }
       }
 
-    for (size = 0; size < 3; size++)
-        for (ink = 0; ink < 3; ink++)
-            for (quad = 0; quad < 4; quad++)
-            {
-                const s16 ox = (s16) ((quad & 1) * 8);
-                const s16 oy = (s16) ((quad >> 1) * 8);
-                const s16 r  = circleRadius[size];
-
-                for (row = 0; row < 8; row++)
-                    for (col = 0; col < 8; col++)
-                    {
-                        // centro del bloque de 16x16 entre los pixeles 7 y 8
-                        const s16 dx = (s16) ((ox + col) * 2 - 15);
-                        const s16 dy = (s16) ((oy + row) * 2 - 15);
-                        const bool dentro = (s16) (dx*dx + dy*dy) <= (s16) (4*r*r);
-                        px[row][col] = dentro ? circleInk[ink] : 0;
-                    }
-
-                barPackTile(px, (u16) (BAR_CIRCLE_BASE + (((size * 3) + ink) * 4) + quad));
-            }
 }
+
 
 // pal: PAL0 normalmente. Un planeta superado se pinta con NAME_PAL_DONE,
 // donde el indice 15 es amarillo (Menu_setVisible lo deja ahi) -- o sea
@@ -515,7 +547,10 @@ void Menu_drawPlanetBar(u8 selectedIndex, u8 unlockedCount, const bool *complete
         const u8  fink  = (u8) (elegido ? (bloqueado ? 1 : (superado ? 0 : 2)) : ink);
         const u16 frame = (u16) (BAR_TILE_BASE
                                  + ((((u16) fink * 2) + (elegido ? 1u : 0u)) * BAR_FRAME_SET));
-        const u16 circ  = (u16) (BAR_CIRCLE_BASE + (((planetCircleSize[i] * 3) + ink) * 4));
+        // El hueco de la celda lleva AL PLANETA, dibujado a 16x16 por
+        // Menu_setGalaxyLook: el mismo que esta dando vueltas ahi abajo.
+        const u16 celda = (u16) (CELL_TILE_BASE + (i * 4));
+        const u16 cpal  = (u16) (bloqueado ? PAL0 : (superado ? PAL2 : PAL3));
 
         barPutTile((u16) (frame + 0), bx, BAR_Y, pal);
         barPutTile((u16) (frame + 1), (u16) (bx + 1), BAR_Y, pal);
@@ -523,13 +558,13 @@ void Menu_drawPlanetBar(u8 selectedIndex, u8 unlockedCount, const bool *complete
         barPutTile((u16) (frame + 2), (u16) (bx + 3), BAR_Y, pal);
 
         barPutTile((u16) (frame + 3), bx, (u16) (BAR_Y + 1), pal);
-        barPutTile((u16) (circ  + 0), (u16) (bx + 1), (u16) (BAR_Y + 1), pal);
-        barPutTile((u16) (circ  + 1), (u16) (bx + 2), (u16) (BAR_Y + 1), pal);
+        barPutTile((u16) (celda + 0), (u16) (bx + 1), (u16) (BAR_Y + 1), cpal);
+        barPutTile((u16) (celda + 1), (u16) (bx + 2), (u16) (BAR_Y + 1), cpal);
         barPutTile((u16) (frame + 4), (u16) (bx + 3), (u16) (BAR_Y + 1), pal);
 
         barPutTile((u16) (frame + 3), bx, (u16) (BAR_Y + 2), pal);
-        barPutTile((u16) (circ  + 2), (u16) (bx + 1), (u16) (BAR_Y + 2), pal);
-        barPutTile((u16) (circ  + 3), (u16) (bx + 2), (u16) (BAR_Y + 2), pal);
+        barPutTile((u16) (celda + 2), (u16) (bx + 1), (u16) (BAR_Y + 2), cpal);
+        barPutTile((u16) (celda + 3), (u16) (bx + 2), (u16) (BAR_Y + 2), cpal);
         barPutTile((u16) (frame + 4), (u16) (bx + 3), (u16) (BAR_Y + 2), pal);
 
         barPutTile((u16) (frame + 5), bx, (u16) (BAR_Y + 3), pal);
@@ -539,11 +574,10 @@ void Menu_drawPlanetBar(u8 selectedIndex, u8 unlockedCount, const bool *complete
 
     }
 
-    // Solo el nombre del planeta bajo el cursor, y debajo de su propio
-    // recuadro (user request). Los 8 a la vez ocupaban 32 de las 40
-    // columnas y no dejaban sitio para separarlos sin comerse los
-    // margenes: 8 x 4 letras + 7 huecos son 39. Con uno solo no hay nada
-    // que separar, y la barra conserva sus 4 columnas de margen.
+    // Solo el nombre del planeta bajo el cursor, a tamano normal y debajo de
+    // SU propio recuadro: el nombre tiene que senalar a cual pertenece. Los 8
+    // a la vez ocupaban 32 de las 40 columnas y no dejaban sitio para
+    // separarlos sin comerse los margenes.
     {
         const bool bloqueado = (selectedIndex >= unlockedCount);
         const bool superado  = !bloqueado && (completed != NULL) && completed[selectedIndex];
@@ -552,13 +586,119 @@ void Menu_drawPlanetBar(u8 selectedIndex, u8 unlockedCount, const bool *complete
         else if (superado)  VDP_setTextPalette(NAME_PAL_DONE);
         else                VDP_setTextPalette(NAME_PAL_OPEN);
 
-        // Debajo de SU recuadro, no centrado en pantalla (user request):
-        // el nombre tiene que señalar a cual pertenece.
         VDP_drawText(planetNames[selectedIndex],
                      (u16) (BAR_X + (selectedIndex * BAR_STRIDE)), BAR_NAME_Y);
     }
 
     VDP_setTextPalette(PAL0);   // the rest of the menu goes back to white
+}
+
+// Las tres copias de las cuatro tintas: PAL3 para un planeta normal, PAL0 en
+// gris para uno cerrado y PAL2 en amarillo para uno terminado. El menu ya
+// hacia ese truco con una tinta sola (misma silueta, otra paleta); con cuatro
+// hay que preparar las tres rampas.
+#define PLANET_INK_FIRST PLANET_PAL_FIRST
+static u16 savedPlanetInk[3][PLANET_PAL_COUNT];
+static bool planetInkSaved;
+static u8 curGalaxyLook;
+
+// Un planeta cerrado sale gris y uno terminado amarillo, igual que antes --
+// pero ahora son TRES rampas de cuatro niveles, asi que el gris y el amarillo
+// se repiten en las tres: lo que cambia entre rampas es el tono, y esos dos
+// estados no tienen tono propio.
+static u16 rampaGris(u8 nivel)
+{
+    static const u8 n[PLANET_RAMP_LEVELS] = { 1, 2, 4, 5 };
+
+    return RGB3_3_3_TO_VDPCOLOR(n[nivel], n[nivel], n[nivel]);
+}
+
+static u16 rampaAmarilla(u8 nivel)
+{
+    static const u8 r[PLANET_RAMP_LEVELS] = { 2, 4, 6, 7 };
+    static const u8 g[PLANET_RAMP_LEVELS] = { 2, 4, 6, 7 };
+    static const u8 b[PLANET_RAMP_LEVELS] = { 0, 0, 1, 3 };
+
+    return RGB3_3_3_TO_VDPCOLOR(r[nivel], g[nivel], b[nivel]);
+}
+
+// El color de la ranura `slot` (0..11) en cada uno de los tres estados:
+// 0 = PAL3 normal, 1 = PAL0 cerrado, 2 = PAL2 terminado.
+static u16 planetInk(u8 galaxia, u8 cual, u8 slot)
+{
+    const u8 rampa = (u8) (slot / PLANET_RAMP_LEVELS);
+    const u8 nivel = (u8) (slot % PLANET_RAMP_LEVELS);
+
+    if (cual == 1)
+        return rampaGris(nivel);
+    if (cual == 2)
+        return rampaAmarilla(nivel);
+
+    return PlanetArt_tint(galaxia, rampa, nivel);
+}
+
+static const u8 planetInkPal[3] = { PAL3, PAL0, PAL2 };
+
+// Dibuja los ocho planetas de esa galaxia y sube sus teselas. Es lo que hace
+// que ARRIBA/ABAJO en el menu cambie los graficos y no solo el nombre.
+void Menu_setGalaxyLook(u8 galaxia)
+{
+    // Estaticos y no en la pila: 576 + 288 bytes no caben a gusto en los 2560
+    // de pila que tiene esto (maze.c ya se encontro con lo mismo).
+    static u8 px[24 * 24];
+    static u32 tiles[9 * 8];
+    u8 i, j;
+
+    curGalaxyLook = (u8) (galaxia & 7);
+
+    for (i = 0; i < MENU_PLANET_COUNT; i++)
+    {
+        const u8 lado = planetSide[i];
+        const u8 n = (u8) (lado / 8);
+        u8 tx, ty, fila, col;
+        u16 t = 0;
+
+        PlanetArt_draw(curGalaxyLook, i, lado, px);
+
+        // Las teselas de un sprite van en COLUMNAS: el VDP recorre cada tira
+        // vertical entera antes de pasar a la siguiente.
+        for (tx = 0; tx < n; tx++)
+            for (ty = 0; ty < n; ty++, t++)
+                for (fila = 0; fila < 8; fila++)
+                {
+                    u32 w = 0;
+
+                    for (col = 0; col < 8; col++)
+                        w = (w << 4) | px[((((u16) ty * 8) + fila) * lado) + (tx * 8) + col];
+                    tiles[(t * 8) + fila] = w;
+                }
+
+        VDP_loadTileData(tiles, (u16) (PLANET_TILE_BASE + planetTileAt[i]), (u16) (n * n), DMA);
+
+        // Y el mismo planeta a 16x16 para su celda del selector. Aqui las
+        // teselas son de FONDO, asi que van por FILAS: (0,0) (1,0) (0,1) (1,1).
+        PlanetArt_draw(curGalaxyLook, i, CELL_SIDE, px);
+        for (ty = 0; ty < 2; ty++)
+            for (tx = 0; tx < 2; tx++)
+                for (fila = 0; fila < 8; fila++)
+                {
+                    u32 w = 0;
+
+                    for (col = 0; col < 8; col++)
+                        w = (w << 4) | px[((((u16) ty * 8) + fila) * CELL_SIDE) + (tx * 8) + col];
+                    tiles[((((u16) ty * 2) + tx) * 8) + fila] = w;
+                }
+        VDP_loadTileData(tiles, (u16) (CELL_TILE_BASE + (i * 4)), 4, DMA);
+    }
+
+    // Y las tres rampas de tinta, si el menu esta a la vista. Si no lo esta,
+    // Menu_setVisible las pondra al entrar: pisarlas ahora seria pintarle al
+    // juego los colores del menu encima.
+    if (planetInkSaved)
+        for (j = 0; j < 3; j++)
+            for (i = 0; i < PLANET_PAL_COUNT; i++)
+                PAL_setColor((planetInkPal[j] * 16) + PLANET_INK_FIRST + i,
+                             planetInk(curGalaxyLook, j, i));
 }
 
 void Menu_loadGraphics(void)
@@ -574,14 +714,24 @@ void Menu_loadGraphics(void)
     // Matches planetHalfSize[] above: small for the 4 tiniest presets
     // (including the new 1x1 test planet), medium for the next 2, large
     // for the original 2 biggest.
-    planetSprites[0] = SPR_addSprite(&planetSmall,  0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
-    planetSprites[1] = SPR_addSprite(&planetSmall,  0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
-    planetSprites[2] = SPR_addSprite(&planetSmall,  0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
-    planetSprites[3] = SPR_addSprite(&planetSmall,  0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
-    planetSprites[4] = SPR_addSprite(&planetMedium, 0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
-    planetSprites[5] = SPR_addSprite(&planetMedium, 0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
-    planetSprites[6] = SPR_addSprite(&planetLarge,  0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
-    planetSprites[7] = SPR_addSprite(&planetLarge,  0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
+    // Los PNG siguen dando el TAMANO del sprite (8x8, 16x16, 24x24) y nada
+    // mas: su dibujo no se sube nunca. Sin SPR_FLAG_AUTO_VRAM_ALLOC ni
+    // AUTO_TILE_UPLOAD, el sprite mira a las teselas que Menu_setGalaxyLook
+    // deja en PLANET_TILE_BASE, que son las de la galaxia en curso.
+    {
+        const SpriteDefinition *def[MENU_PLANET_COUNT] = {
+            &planetSmall, &planetSmall, &planetSmall, &planetSmall,
+            &planetMedium, &planetMedium, &planetLarge, &planetLarge
+        };
+        u8 i;
+
+        for (i = 0; i < MENU_PLANET_COUNT; i++)
+            planetSprites[i] = SPR_addSpriteEx(def[i], 0, 0,
+                TILE_ATTR_FULL(PAL3, TRUE, FALSE, FALSE,
+                               (u16) (PLANET_TILE_BASE + planetTileAt[i])),
+                SPR_FLAG_AUTO_VISIBILITY);
+    }
+    Menu_setGalaxyLook(0);
     cursorSprite = SPR_addSprite(&cursorArrow, 0, 0, TILE_ATTR(PAL3, TRUE, FALSE, FALSE));
 
     // Sun uses PAL1 (see SUN_INK_INDEX above) -- no PAL_setPalette call
@@ -591,6 +741,17 @@ void Menu_loadGraphics(void)
     // every frame in Menu_update.
     sunSprite = SPR_addSprite(&menuSun, SUN_CENTER_X - SUN_HALF_PX, SUN_CENTER_Y - SUN_HALF_PX,
                                TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
+    SPR_setDepth(sunSprite, DEPTH_SOL);
+    SPR_setDepth(cursorSprite, DEPTH_CURSOR);
+    {
+        u8 i;
+
+        for (i = 0; i < MENU_PLANET_COUNT; i++)
+        {
+            planetDepth[i] = DEPTH_DELANTE;
+            SPR_setDepth(planetSprites[i], DEPTH_DELANTE);
+        }
+    }
 
     Menu_setVisible(FALSE);
 }
@@ -654,6 +815,18 @@ void Menu_fadeInSprites(u8 selectedIndex, u8 unlockedCount, const bool *complete
         PAL_setColor(LOCKED_DOOR_INK_INDEX, mixColor(bg, normal, f, MENU_SPRITE_FADE_FRAMES));
         PAL_setColor(LOCKED_PLANET_INK_INDEX, mixColor(bg, locked, f, MENU_SPRITE_FADE_FRAMES));
 
+        // Los planetas suben con todo lo demas: si sus doce tintas se quedan
+        // puestas, aparecen de golpe sobre una pantalla que aun esta negra.
+        {
+            u8 j, k;
+
+            for (j = 0; j < 3; j++)
+                for (k = 0; k < PLANET_PAL_COUNT; k++)
+                    PAL_setColor((planetInkPal[j] * 16) + PLANET_INK_FIRST + k,
+                                 mixColor(bg, planetInk(curGalaxyLook, j, k),
+                                          f, MENU_SPRITE_FADE_FRAMES));
+        }
+
         if (f == 0)
         {
             for (i = 0; i < MENU_PLANET_COUNT; i++)
@@ -673,6 +846,38 @@ void Menu_fadeInSprites(u8 selectedIndex, u8 unlockedCount, const bool *complete
     }
 }
 
+// Los ocho se van por arriba o por abajo (dir -1 o +1) y, al volver, entran
+// por el lado contrario. Las dos mitades llevan su propio bucle de frames,
+// igual que Menu_fadeInSprites: entre una y otra, main.c cambia de galaxia y
+// redibuja, que es lo que hace que los que entran ya sean los nuevos.
+void Menu_galaxySweepOut(s16 dir, u8 selectedIndex, u8 unlockedCount, const bool *completed)
+{
+    u16 f;
+
+    for (f = 1; f <= SWEEP_FRAMES; f++)
+    {
+        sweepOffsetY = (s16) (((s32) dir * SWEEP_DIST * f) / SWEEP_FRAMES);
+        Menu_update(selectedIndex, unlockedCount, completed);
+        SPR_update();
+        SYS_doVBlankProcess();
+    }
+}
+
+void Menu_galaxySweepIn(s16 dir, u8 selectedIndex, u8 unlockedCount, const bool *completed)
+{
+    u16 f;
+
+    for (f = SWEEP_FRAMES; f > 0; f--)
+    {
+        sweepOffsetY = (s16) (((s32) -dir * SWEEP_DIST * f) / SWEEP_FRAMES);
+        Menu_update(selectedIndex, unlockedCount, completed);
+        SPR_update();
+        SYS_doVBlankProcess();
+    }
+
+    sweepOffsetY = 0;
+}
+
 void Menu_setVisible(bool visible)
 {
     u8 i;
@@ -681,6 +886,40 @@ void Menu_setVisible(bool visible)
         SPR_setVisibility(planetSprites[i], visible ? VISIBLE : HIDDEN);
     SPR_setVisibility(cursorSprite, visible ? VISIBLE : HIDDEN);
     SPR_setVisibility(sunSprite, visible ? VISIBLE : HIDDEN);
+    if (!visible)
+        sweepOffsetY = 0;     // nadie se queda a medio barrido
+
+    // Las doce ranuras de tinta de los planetas (cuatro por cada una de las
+    // tres paletas que usan: normal, cerrado y terminado). Mismo trato que el
+    // resto de prestamos de aqui abajo: se guardan al entrar y se devuelven al
+    // salir, para que el juego no herede los colores del menu.
+    if (visible)
+    {
+        u8 j, k;
+
+        if (!planetInkSaved)
+        {
+            for (j = 0; j < 3; j++)
+                for (k = 0; k < PLANET_PAL_COUNT; k++)
+                    savedPlanetInk[j][k] =
+                        PAL_getColor((planetInkPal[j] * 16) + PLANET_INK_FIRST + k);
+            planetInkSaved = TRUE;
+        }
+        for (j = 0; j < 3; j++)
+            for (k = 0; k < PLANET_PAL_COUNT; k++)
+                PAL_setColor((planetInkPal[j] * 16) + PLANET_INK_FIRST + k,
+                             planetInk(curGalaxyLook, j, k));
+    }
+    else if (planetInkSaved)
+    {
+        u8 j, k;
+
+        for (j = 0; j < 3; j++)
+            for (k = 0; k < PLANET_PAL_COUNT; k++)
+                PAL_setColor((planetInkPal[j] * 16) + PLANET_INK_FIRST + k,
+                             savedPlanetInk[j][k]);
+        planetInkSaved = FALSE;
+    }
 
     // La fila de recuadros pinta sus circulos y el contorno del
     // seleccionado con el mismo violeta que los planetas de las orbitas.
@@ -774,17 +1013,40 @@ void Menu_update(u8 selectedIndex, u8 unlockedCount, const bool *completed)
         fix16 fx, fy;
         s16 cx, cy;
 
-        orbitAngle[i] += orbitSpeed[i];
-        if (orbitAngle[i] >= FIX16(360))
+        // LA ORBITA TAMBIEN ES DE LA GALAXIA (peticion del usuario: orbitas,
+        // vectores de movimiento y trayectorias). Cada una achata sus elipses
+        // de otra manera, va a otro ritmo y la mitad giran al reves, asi que
+        // se nota que has cambiado de sitio antes incluso de mirar el dibujo.
+        // El radio en X no se toca: es el que tiene la pantalla de ancho.
+        const s16 estira = PlanetArt_orbitStretch(curGalaxyLook);
+        const s16 ry = (s16) ((orbitRadiusY[i] * estira) / 100);
+        const fix16 paso = (fix16) (((s32) orbitSpeed[i] *
+                                     PlanetArt_orbitSpeed(curGalaxyLook)) / 100);
+
+        orbitAngle[i] += (fix16) (paso * PlanetArt_orbitDir(curGalaxyLook));
+        while (orbitAngle[i] >= FIX16(360))
             orbitAngle[i] -= FIX16(360);
+        while (orbitAngle[i] < 0)
+            orbitAngle[i] += FIX16(360);
 
         F16_computePositionEx(&fx, &fy, FIX16(SUN_CENTER_X), FIX16(SUN_CENTER_Y),
-                               orbitAngle[i], FIX16(1), FIX16(orbitRadiusX[i]), FIX16(orbitRadiusY[i]));
+                               orbitAngle[i], FIX16(1), FIX16(orbitRadiusX[i]), FIX16(ry));
 
         cx = F16_toRoundedInt(fx);
-        cy = F16_toRoundedInt(fy);
+        cy = (s16) (F16_toRoundedInt(fy) + sweepOffsetY);
 
         SPR_setPosition(planetSprites[i], cx - planetHalfSize[i], cy - planetHalfSize[i]);
+
+        {
+            const s8 capa = (s8) ((cy < (s16) (SUN_CENTER_Y + sweepOffsetY))
+                                  ? DEPTH_DETRAS : DEPTH_DELANTE);
+
+            if (planetDepth[i] != capa)
+            {
+                planetDepth[i] = capa;
+                SPR_setDepth(planetSprites[i], capa);
+            }
+        }
         // Three looks, one set of pixels -- which palette the sprite reads
         // is the only difference (spec §45): PAL0 grey for a planet still
         // locked (user request), PAL2 yellow for one already completed,

@@ -1,5 +1,6 @@
 #include "guidemap.h"
 #include "maze.h"
+#include "levels.h"
 #include "resources.h"
 #include "items.h"
 
@@ -868,6 +869,62 @@ static void selectInsertionLink(void)
         // shared-axis reasoning still applies unchanged).
         insertLinkOffset = pickDoorOffset(insertLinkDir);
     }
+}
+
+// EL PLANETA HORNEADO. Deja puesto exactamente lo mismo que
+// GuideMap_generate, pero leido de res/levels.bin en vez de sorteado: la forma
+// del mapa sale de su mapa de bits y las puertas de la cabecera de cada sala,
+// que es la unica copia que hay de ellas (ver levels.h).
+void GuideMap_load(const u8 *bin, const u8 *planeta)
+{
+    u8 col, row, i;
+
+    mapCols = Levels_planetCols(planeta);
+    mapRows = Levels_planetRows(planeta);
+    itemCount = planeta[LVL_P_LETRAS];
+    startCol = planeta[LVL_P_INICIO];
+    startRow = planeta[LVL_P_INICIO + 1];
+    goalCol = planeta[LVL_P_META];
+    goalRow = planeta[LVL_P_META + 1];
+    insertLinkCol = planeta[LVL_P_ENLACE];
+    insertLinkRow = planeta[LVL_P_ENLACE + 1];
+    insertLinkDir = planeta[LVL_P_ENLACE + 2];
+    insertLinkOffset = planeta[LVL_P_ENLACE + 3];
+    for (i = 0; i < ITEM_COUNT; i++)
+    {
+        itemCol[i] = planeta[LVL_P_LETRA_X + i];
+        itemRow[i] = planeta[LVL_P_LETRA_Y + i];
+    }
+
+    clearMap();
+    mapShapeSet = FALSE; // la forma viene en el fichero; allowed() ya no pinta nada
+
+    for (row = 0; row < mapRows; row++)
+        for (col = 0; col < mapCols; col++)
+        {
+            const u8 *sala = Levels_room(bin, planeta, col, row);
+            u8 mascara;
+            u8 d;
+
+            if (sala == NULL)
+                continue;
+
+            guideMap[row][col].type = CELL_ROOM;
+
+            // La cabecera de la sala trae la puerta del enlace de extraccion
+            // mezclada con las del arbol; quitarla deja las del arbol, que son
+            // las unicas que guideMap describe.
+            mascara = sala[6];
+            if ((col == insertLinkCol) && (row == insertLinkRow))
+                mascara = (u8) (mascara & ~(1u << insertLinkDir));
+
+            for (d = 0; d < 4; d++)
+                if ((mascara >> d) & 1)
+                {
+                    setDoorBit(col, row, d, TRUE);
+                    setDoorOffset(col, row, d, sala[7 + d]);
+                }
+        }
 }
 
 void GuideMap_generate(void)

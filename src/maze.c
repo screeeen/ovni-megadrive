@@ -1,4 +1,5 @@
 #include "maze.h"
+#include "levels.h"
 #include "resources.h"
 
 // The room's live footprint. maze.h exposes MAZE_W/MAZE_H as calls to
@@ -2625,6 +2626,109 @@ static void punchBorderDoor(u8 dir, s16 ax, s16 ay)
             grid[ay][1] = PATH; grid[ay + 1][1] = PATH;
             break;
     }
+}
+
+// CARGA una sala ya tallada (res/levels.bin, formato en levels.h) en vez de
+// generarla. Es la que sustituye a Maze_generateRoom cuando los niveles van
+// horneados: deja exactamente el mismo estado que dejaba aquella, pero sin
+// busqueda, sin validador y sin grafo.
+//
+// `extraccion` TRUE si es la sala de extraccion, que lleva trama de muro fija
+// y uniforme (spec 27) en vez de la sorteada por celda. No hace falta un bit
+// en el formato: esa sala va en su propia ranura del planeta.
+//
+// `abierta[4]` dice, por DOOR_N/E/S/W, cual de las puertas que la sala TIENE
+// esta abierta ahora mismo. La rejilla viene horneada con todas cerradas.
+void Maze_loadRoom(const u8 *datos, bool extraccion, const bool abierta[4])
+{
+    const u8 w = datos[2], h = datos[3];
+    const u8 doorMask = datos[6];
+    const u8 *doorOff = &datos[7];
+    const u8 *celdas = Levels_roomCells(datos);
+    s16 x, y;
+    u8 d;
+
+    tileSeed = Levels_u16(datos);
+    roomW = w;
+    roomH = h;
+
+    // Las dos mascaras de silueta se quedan en una sola decision, que es lo
+    // unico que Maze_draw pregunta: shapeEdge a FALSE y outsideShape como "no
+    // se dibuja". (Los nombres son herencia del generador.)
+    memset(shapeEdge, FALSE, sizeof shapeEdge);
+    clearLockedDoorCells();
+
+    for (y = 0; y < h; y++)
+        for (x = 0; x < w; x++)
+        {
+            const u8 cod = Levels_cell(celdas, w, x, y);
+
+            outsideShape[y][x] = (cod == LVL_NADA);
+            grid[y][x] = (cod == LVL_SUELO)
+                         ? PATH
+                         : extraccion
+                           ? (u8) INSERT_WALL_VARIANT
+                           : (u8) (CELL_MURO_BASE + cellVariant(x, y, CELL_MURO_COUNT));
+        }
+
+    // Los vanos: la horneada los trae cerrados, asi que solo hay que abrir los
+    // que toquen y marcar en amarillo los que siguen cerrados.
+    for (d = 0; d < 4; d++)
+    {
+        const u8 off = doorOff[d];
+
+        if (!((doorMask >> d) & 1))
+            continue;
+
+        // Abrir un vano es exactamente lo que hacia el generador con la
+        // puerta sin cerrar: los dos de borde a suelo y los dos de detras
+        // tambien, que es lo que hace que "abierta" signifique pasable.
+        if (abierta[d])
+            switch (d)
+            {
+                case MAZE_DIR_N:
+                    sealDoorCells(FALSE, 0, off, 0, off + 1, 1, off, 1, off + 1);
+                    break;
+                case MAZE_DIR_S:
+                    sealDoorCells(FALSE, MAZE_H - 1, off, MAZE_H - 1, off + 1,
+                                  MAZE_H - 2, off, MAZE_H - 2, off + 1);
+                    break;
+                case MAZE_DIR_E:
+                    sealDoorCells(FALSE, off, MAZE_W - 1, off + 1, MAZE_W - 1,
+                                  off, MAZE_W - 2, off + 1, MAZE_W - 2);
+                    break;
+                default: // MAZE_DIR_W
+                    sealDoorCells(FALSE, off, 0, off + 1, 0, off, 1, off + 1, 1);
+                    break;
+            }
+        // Cerrada: los dos de borde ya son muro en la horneada, solo hay que
+        // decirle a Maze_draw que van en la paleta amarilla.
+        else
+            switch (d)
+            {
+                case MAZE_DIR_N:
+                    lockedDoorCell[0][off] = TRUE;
+                    lockedDoorCell[0][off + 1] = TRUE;
+                    break;
+                case MAZE_DIR_S:
+                    lockedDoorCell[MAZE_H - 1][off] = TRUE;
+                    lockedDoorCell[MAZE_H - 1][off + 1] = TRUE;
+                    break;
+                case MAZE_DIR_E:
+                    lockedDoorCell[off][MAZE_W - 1] = TRUE;
+                    lockedDoorCell[off + 1][MAZE_W - 1] = TRUE;
+                    break;
+                default: // MAZE_DIR_W
+                    lockedDoorCell[off][0] = TRUE;
+                    lockedDoorCell[off + 1][0] = TRUE;
+                    break;
+            }
+    }
+
+    // Sin grafo de deslizamiento: ya no lo necesita nadie, y resetearlo a
+    // mano no vale (ver slideGraphReset).
+    slideGraphReset();
+
 }
 
 void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 menuDoorOffset, u16 roomSeed)

@@ -30,7 +30,10 @@
 // de planetas). Publicado para que lo que cargue tiles despues -- la
 // fuente del HUD, hud.c -- sepa donde empieza el hueco libre, igual que
 // MAZE_TILE_COUNT ya lo hace para guidemap.
-#define MENU_TILE_COUNT 100
+// 16 del titulo y 48 de la barra, 30 del banco de planetas de las orbitas, 32 de
+// los mismos planetas dibujados a 16x16 para las celdas del selector,. Todo menos el titulo y
+// la barra se redibuja al cambiar de galaxia (menu.c, Menu_setGalaxyLook).
+#define MENU_TILE_COUNT 126
 
 void Menu_loadGraphics(void);
 
@@ -56,6 +59,18 @@ void Menu_setPlanetName(u8 index, const char *name);
 // request: "quiero que el nombre de la galaxia en la pantalla de
 // cartografia sea la misma que debajo de ovni") instead of inventing its
 // own per boot, which is what it used to do.
+// Redibuja los ocho planetas con la firma de esa galaxia: silueta, anillo,
+// superficie, luna y tinte (inc/planetart.h). main.c la llama al arrancar y
+// cada vez que ARRIBA/ABAJO cambian de galaxia.
+void Menu_setGalaxyLook(u8 galaxia);
+
+// El cambio de galaxia, en dos mitades: los ocho planetas se van todos a la
+// vez hacia arriba o hacia abajo (dir -1 o +1) y, despues de que main.c cambie
+// de galaxia y redibuje, los nuevos entran por el lado contrario. Cada una
+// lleva su propio bucle de frames y vuelve cuando ha terminado.
+void Menu_galaxySweepOut(s16 dir, u8 selectedIndex, u8 unlockedCount, const bool *completed);
+void Menu_galaxySweepIn(s16 dir, u8 selectedIndex, u8 unlockedCount, const bool *completed);
+
 const char *Menu_galaxyName(void);
 
 // Set once per session by main.c, as soon as random() is properly seeded.

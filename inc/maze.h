@@ -296,6 +296,11 @@ void Maze_generateRoom(bool doorN, bool doorE, bool doorS, bool doorW,
 // numeric convention rather than #including guidemap.h here, to keep
 // maze.c decoupled from the guide-map module the way Maze_generateRoom's
 // plain bool doorN/E/S/W parameters already do.
+// Carga una sala ya tallada en vez de generarla -- ver su comentario en
+// maze.c. `datos` es su registro dentro de res/levels.bin (formato en
+// levels.h) y `abierta[4]` que puertas de las que tiene estan abiertas ahora.
+void Maze_loadRoom(const u8 *datos, bool extraccion, const bool abierta[4]);
+
 void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 menuDoorOffset, u16 roomSeed);
 
 // Draws the current maze to plane BG_A.

@@ -101,6 +101,14 @@ void Plants_reset(void);
 // as enemy.c).
 void Plants_spawnForRoom(u16 roomSeed, u16 slot);
 
+// Carga las plantas ya sorteadas en vez de sortearlas -- ver su comentario en
+// plants.c. `datos` es el registro de la sala en res/levels.bin (levels.h).
+void Plants_loadForRoom(const u8 *datos, u16 slot);
+
+// Tira la cache de salas entera: la llama main.c al cambiar de galaxia, cuando
+// los ocho planetas pasan a ser otros. Ver su comentario en plants.c.
+void Plants_invalidateCache(void);
+
 // Player is in room (col,row), ship box at pixel (playerX,playerY).
 // Marks any of this room's plants (any of its PLANTS_LINES_PER_ROOM
 // lines) the ship's 16x16 box newly overlaps as collected (persisted

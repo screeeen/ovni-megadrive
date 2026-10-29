@@ -6,6 +6,9 @@ out/
 # res/sound/*.wav are tracked source assets (spec §47), not build output --
 # same treatment as res/sprite/*.png.
 !res/sound/*.wav
+# res/levels.bin son los niveles horneados (tools/levelgen): datos de origen
+# que viajan en la ROM, no salida de build -- el mismo trato que los wav.
+!res/levels.bin
 *.raw
 .DS_Store
 # regenerated from $(GDK)/src/boot/rom_header.c on every build
