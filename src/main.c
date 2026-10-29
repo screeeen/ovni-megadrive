@@ -2023,6 +2023,96 @@ static u32 goShown, goTarget, goStep;
 static bool goSettled;
 static u8 goTick;
 
+// LA MUERTE, ANTES DEL GAME OVER (peticion del usuario: "cuando te matan, se
+// para el juego, fadea a negro, solo quedan las siluetas del player y el
+// enemigo que ha colisionado, y la palabra YOU ARE DEAD").
+//
+// El juego se para de verdad: esta funcion tiene su propio bucle de vblank y
+// no vuelve hasta que termina, asi que nada se mueve mientras dura -- la nave
+// y el enemigo se quedan clavados donde chocaron.
+//
+// Las siluetas salen de la PALETA, no de arte nuevo: llevando todas las tintas
+// de PAL1 y PAL2 al mismo blanco, lo que dibujan esos dos sprites se queda en
+// una mancha plana. Todo lo demas se va a negro. Sale gratis y funciona con
+// cualquier fotograma en el que les pille la colision.
+#define DEATH_FADE_FRAMES 24
+#define DEATH_HOLD_FRAMES 100
+#define DEATH_TEXT_ROW    13
+#define DEATH_TEMPO_END   25   // a cuanto por ciento de su velocidad acaba la musica
+
+static u16 deathPal[64];   // 128 B fuera de la pila: esto se llama desde hondo
+
+static void deathFreeze(u8 killer)
+{
+    static const char texto[] = "YOU ARE DEAD";
+    const u16 blanco = RGB3_3_3_TO_VDPCOLOR(7, 7, 7);
+    u16 target[64];
+    u16 i;
+
+    PAL_getColors(0, deathPal, 64);
+
+    // Se quedan dos: la nave y el que la mato. El parpadeo del enemigo podria
+    // haberle tocado oculto justo en el choque, asi que se fuerza visible.
+    for (i = 0; i < ENEMIES_MAX; i++)
+        SPR_setVisibility(enemySprites[i], (i == killer) ? VISIBLE : HIDDEN);
+    SPR_setVisibility(playerSprite, VISIBLE);
+    SPR_setVisibility(mapShipSprite, HIDDEN);
+    SPR_setVisibility(itemIconSprite, HIDDEN);
+    SPR_update();
+
+    for (i = 0; i < 64; i++)
+    {
+        const u16 linea = (u16) (i >> 4);
+        const u16 idx = (u16) (i & 15);
+
+        if (((linea == PAL1) || (linea == PAL2)) && idx)
+            target[i] = blanco;                      // las dos siluetas
+        else if ((linea == PAL3) && (idx == 15))
+            target[i] = blanco;                      // la tinta del mensaje
+        else
+            target[i] = 0;                           // el resto, negro
+    }
+
+    // El fundido va en ASINCRONO para poder arrastrar la musica a la vez: con
+    // PAL_fadeTo bloqueante no hay donde meter el tempo frame a frame.
+    PAL_fadeTo(0, 63, target, DEATH_FADE_FRAMES, TRUE);
+
+    for (i = 0; i < DEATH_FADE_FRAMES; i++)
+    {
+        // De su velocidad al DEATH_TEMPO_END por ciento, al mismo ritmo que
+        // el color se va a negro: la cancion se para con la pantalla.
+        Sfx_musicTempoPercent((u16) (100 - (((100 - DEATH_TEMPO_END) * i) / DEATH_FADE_FRAMES)));
+        SYS_doVBlankProcess();
+        if (!PAL_isDoingFade())
+            break;
+    }
+    while (PAL_isDoingFade())
+        SYS_doVBlankProcess();
+    Sfx_musicTempoPercent(DEATH_TEMPO_END);
+
+    // El mensaje va en BG_B, que se dibuja por encima del laberinto, y con
+    // PAL3 porque PAL0 -- la del texto de siempre -- se acaba de ir a negro.
+    VDP_setTextPalette(PAL3);
+    VDP_drawTextBG(BG_B, texto, (u16) ((40 - (sizeof texto - 1)) / 2), DEATH_TEXT_ROW);
+
+    for (i = 0; i < DEATH_HOLD_FRAMES; i++)
+        SYS_doVBlankProcess();
+
+    // Se recoge antes de devolver el color: si se devolviera primero, el
+    // laberinto volveria a verse un frame entero antes de que el game over
+    // limpie el plano.
+    for (i = 0; i < ENEMIES_MAX; i++)
+        SPR_setVisibility(enemySprites[i], HIDDEN);
+    SPR_setVisibility(playerSprite, HIDDEN);
+    SPR_update();
+    VDP_clearPlane(BG_A, TRUE);
+    VDP_clearPlane(BG_B, TRUE);
+    invalidateHudLines();
+    VDP_setTextPalette(PAL0);
+    PAL_setColors(0, deathPal, 64, DMA);
+    Sfx_musicTempoPercent(100);   // el jazz del game over va a su ritmo
+}
+
 static void gameOverBegin(void)
 {
     // La cadencia de jazz (peticion del usuario: "quiero que suene jazz en
@@ -5507,6 +5597,7 @@ int main(bool hardReset)
                 const u8 offW = doorOffsetFor(currentCol, currentRow, DOOR_W);
                 u8 exitDir = EXIT_NONE;
                 bool playerDied = FALSE;
+                u8 killerIndex = 0;   // cual de ellos: la pantalla de muerte lo deja a la vista
                 u8 step;
 
                 // Los enemigos se mueven una vez por fotograma visible,
@@ -5654,7 +5745,10 @@ int main(bool hardReset)
                             triggerShake(slideDistance); // user request: shake on hitting an enemy too, either outcome
 
                             if (e->state == ENEMY_DANGEROUS)
+                            {
                                 playerDied = TRUE;
+                                killerIndex = i;
+                            }
                             else
                             {
                                 Enemy_kill(e);
@@ -5698,6 +5792,10 @@ int main(bool hardReset)
                     // why resetToMenu() below won't save this attempt's
                     // progress.
                     gameState = STATE_GAMEOVER;
+
+                    // Se para todo, se va a negro y quedan las dos siluetas
+                    // con el mensaje. No vuelve hasta que ha terminado.
+                    deathFreeze(killerIndex);
 
                     SPR_setVisibility(playerSprite, HIDDEN);
                     hideEnemySprites();

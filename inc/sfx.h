@@ -123,6 +123,11 @@ void Sfx_setPlanet(u8 planet);
 // Calla la cancion y corta en seco el jazz del game over. Hay que llamarlo al
 // SALIR de la partida -- resetToMenu y gameOverBegin lo hacen -- y lo llama
 // tambien Sfx_setEnabled(FALSE).
+// Cambia la velocidad de la musica: 100 es la suya, menos la ralentiza. La usa
+// la pantalla de muerte para arrastrar la cancion mientras se va a negro.
+// Acuerdate de devolverla a 100.
+void Sfx_musicTempoPercent(u16 porcentaje);
+
 void Sfx_musicStop(void);
 
 // Igual que la de arriba pero dejando la cancion donde esta: al volver a la

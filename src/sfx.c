@@ -787,6 +787,34 @@ void Sfx_musicPause(void)
     chipsSilence();
 }
 
+// LA MUSICA SE MUERE CON LA NAVE (peticion del usuario: "se tiene que
+// ralentizar la musica a la vez que se fadea cuando te matan"). El driver XGM
+// lleva el tempo en ticks por segundo -- 60 en NTSC, 50 en PAL -- y bajarlo
+// arrastra la cancion entera.
+//
+// SGDK avisa de que un tempo que no sea el de la maquina puede distorsionar
+// los instrumentos FM. Aqui eso no es un efecto secundario, es el efecto: lo
+// que se busca es justo el sonido de algo que se para.
+static u16 tempoNormal;
+
+void Sfx_musicTempoPercent(u16 porcentaje)
+{
+    u16 t;
+
+    if (!tempoNormal)
+        tempoNormal = XGM_getMusicTempo();
+    if (!tempoNormal)
+        return;   // el driver XGM no esta cargado: no hay nada que ralentizar
+
+    t = (u16) (((u32) tempoNormal * porcentaje) / 100);
+    if (t < 10)
+        t = 10;   // por debajo de esto el driver se atraganta
+    if (t > tempoNormal)
+        t = tempoNormal;
+
+    XGM_setMusicTempo(t);
+}
+
 void Sfx_musicStop(void)
 {
     musicStop();
