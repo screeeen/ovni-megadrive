@@ -56,26 +56,25 @@ void Sfx_playWallHit(u16 distance);
 // on the way Sfx_playWallHit does.
 void Sfx_playPlantPickup(void);
 
-// Enemy kill (running over a vulnerable one) and letter pickup. Both are
-// PLACEHOLDERS (user request: "pon efecto de sonido cuando matas un
-// enemigo y cuando coges una letra. que sea placeholder, ya lo pondre yo
-// a mi gusto") -- one single sample each, synthesized rather than
-// recorded, with none of the 4-variant rotation the kick and hi-hat use
-// to avoid sounding mechanical. Swapping either one is just dropping a
-// different mono 16-bit 16kHz wav over res/sound/enemykill0.wav /
-// res/sound/letter0.wav; nothing here needs to change.
+// Matar un enemigo y coger una letra. Los dos nacieron PLACEHOLDER (peticion
+// del usuario: "pon efecto de sonido cuando matas un enemigo y cuando coges
+// una letra. que sea placeholder, ya lo pondre yo a mi gusto").
 //
-// El de la muerte ya no es el zap de barrido original (peticion del usuario:
-// "que suene mas splash"): lo rehace tools/enemykill_splash.py como ruido con
-// el brillo cayendo, y el zap viejo queda en res/sound/enemykill_src0.wav.
-// Y son SEIS muestras rotando, una por pitch ("varia siempre el pitch ... que
-// sea menos monotono"), porque ningun driver sabe cambiar la velocidad de
-// reproduccion: el pitch hay que cocerlo en el fichero.
+// EL DE LA MUERTE SALE DEL CHIP, no de una muestra (peticion del usuario: "me
+// gustaria que todo fuese desde el chip"): el canal de ruido del PSG con el
+// tono 0 por debajo haciendo de golpe, y el pitch sorteado en cada muerte --
+// ver el bloque del splash en sfx.c. Por eso no tiene ni rama de musicOn ni
+// canal del PCM4: el PSG suena igual con la cancion puesta y sin ella.
 //
-// Both no-op while Sfx_isEnabled() is FALSE, and both let the PCM4 driver
-// auto-pick a free channel, same as Sfx_playPlantPickup (neither has a
-// per-hit volume, so neither needs to know which channel it landed on).
-// Call on the event's own edge, not every frame of it.
+// EL DE LA LETRA sigue siendo una muestra, una sola y sintetizada, sin la
+// rotacion de 4 variantes que llevan el bombo y el hi-hat para no sonar
+// mecanicos. Cambiarlo es dejar otro wav mono de 16 bits y 16 kHz encima de
+// res/sound/letter0.wav; aqui no hay que tocar nada.
+//
+// Los dos se callan con Sfx_isEnabled() en FALSE. El de la letra deja que el
+// driver PCM4 le busque canal libre, como Sfx_playPlantPickup (no tiene
+// volumen por golpe, asi que no necesita saber donde cayo).
+// Llamarlos en el flanco del suceso, no en cada frame.
 // Typewriter click, for the text that reveals itself a glyph at a time
 // (main.c's typeStep). Deliberately the quietest thing in the game --
 // volume 2 of 15, where the wall-hit kick runs 6..15 (user request: "un

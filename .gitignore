@@ -10,3 +10,6 @@ out/
 .DS_Store
 # regenerated from $(GDK)/src/boot/rom_header.c on every build
 src/rom_header.c
+
+# Los generadores de arte se importan entre si (tools/caras.py).
+__pycache__/

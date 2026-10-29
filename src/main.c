@@ -268,15 +268,14 @@ static u8 enemyFrameShown[ENEMIES_MAX];
 // setShipArt tiene que invalidarlo: SPR_setDefinition rearma el sprite al 0.
 static u8 squashShown = 0xFF;
 
-#define IDLE_BOB_FRAMES 9
-static const s8 idleBob[6] = { 0, -1, -1, 0, 1, 1 };
+// 1 es el fotograma del cuerpo hundido: media vuelta arriba y media abajo, 9
+// frames cada paso.
+#define IDLE_BODY_FRAMES 9
+static const u8 idleBody[6] = { 0, 0, 0, 1, 1, 1 };
+#define IDLE_BODY_STEPS ((u8) (sizeof(idleBody)))
+#define PLAYER_FRAME_IDLE 5
 static u8 idleStep = 0;
 static u8 idleTick = 0;
-
-static s16 shipBob(void)
-{
-    return (s16) idleBob[idleStep];
-}
 
 // LA NAVE GIGANTE (peticion del usuario: "si coge la letra C se convierte en
 // sprite gigante"). Es el primer power-up: con la C en el bolsillo la nave
@@ -2227,7 +2226,7 @@ static void newGame(void)
     }
 
     SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
-                    player.y + Maze_originPxY() + shipDrawOffset + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+                    player.y + Maze_originPxY() + shipDrawOffset); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
     SPR_setVisibility(playerSprite, VISIBLE);
 }
 
@@ -3192,8 +3191,9 @@ static void resetToMenu(void)
 // whenever the ship hits a wall or an enemy this frame.
 // Squash-on-impact (user request: "cuando golpea un muro se deforma...
 // el grafico tiene que ser el protagonista estrujado contra la pared").
-// playerShip carries 5 frames: 0 is the ship, 1..4 are it flattened
-// against a wall, ordered to match player.h's DIR_UP/LEFT/DOWN/RIGHT --
+// playerShip carries 6 frames: 0 is the ship, 1..4 are it flattened
+// against a wall, ordered to match player.h's DIR_UP/LEFT/DOWN/RIGHT, and 5
+// is the idle one, with the body sunk onto its legs (see updateIdle) --
 // so the frame is simply 1 + the direction it was travelling when it
 // stopped, which is by definition the wall it hit head-on.
 //
@@ -3211,19 +3211,20 @@ static void triggerSquash(u8 dir)
     squashFramesLeft = SQUASH_FRAMES;
 }
 
-// LA NAVE FLOTA cuando esta parada (peticion del usuario). Va por POSICION y
-// no por fotogramas a proposito: SPR_setFrame reescribe los tiles del sprite
-// en VRAM, asi que un vaiven por fotogramas seria una transferencia por paso y
-// para siempre. Asi no cuesta ni un byte de VRAM y vale igual para la nave de
-// 8x8 y para la de 16x16.
-//
-// Seis pasos con parada arriba y abajo, que es lo que lo hace leer a flotar y
-// no a temblar. Empieza y acaba en cero, y al moverse vuelve a cero, para que
-// arrancar no de un tiron de un pixel.
+// EL IDLE DE LA NAVE: parada, el cuerpo se hunde sobre las patas y vuelve a
+// subir (peticion del usuario). Las puntas de las patas no se mueven de su
+// fila -- hacen de muelle -- y el sprite no se mueve de su celda, que es lo
+// que la despegaba del suelo. De ahi que vaya por fotograma y no por posicion:
+// mover el cuerpo sin mover las patas no se puede hacer de otra forma. Cuesta
+// un SPR_setFrame por cambio, dos por vuelta de 54 frames.
 static void updateIdle(void)
 {
     // Ni moviendose ni recien estrellada: el aplastado ya es su propio gesto.
-    if ((player.dir != DIR_NONE) || (squashFramesLeft > 0))
+    // El que dice si se mueve es tombMoving (cambio de posicion el frame
+    // pasado) y no player.dir, que se queda con la ultima direccion para
+    // siempre cuando la nave para -- con player.dir esto solo corria antes
+    // del primer boton de la partida.
+    if (tombMoving || (squashFramesLeft > 0))
     {
         idleStep = 0;
         idleTick = 0;
@@ -3231,11 +3232,11 @@ static void updateIdle(void)
     }
 
     idleTick++;
-    if (idleTick >= IDLE_BOB_FRAMES)
+    if (idleTick >= IDLE_BODY_FRAMES)
     {
         idleTick = 0;
         idleStep++;
-        if (idleStep >= 6)
+        if (idleStep >= IDLE_BODY_STEPS)
             idleStep = 0;
     }
 }
@@ -3254,7 +3255,7 @@ static void updateSquash(void)
         want = (u8) (1 + squashDir);
     }
     else
-        want = 0;
+        want = idleBody[idleStep] ? PLAYER_FRAME_IDLE : 0;
 
     if (want != squashShown)
     {
@@ -5614,7 +5615,7 @@ int main(bool hardReset)
                 }
 
                 SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
-                    player.y + Maze_originPxY() + shipDrawOffset + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+                    player.y + Maze_originPxY() + shipDrawOffset); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
             }
             else
             {
@@ -5832,6 +5833,16 @@ int main(bool hardReset)
                     drawInsertRoomStatus(FALSE);
 
                     gameOverBegin();
+
+                    // La sala donde te matan vuelve a traer a todos sus
+                    // enemigos (peticion del usuario: "que cada pantalla sea
+                    // un desafio completo"). Solo esa: el resto del planeta
+                    // conserva sus muertos. Detras de gameOverBegin() a
+                    // proposito, porque su recuento de enemigos lee la
+                    // mascara y tiene que seguir contando los de esta
+                    // partida.
+                    if (!inInsertRoom)
+                        GuideMap_clearEnemyKilled(currentCol, currentRow);
                 }
                 else if (exitDir != EXIT_NONE)
                 {
@@ -5869,7 +5880,7 @@ int main(bool hardReset)
                 }
 
                 SPR_setPosition(playerSprite, player.x + Maze_originPxX() + shipDrawOffset,
-                    player.y + Maze_originPxY() + shipDrawOffset + shipBob()); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
+                    player.y + Maze_originPxY() + shipDrawOffset); // room pixels -> screen: HUD band plus the room's own centring (maze.h)
             }
 
             // Did the ship travel this frame? (The steering lock,
@@ -5952,7 +5963,7 @@ int main(bool hardReset)
         }
 
         drawScoreHud();
-        updateIdle();   // el vaiven de estar parada, ver shipBob
+        updateIdle();   // el hundirse de estar parada, ver su propio comentario
         updateSquash(); // the ship's own deformation, see triggerSquash
 
         drawRoomIdHud(); // always-on room identity line, STATE_PLAYING only

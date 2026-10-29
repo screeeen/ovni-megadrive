@@ -517,6 +517,11 @@ void GuideMap_markEnemyKilled(u8 col, u8 row, u8 index)
     guideMap[row][col].enemyKilled |= (u8) (1u << index);
 }
 
+void GuideMap_clearEnemyKilled(u8 col, u8 row)
+{
+    guideMap[row][col].enemyKilled = 0;
+}
+
 void GuideMap_saveVisited(u16 out[MAX_MAP_ROWS])
 {
     u8 r, c;

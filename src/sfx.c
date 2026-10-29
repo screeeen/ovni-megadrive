@@ -14,7 +14,8 @@ static u8 sfxSolo = SFX_ID_NONE;
 //
 // Con un SUELO de 12 frames (0,2 s), que no es cosmetico: TYPE dura 18 ms, o
 // sea UN frame, y un parpadeo de un frame no se ve. El resto si llegan solos
-// (KICK 36 frames, KILL 19, LETTER 19, HAT 10). O sea que para las muestras la
+// (KICK 36 frames, LETTER 19, HAT 10; KILL ya no es muestra y dura sus 16
+// frames de PSG). O sea que para las muestras la
 // barra dice "acaba de sonar" y no "esta sonando"; para las voces FM y el
 // siseo, que son sostenidas, si dice el nivel de verdad.
 #define SFX_SHOT_MIN_FRAMES 12
@@ -37,8 +38,6 @@ static u8 nextKickChannel = 0;
 // nextHihatVariant solo elige el sample: el hi-hat no tiene volumen por
 // golpe, su canal es fijo (CH3) como el del resto de sonidos cortos.
 static u8 nextHihatVariant = 0;
-#define KILL_VARIANTS 6
-static u8 nextKillVariant = 0;
 
 // Las muestras y sus tamanos, aqui arriba porque las tocan DOS sitios: el
 // juego (el muro y las plantas) y la percusion del jazz, que lleva las SUYAS:
@@ -50,19 +49,6 @@ static const u32 kickLens[4] = {
 };
 static const u8 *const jazzKicks[2] = { jazzKick0, jazzKick1 };
 static const u32 jazzKickLens[2] = { sizeof(jazzKick0), sizeof(jazzKick1) };
-// El splash de matar enemigo: seis muestras, una por pitch, rotando (peticion
-// del usuario: "varia siempre el pitch ... que sea menos monotono"). El pitch
-// no se puede cambiar al disparar -- el PCM4 reproduce a 16 kHz y el XGM a 14,
-// y ninguno tiene mando de velocidad -- asi que va cocido, ver
-// tools/enemykill_splash.py. El orden NO es de grave a agudo a proposito: asi
-// el ciclo de seis no se oye como una escala.
-static const u8 *const enemyKills[KILL_VARIANTS] = {
-    enemyKill0, enemyKill1, enemyKill2, enemyKill3, enemyKill4, enemyKill5
-};
-static const u32 enemyKillLens[KILL_VARIANTS] = {
-    sizeof(enemyKill0), sizeof(enemyKill1), sizeof(enemyKill2),
-    sizeof(enemyKill3), sizeof(enemyKill4), sizeof(enemyKill5)
-};
 static const u8 *const hihats[4] = { hihat0, hihat1, hihat2, hihat3 };
 static const u32 hihatLens[4] = {
     sizeof(hihat0), sizeof(hihat1), sizeof(hihat2), sizeof(hihat3)
@@ -140,8 +126,6 @@ static u8 musicTrack = 0; // lo apunta Sfx_setPlanet
 #define XGM_SMP_TYPE     74
 #define XGM_SMP_JKICK0   75  // 75..76, los dos bombos del jazz
 #define XGM_SMP_JRIDE0   77  // 77..80, los cuatro platos
-#define XGM_SMP_KILL0    81  // 81..86, los seis pitches del splash (el 72
-                             // quedo libre cuando el splash dejo de ser uno)
 #define XGM_SFX_PRIORITY 1
 
 static bool musicOn = FALSE;
@@ -215,12 +199,6 @@ static void musicStart(void)
     XGM_setPCMFast(XGM_SMP_HAT0 + 1, xgmHihat1, sizeof(xgmHihat1));
     XGM_setPCMFast(XGM_SMP_HAT0 + 2, xgmHihat2, sizeof(xgmHihat2));
     XGM_setPCMFast(XGM_SMP_HAT0 + 3, xgmHihat3, sizeof(xgmHihat3));
-    XGM_setPCMFast(XGM_SMP_KILL0 + 0, xgmEnemyKill0, sizeof(xgmEnemyKill0));
-    XGM_setPCMFast(XGM_SMP_KILL0 + 1, xgmEnemyKill1, sizeof(xgmEnemyKill1));
-    XGM_setPCMFast(XGM_SMP_KILL0 + 2, xgmEnemyKill2, sizeof(xgmEnemyKill2));
-    XGM_setPCMFast(XGM_SMP_KILL0 + 3, xgmEnemyKill3, sizeof(xgmEnemyKill3));
-    XGM_setPCMFast(XGM_SMP_KILL0 + 4, xgmEnemyKill4, sizeof(xgmEnemyKill4));
-    XGM_setPCMFast(XGM_SMP_KILL0 + 5, xgmEnemyKill5, sizeof(xgmEnemyKill5));
     XGM_setPCMFast(XGM_SMP_LETTER, xgmLetterPickup, sizeof(xgmLetterPickup));
     // Las de fuera de la partida: sin estas habria que descargar el driver
     // XGM para que sonaran, y con el se va por donde iba la cancion.
@@ -337,23 +315,110 @@ void Sfx_playTypeTick(void)
     sfxShotLeft[SFX_ID_TYPE] = SFX_SHOT_FRAMES(sizeof(typeTick));
 }
 
+// --- EL SPLASH, DEL CHIP ---------------------------------------------------
+//
+// Matar un enemigo ya no es una muestra sino el PSG (peticion del usuario: "me
+// gustaria que todo fuese desde el chip"): el canal de ruido relojado por el
+// divisor del canal de tono 2 -- lo mismo que hace el cepillo del jazz -- y el
+// canal de tono 0 por debajo haciendo de golpe, para que aterrice en algo.
+//
+// Asi el pitch sale distinto en CADA muerte de verdad y no de una tabla de
+// seis muestras: el divisor del ruido se sortea al golpear y de ahi sube, que
+// es el brillo cayendo del splash. De paso se van los 55 KB de ROM que
+// ocupaban las doce muestras, seis del PCM4 y seis del XGM.
+//
+// LOS TRES CANALES ESTAN LIBRES: ninguna de las siete canciones escribe el
+// ruido ni los tonos 0 y 2, solo los inicializa al silencio -- contado sobre
+// el stream XGM, 2 latches por canal en las siete. Y NO se le pide el bus al
+// Z80 para escribirlos aunque el driver toque el PSG por su cuenta: la unica
+// carrera que queda es colarse entre un latch suyo y su dato, que desafina una
+// nota un instante y sale menos de una vez por cada cien muertes, mientras que
+// pararle el bus un rato cada frame le come una muestra al PCM y eso cruje
+// siempre.
+#define SPLASH_FRAMES      16  // 266 ms, los que tarda la envolvente en caer
+#define SPLASH_DIV_MIN     10  // divisor del reloj del ruido al golpear...
+#define SPLASH_DIV_SPAN     6  // ...sorteado en MIN..MIN+SPAN, que son 8 semitonos
+                               // de un golpe a otro; mas divisor, mas grave
+#define SPLASH_BODY_DIV   589  // el golpe empieza en 190 Hz...
+#define SPLASH_BODY_STEP   86  // ...y baja hasta 110 Hz, que es lo mas grave
+#define SPLASH_BODY_FRAMES  5  // que el PSG sabe dar
+#define SPLASH_BODY_FALL    3  // pasos de atenuacion por frame del golpe
+#define SPLASH_BODY_ATT     2  // y arranca por debajo del ruido: es un apoyo
+
+static u8  splashLeft;  // frames que le quedan al splash, 0 = callado
+static u16 splashDiv;   // divisor del reloj del ruido ahora mismo
+static u16 splashBody;  // y el del golpe de abajo
+
+// Sorteo propio y no random(): ese stream se lo reservan los generadores del
+// mapa y de las salas, que dependen de pedirle los numeros siempre en el mismo
+// orden (misma razon que los indices rotatorios de mas arriba).
+static u16 splashSeed = 0xACE1;
+
+static u16 splashRandom(void)
+{
+    splashSeed ^= (u16) (splashSeed << 7);
+    splashSeed ^= (u16) (splashSeed >> 9);
+    splashSeed ^= (u16) (splashSeed << 8);
+    return splashSeed;
+}
+
+static void splashOff(void)
+{
+    splashLeft = 0;
+    PSG_setEnvelope(0, PSG_ENVELOPE_MIN);
+    PSG_setEnvelope(3, PSG_ENVELOPE_MIN);
+}
+
+static void splashHit(void)
+{
+    splashDiv = (u16) (SPLASH_DIV_MIN + (splashRandom() % (SPLASH_DIV_SPAN + 1)));
+    splashBody = SPLASH_BODY_DIV;
+    splashLeft = SPLASH_FRAMES;
+
+    PSG_setNoise(PSG_NOISE_TYPE_WHITE, PSG_NOISE_FREQ_TONE3);
+    PSG_setTone(2, splashDiv);
+    PSG_setEnvelope(3, PSG_ENVELOPE_MAX);
+    PSG_setTone(0, splashBody);
+    PSG_setEnvelope(0, SPLASH_BODY_ATT);
+}
+
+// Un frame de splash. El divisor del ruido sube un 6% y pico por frame, que en
+// los 16 que dura son las dos octavas de caida de brillo que tenia el filtro
+// de la muestra; la envolvente del golpe baja tres veces mas rapido que la del
+// ruido, porque es un golpe y no una cola.
+static void splashTick(void)
+{
+    const u8 frame = (u8) (SPLASH_FRAMES - splashLeft);
+
+    splashDiv = (u16) (splashDiv + (splashDiv >> 4) + 1);
+    PSG_setTone(2, splashDiv);
+    PSG_setEnvelope(3, (frame < PSG_ENVELOPE_MIN) ? frame : PSG_ENVELOPE_MIN);
+
+    if (frame < SPLASH_BODY_FRAMES)
+    {
+        const u8 bodyAtt = (u8) (SPLASH_BODY_ATT + (frame * SPLASH_BODY_FALL));
+
+        splashBody = (u16) (splashBody + SPLASH_BODY_STEP);
+        PSG_setTone(0, splashBody);
+        PSG_setEnvelope(0, (bodyAtt < PSG_ENVELOPE_MIN) ? bodyAtt : PSG_ENVELOPE_MIN);
+    }
+    else if (frame == SPLASH_BODY_FRAMES)
+        PSG_setEnvelope(0, PSG_ENVELOPE_MIN);
+
+    splashLeft--;
+    if (!splashLeft)
+        splashOff();
+}
+
 void Sfx_playEnemyKill(void)
 {
     if (!enabled)
         return;
 
-    if (musicOn)
-        XGM_startPlayPCM((u8) (XGM_SMP_KILL0 + nextKillVariant), XGM_SFX_PRIORITY,
-                         SFX_SHORT_CHANNEL);
-    else
-    {
-        SND_PCM4_setVolume(SFX_SHORT_CHANNEL, SFX_VOL_MAX);
-        SND_PCM4_startPlay(enemyKills[nextKillVariant], enemyKillLens[nextKillVariant],
-                           SFX_SHORT_CHANNEL, FALSE);
-    }
-    sfxShotLeft[SFX_ID_KILL] = SFX_SHOT_FRAMES(enemyKillLens[nextKillVariant]);
-    if (++nextKillVariant >= KILL_VARIANTS)
-        nextKillVariant = 0;
+    // El PSG suena igual con la cancion puesta o sin ella, asi que aqui no hay
+    // la rama de musicOn que llevan las muestras.
+    splashHit();
+    sfxShotLeft[SFX_ID_KILL] = SPLASH_FRAMES;
 }
 
 void Sfx_playLetterPickup(void)
@@ -694,6 +759,8 @@ static void slopVoiceTimbre(u8 v, u8 modTL, u8 modMul, u8 modDT, u8 fb, u8 pms)
 static void chipsSilence(void)
 {
     u8 i;
+
+    splashLeft = 0; // sin esto el tick volveria a encender el ruido al frame siguiente
 
     for (i = 0; i < 4; i++)
         PSG_setEnvelope(i, PSG_ENVELOPE_MIN);
@@ -1255,6 +1322,9 @@ void Sfx_update(void)
         if (sfxShotLeft[v] > 0)
             sfxShotLeft[v]--;
 
+    if (splashLeft)
+        splashTick();
+
     if (jazzOn)
         jazzTick();
 }
@@ -1271,11 +1341,13 @@ void Sfx_update(void)
 //
 // Que esten aqui y no en un comentario suelto es a proposito: el visor de
 // depuracion los lee de esta misma tabla, asi que lo que se ve en pantalla no
-// puede desincronizarse de lo que dice el codigo.
+// puede desincronizarse de lo que dice el codigo. KILL se quedo en su sitio
+// aunque ya no sea una muestra sino PSG: el orden es el de los identificadores
+// de sfx.h y moverlo seria renumerarlos todos.
 static const char *const sfxName[SFX_ID_COUNT] = {
     "KICK",   // 0  bombo 909 al chocar con un muro, 4 variantes que rotan
     "HAT",    // 1  hi-hat cerrado al coger una planta, 4 variantes
-    "KILL",   // 2  matar un enemigo -- PLACEHOLDER, una sola muestra
+    "KILL",   // 2  matar un enemigo -- el ruido del PSG, pitch sorteado
     "LETTER", // 3  coger una letra -- PLACEHOLDER, una sola muestra
     "TYPE",   // 4  clic del typewriter, lo mas flojo del juego
 

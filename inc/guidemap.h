@@ -165,6 +165,12 @@ bool GuideMap_isRoomLocked(u8 col, u8 row);
 u8 GuideMap_enemyKilledMask(u8 col, u8 row);
 void GuideMap_markEnemyKilled(u8 col, u8 row, u8 index);
 
+// Borra la mascara entera de una sala: vuelve a traer a todos sus enemigos.
+// main.c la llama en la sala donde te matan (peticion del usuario: "que cada
+// pantalla sea un desafio completo"). Solo esa sala -- el resto del planeta
+// conserva sus muertos, que es lo que pedia el guardado de aqui abajo.
+void GuideMap_clearEnemyKilled(u8 col, u8 row);
+
 // Snapshots/restores those bits whole, the same way plants.c's own
 // Plants_saveMask/restoreMask do for collected plants (user request: "si
 // la nave muere... quiero que guardes el estado del planeta, con sus

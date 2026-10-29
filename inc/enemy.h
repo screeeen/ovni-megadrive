@@ -17,8 +17,10 @@
 // de una puerta, y ninguno vuelve si lo mataste.
 //
 // El orden del enum es el de los fotogramas de enemyShip
-// (tools/enemy_tiles.py): 2*especie el peligroso, 2*especie+1 el
-// vulnerable. La forma es la senal de estado, el color solo acompana.
+// (tools/enemy_tiles.py), que ahora van de cinco en cinco: por cada
+// (2*especie + vulnerable) hay la postura normal y las cuatro estrujado
+// contra el muro que acaba de golpear. La forma es la senal de estado, el
+// color solo acompana.
 typedef enum
 {
     ESP_PATRULLA,   // carril recto pegado a un muro, rebota -- el de siempre
@@ -39,6 +41,13 @@ typedef enum { ENEMY_DANGEROUS, ENEMY_VULNERABLE } EnemyState;
 #define ENEMY_DEATH_BLINK_FRAMES 24
 #define ENEMY_DEATH_BLINK_PERIOD 4
 
+// Lo que dura el estrujado contra un muro (peticion del usuario: "todos los
+// enemigos que choquen contra pared tengan su animacion respectiva de squeeze
+// como el player"). Los mismos 10 frames que la nave -- main.c los tiene
+// atados al temblor de pantalla para que golpe, temblor y deformacion lean
+// como un solo suceso, y aqui no hay temblor pero el gesto se reconoce igual.
+#define ENEMY_SQUASH_FRAMES 10
+
 typedef struct
 {
     s16 x;              // esquina de la caja de una celda, como Player
@@ -49,6 +58,11 @@ typedef struct
     u8 tick;            // divisor de velocidad, para las especies lentas
     u8 glide;           // px que le quedan al paso de celda en curso (ESP_ACECHO)
     u8 pause;           // fotogramas parado entre deslizamientos (ESP_DESLIZA)
+    u8 squashDir;       // contra que muro se estrujo, y cuanto le queda
+    u8 squashLeft;
+    u8 easeIdx;         // el paso del ease, con un sentido por especie: el
+                        // tramo del paso de celda (ACECHO), lo acelerado que
+                        // va (DESLIZA) o por donde va el vaiven (ESPECTRO)
     bool sawRest;       // la nave estaba parada el frame anterior (ESP_ACECHO)
     bool alive;
     u16 stateTimer;
@@ -84,7 +98,8 @@ bool Enemy_isGone(const Enemy *e);
 bool Enemy_blinkVisible(const Enemy *e);
 bool Enemy_overlapsBox(const Enemy *e, s16 boxX, s16 boxY);
 
-// Fotograma de enemyShip que le toca: forma de la especie y estado.
+// Fotograma de enemyShip que le toca: forma de la especie, estado y postura
+// (normal, o estrujado contra el muro que acaba de golpear).
 u8 Enemy_frame(const Enemy *e);
 
 // Tres letras, para la vista de datos.

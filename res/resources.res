@@ -33,9 +33,12 @@ SPRITE enemyShip "sprite/enemy.png" 1 1 NONE
 # La nave gigante: el arte de 32x32 (tools/player_tiles.py) que main.c pone en
 # cuanto el jugador coge la C, el primer power-up. La caja de colision sigue
 # siendo la celda de 16 px, asi que el dibujo sobresale 8 px por lado.
+# 6 fotogramas: los 5 de arriba y el 5 del idle, con el cuerpo hundido.
 SPRITE playerShip32 "sprite/player32.png" 4 4 NONE
 # Las de 16x16, que son las de siempre: la celda mide 16 y ocupan una justa.
 # Las de 8x8 de aqui arriba se quedan sin usar, por si hubiera que volver.
+# Los seis los arma tools/player_tiles16.py desde sprite/player16_src.png, que
+# es el arte pelado y no se toca: el 5 lo calcula y a todos les pone la cara.
 SPRITE playerShip16 "sprite/player16.png" 2 2 NONE
 SPRITE enemyShip16 "sprite/enemy16.png" 2 2 NONE
 # Los iconos de los objetos, 16x16 (tools/item_icons.py). Van con las tintas
@@ -61,16 +64,11 @@ WAV hihat3 "sound/hihat3.wav" PCM4
 # Placeholders, to be replaced with real art (user request: "que sea
 # placeholder, ya lo pondre yo a mi gusto").
 #
-# El splash de matar lleva SEIS variantes, una por pitch (peticion del usuario:
-# "varia siempre el pitch del sfx splash cuando mata enemigo"): ni el PCM4 ni el
-# XGM saben cambiar la velocidad de reproduccion, asi que el pitch va cocido en
-# el fichero y sfx.c las rota. Las hace tools/enemykill_splash.py.
-WAV enemyKill0 "sound/enemykill0.wav" PCM4
-WAV enemyKill1 "sound/enemykill1.wav" PCM4
-WAV enemyKill2 "sound/enemykill2.wav" PCM4
-WAV enemyKill3 "sound/enemykill3.wav" PCM4
-WAV enemyKill4 "sound/enemykill4.wav" PCM4
-WAV enemyKill5 "sound/enemykill5.wav" PCM4
+# El splash de matar enemigo NO esta aqui: sale del PSG (canal de ruido mas el
+# tono 0), no de una muestra -- peticion del usuario, "me gustaria que todo
+# fuese desde el chip". Lo monta sfx.c. Las muestras que hubo siguen en
+# res/sound/enemykill*.wav con su tools/enemykill_splash.py por si hay que
+# volver: eran seis variantes de pitch y 55 KB de ROM.
 WAV letterPickup "sound/letter0.wav" PCM4
 
 # Clic del typewriter (peticion del usuario: "un sonido muy muy discreto").
@@ -100,12 +98,6 @@ WAV xgmHihat0 "sound/hihat0.wav" XGM
 WAV xgmHihat1 "sound/hihat1.wav" XGM
 WAV xgmHihat2 "sound/hihat2.wav" XGM
 WAV xgmHihat3 "sound/hihat3.wav" XGM
-WAV xgmEnemyKill0 "sound/enemykill0.wav" XGM
-WAV xgmEnemyKill1 "sound/enemykill1.wav" XGM
-WAV xgmEnemyKill2 "sound/enemykill2.wav" XGM
-WAV xgmEnemyKill3 "sound/enemykill3.wav" XGM
-WAV xgmEnemyKill4 "sound/enemykill4.wav" XGM
-WAV xgmEnemyKill5 "sound/enemykill5.wav" XGM
 WAV xgmLetterPickup "sound/letter0.wav" XGM
 # Para que el driver XGM no haya que descargarlo al salir de la partida (y con
 # el se pierda por donde iba la cancion), todo lo que suena FUERA de la partida

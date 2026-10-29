@@ -45,6 +45,11 @@ static const Kind kinds[ENEMY_SPECIES_COUNT] = {
 
 static const char *const speciesTags[ENEMY_SPECIES_COUNT] = { "PAT", "TOR", "RON", "ACE", "DES", "ESP" };
 
+// Que ranura de fotogramas estrujados le toca a cada especie, -1 las que no se
+// estrujan. Son las tres que se mueven con ease, ver squash() y Enemy_frame().
+#define ENEMY_FRAMES_PLAIN 12
+static const s8 squashSlot[ENEMY_SPECIES_COUNT] = { -1, -1, -1, 0, 1, 2 };
+
 // Las celdas por las que la nave entra y sale de esta sala, rearmadas en
 // cada Enemy_spawnGroup. Hacen de muro para todos, no solo al aparecer.
 static bool doorTrajectory[MAZE_MAX_H][MAZE_MAX_W];
@@ -98,6 +103,58 @@ static bool blockedBox(const Enemy *e, s16 x, s16 y)
         return outsideRing(x, y) || trajBox(x, y);
 
     return wallBox(x, y) || trajBox(x, y);
+}
+
+// --- EL ESTRUJADO Y EL EASE ------------------------------------------------
+//
+// Estrujarse contra el muro que acaban de golpear, como la nave, y SOLO los
+// que se mueven con ease (peticion del usuario: "solo haz el squeeze animation
+// en aquellos enemigos que se mueven con ease"). Las dos cosas van juntas a
+// proposito: el que arranca y frena tiene un cuerpo que acusa el golpe, y el
+// que va a paso clavado es una pieza de reloj y no lo acusa.
+//
+// Ademas el de ronda no podia llevarlo: gira siguiendo el muro cada celda y
+// media -- medido, 49 topetazos donde la patrulla daba 37 -- asi que con 10
+// frames de estrujado por topetazo se habria pasado la vida aplastado.
+//
+// Cada especie lo pide en su propio choque, que no es el mismo suceso en las
+// tres: el que acecha pierde el paso, el que se desliza se para y el espectro
+// topa con el anillo. La direccion que se guarda es la que LLEVABA, no la de
+// despues de rebotar.
+static void squash(Enemy *e, u8 dir)
+{
+    e->squashDir = dir;
+    e->squashLeft = ENEMY_SQUASH_FRAMES;
+}
+
+// Y el ease (peticion del usuario: "que se muevan algunos tambien con ease").
+// ALGUNOS, tres de seis: lo que distingue a una especie de otra en este juego
+// es como se mueve, y si todas arrancan y frenan igual eso se pierde. El de
+// carril, la torreta y el de ronda siguen a paso clavado.
+//
+// EL ACECHO da su celda con la curva entera: 16 px en 8 frames, lento al
+// salir, 3 px en el medio y frenando al llegar. Antes era un pixel por frame
+// durante 16, que es lo que hace que un paso parezca una cinta transportadora.
+#define EASE_CELL_STEPS 8
+static const u8 easeCell[EASE_CELL_STEPS] = { 1, 1, 2, 3, 3, 3, 2, 1 }; // suma 16
+
+// EL ESPECTRO no se para nunca, asi que su ease es un vaiven: el intervalo
+// entre pasos va y viene por esta tabla, de 5 frames a 2 y de vuelta. Flota.
+#define GHOST_BREATH_STEPS 8
+static const u8 ghostBreath[GHOST_BREATH_STEPS] = { 5, 4, 3, 2, 2, 3, 4, 5 };
+
+// EL DESLIZADOR acelera desde parado hasta su velocidad de siempre, un pixel
+// por frame de rampa, y choca a tope -- un deslizamiento que sale ya lanzado
+// no se lee como que arranca.
+
+// Cada cuantos frames da un paso. Fijo para casi todas; el espectro lo saca
+// de su vaiven.
+static u8 stepEveryOf(const Enemy *e)
+{
+    if (kinds[e->species].move == EMOVE_GHOST)
+        return ghostBreath[e->easeIdx];
+
+    return kinds[e->species].stepEvery;
 }
 
 // Avanza hasta px pixeles en e->dir y devuelve cuantos ha dado.
@@ -396,6 +453,9 @@ void Enemy_spawnGroup(Enemy *list, u8 count, u8 speciesCap, u8 killedMask, u16 r
         e->tick = 0;
         e->glide = 0;
         e->pause = 0;
+        e->squashDir = 0;
+        e->squashLeft = 0;
+        e->easeIdx = 0;
         e->sawRest = FALSE;
         e->rng = (u16) ((roomSeed ^ (u16) (0x9E37 * (i + 1))) | 1);
         e->aimTimer = GHOST_AIM_FRAMES;
@@ -423,12 +483,17 @@ void Enemy_update(Enemy *e, s16 playerX, s16 playerY, bool playerResting)
 
     k = &kinds[e->species];
 
-    if (++e->tick < k->stepEvery)
+    if (e->squashLeft > 0)
+        e->squashLeft--;
+
+    if (++e->tick < stepEveryOf(e))
         px = 0;
     else
     {
         e->tick = 0;
         px = k->stepPx;
+        if (k->move == EMOVE_GHOST)
+            e->easeIdx = (u8) ((e->easeIdx + 1) & (GHOST_BREATH_STEPS - 1));
     }
 
     switch (k->move)
@@ -469,15 +534,33 @@ void Enemy_update(Enemy *e, s16 playerX, s16 playerY, bool playerResting)
             {
                 e->dir = aimAt(e, playerX, playerY);
                 e->glide = MAZE_TILE_PX;
+                e->easeIdx = 0; // la celda nueva empieza por el principio
             }
             e->sawRest = playerResting;
 
-            if ((e->glide > 0) && (px > 0))
+            if (e->glide > 0)
             {
-                if (advance(e, 1) == 0)
+                // El paso sale de la curva, no de stepPx: ver easeCell. Lo que
+                // quede del glide corta el ultimo tramo, que es lo que hace
+                // que pare clavado en la celda.
+                u8 want = easeCell[e->easeIdx];
+                u8 got;
+
+                if (want > e->glide)
+                    want = e->glide;
+                got = advance(e, want);
+
+                if (got == 0)
+                {
+                    squash(e, e->dir);
                     e->glide = 0; // se le cruzo un muro: paso perdido
+                }
                 else
-                    e->glide--;
+                {
+                    e->glide = (u8) (e->glide - got);
+                    if ((e->easeIdx + 1) < EASE_CELL_STEPS)
+                        e->easeIdx++;
+                }
             }
             break;
 
@@ -486,10 +569,25 @@ void Enemy_update(Enemy *e, s16 playerX, s16 playerY, bool playerResting)
             {
                 e->pause--;
                 if (e->pause == 0)
+                {
                     pickSlideDir(e);
+                    e->easeIdx = 0; // y vuelve a salir despacio
+                }
             }
-            else if ((px > 0) && (advance(e, px) < px))
-                e->pause = SLIDE_PAUSE_FRAMES;
+            else if (px > 0)
+            {
+                // Acelera desde parado hasta px, un pixel por frame.
+                const u8 step = (e->easeIdx < px) ? (u8) (e->easeIdx + 1) : px;
+
+                if (e->easeIdx < px)
+                    e->easeIdx++;
+
+                if (advance(e, step) < step)
+                {
+                    squash(e, e->dir);
+                    e->pause = SLIDE_PAUSE_FRAMES;
+                }
+            }
             break;
 
         case EMOVE_GHOST:
@@ -501,7 +599,10 @@ void Enemy_update(Enemy *e, s16 playerX, s16 playerY, bool playerResting)
                 e->aimTimer = GHOST_AIM_FRAMES;
             }
             if ((px > 0) && (advance(e, px) < px))
+            {
+                squash(e, e->dir); // el anillo, que para el es el unico muro
                 e->dir = (u8) ((e->dir + 2) & 3);
+            }
             break;
 
         default: // EMOVE_STILL
@@ -526,6 +627,10 @@ void Enemy_update(Enemy *e, s16 playerX, s16 playerY, bool playerResting)
 
 void Enemy_kill(Enemy *e)
 {
+    // Sin esto un enemigo atropellado justo despues de topar con un muro se
+    // queda parpadeando estrujado: el contador ya no corre, porque un muerto
+    // sale de Enemy_update antes de llegar a bajarlo.
+    e->squashLeft = 0;
     e->alive = FALSE;
     e->deathTimer = ENEMY_DEATH_BLINK_FRAMES;
 }
@@ -568,7 +673,19 @@ bool Enemy_overlapsBox(const Enemy *e, s16 boxX, s16 boxY)
 
 u8 Enemy_frame(const Enemy *e)
 {
-    return (u8) ((e->species * 2) + ((e->state == ENEMY_VULNERABLE) ? 1 : 0));
+    const u8 vuln = (e->state == ENEMY_VULNERABLE) ? 1 : 0;
+
+    // Primero los doce normales (2*especie + vulnerable, como siempre) y
+    // detras los estrujados, cuatro por cada estado de cada especie que se
+    // estruja -- solo tres de seis, asi que no cabe una cuenta uniforme y va
+    // por la tabla de ranuras. Ver tools/enemy_tiles.py, que los escribe en
+    // este mismo orden.
+    if ((e->squashLeft > 0) && (squashSlot[e->species] >= 0))
+        return (u8) (ENEMY_FRAMES_PLAIN
+                     + (((squashSlot[e->species] * 2) + vuln) * 4)
+                     + e->squashDir);
+
+    return (u8) ((e->species * 2) + vuln);
 }
 
 const char *Enemy_speciesTag(u8 species)
