@@ -95,13 +95,25 @@ static u8 grid[MAZE_MAX_H][MAZE_MAX_W];
 // generator last ran).
 static bool lockedDoorCell[MAZE_MAX_H][MAZE_MAX_W];
 
+// LOS BLOQUES QUE LA BOMBA REVIENTA (peticion del usuario). Son muro para
+// todo el mundo -- Maze_isWall no los distingue -- y solo esta marca dice
+// cuales se pueden volar. No los pone el generador: los coloca el horno
+// (Maze_setBreakable), siempre sobre muro con dos o mas vecinos de suelo --
+// asi el hueco que dejan es un paso y no un agujero ciego -- y solo si la
+// sala sigue siendo jugable con cualquier combinacion de ellos volada. La
+// prueba esta en colocaRompibles, en tools/levelgen.
+static bool breakableCell[MAZE_MAX_H][MAZE_MAX_W];
+
 static void clearLockedDoorCells(void)
 {
     s16 x, y;
 
     for (y = 0; y < MAZE_H; y++)
         for (x = 0; x < MAZE_W; x++)
+        {
             lockedDoorCell[y][x] = FALSE;
+            breakableCell[y][x] = FALSE;
+        }
 }
 
 // Valor con el que se marca una celda de muro MIENTRAS se genera. Cualquier
@@ -2676,11 +2688,14 @@ void Maze_loadRoom(const u8 *datos, bool extraccion, const bool abierta[4])
             const u8 cod = Levels_cell(celdas, w, x, y);
 
             outsideShape[y][x] = (cod == LVL_NADA);
+            breakableCell[y][x] = (cod == LVL_ROMPIBLE);
             grid[y][x] = (cod == LVL_SUELO)
                          ? PATH
-                         : extraccion
-                           ? (u8) INSERT_WALL_VARIANT
-                           : (u8) (CELL_MURO_BASE + cellVariant(x, y, CELL_MURO_COUNT));
+                         : (cod == LVL_ROMPIBLE)
+                           ? (u8) CELL_ROMPIBLE
+                           : extraccion
+                             ? (u8) INSERT_WALL_VARIANT
+                             : (u8) (CELL_MURO_BASE + cellVariant(x, y, CELL_MURO_COUNT));
         }
 
     // Los vanos: la horneada los trae cerrados, asi que solo hay que abrir los
@@ -2967,6 +2982,22 @@ static bool debugEdgesVisible = FALSE;
 void Maze_drawDebugEdges(void);
 void Maze_drawDebugGraph(void);
 
+// Las cuatro teselas de 8x8 de una celda, en orden tl, tr, bl, br. Lo
+// comparten el redibujado entero y el de una celda sola (Maze_breakCell).
+static void cellAttrs(s16 x, s16 y, u16 *out)
+{
+    const u16 tl = (u16) (BASE_TILE + (2 * grid[y][x]));
+    const u16 bl = (u16) (tl + MAZE_SHEET_ROW);
+    // Las puertas cerradas (peticion del usuario) van en PAL3 (amarillo,
+    // menu.c LOCKED_DOOR_INK_INDEX): misma trama, otra paleta.
+    const u8 pal = lockedDoorCell[y][x] ? PAL3 : PAL0;
+
+    out[0] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tl);
+    out[1] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tl + 1);
+    out[2] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, bl);
+    out[3] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, bl + 1);
+}
+
 void Maze_draw(void)
 {
     // La pantalla entera se arma en RAM y se le da al VDP en una sola DMA
@@ -2997,18 +3028,14 @@ void Maze_draw(void)
                 continue;
 
             {
-            const u16 tl = (u16) (BASE_TILE + (2 * grid[y][x]));
-            const u16 bl = (u16) (tl + MAZE_SHEET_ROW);
             const u16 i = (u16) (ox + (x * 2));
-            // Las puertas cerradas (peticion del usuario) van en PAL3
-            // (amarillo, menu.c LOCKED_DOOR_INK_INDEX): misma trama, otra
-            // paleta.
-            const u8 pal = lockedDoorCell[y][x] ? PAL3 : PAL0;
+            u16 attr[4];
 
-            arriba[i] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tl);
-            arriba[i + 1] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, tl + 1);
-            abajo[i] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, bl);
-            abajo[i + 1] = TILE_ATTR_FULL(pal, 0, FALSE, FALSE, bl + 1);
+            cellAttrs(x, y, attr);
+            arriba[i] = attr[0];
+            arriba[i + 1] = attr[1];
+            abajo[i] = attr[2];
+            abajo[i + 1] = attr[3];
             }
         }
     }
@@ -3297,4 +3324,82 @@ bool Maze_isWall(s16 tx, s16 ty)
         return TRUE;
 
     return grid[ty][tx] != PATH;
+}
+
+bool Maze_isBreakable(s16 tx, s16 ty)
+{
+    if ((tx < 0) || (ty < 0) || (tx >= MAZE_W) || (ty >= MAZE_H))
+        return FALSE;
+
+    return breakableCell[ty][tx];
+}
+
+// Lo usa el horno: planta el bloque en una celda de suelo. En el cartucho no
+// lo llama nadie -- alli los bloques llegan cargados con la sala.
+void Maze_setBreakable(s16 tx, s16 ty)
+{
+    if ((tx < 0) || (ty < 0) || (tx >= MAZE_W) || (ty >= MAZE_H))
+        return;
+
+    grid[ty][tx] = (u8) CELL_ROMPIBLE;
+    breakableCell[ty][tx] = TRUE;
+}
+
+// UNA CELDA SOLA, no el plano entero: esto pasa en mitad de la partida, con
+// el haz dibujando, asi que va por la cola de DMA y con copia -- el buffer es
+// de la pila y la cola lo lee despues.
+static void subeCelda(s16 tx, s16 ty, const u16 *attr)
+{
+    u16 plano[2][2];
+
+    plano[0][0] = attr[0];
+    plano[0][1] = attr[1];
+    plano[1][0] = attr[2];
+    plano[1][1] = attr[3];
+    VDP_setTileMapDataRect(BG_A, &plano[0][0],
+                            (u16) (Maze_originColumn() + (tx * 2)),
+                            (u16) (Maze_originRow() + (ty * 2)),
+                            2, 2, 2, DMA_QUEUE_COPY);
+}
+
+void Maze_drawCell(s16 tx, s16 ty)
+{
+    u16 attr[4];
+
+    if ((tx < 0) || (ty < 0) || (tx >= MAZE_W) || (ty >= MAZE_H))
+        return;
+
+    cellAttrs(tx, ty, attr);
+    subeCelda(tx, ty, attr);
+}
+
+// La celda encendida: la tesela maciza del tileset en PAL3, la paleta de las
+// puertas cerradas, cuyo CUERPO es amarillo mientras se juega (menu.c,
+// LOCKED_DOOR_INK_INDEX y sus vecinas). Es la mecha y la llamarada de la
+// bomba sin arte nuevo y sin gastar un sprite.
+void Maze_flashCell(s16 tx, s16 ty)
+{
+    const u16 tl = (u16) (BASE_TILE + (2 * CELL_SOLIDO));
+    const u16 bl = (u16) (tl + MAZE_SHEET_ROW);
+    u16 attr[4];
+
+    if ((tx < 0) || (ty < 0) || (tx >= MAZE_W) || (ty >= MAZE_H))
+        return;
+
+    attr[0] = TILE_ATTR_FULL(PAL3, 0, FALSE, FALSE, tl);
+    attr[1] = TILE_ATTR_FULL(PAL3, 0, FALSE, FALSE, tl + 1);
+    attr[2] = TILE_ATTR_FULL(PAL3, 0, FALSE, FALSE, bl);
+    attr[3] = TILE_ATTR_FULL(PAL3, 0, FALSE, FALSE, bl + 1);
+    subeCelda(tx, ty, attr);
+}
+
+// La bomba: la celda se queda en suelo y se repinta.
+void Maze_breakCell(s16 tx, s16 ty)
+{
+    if (!Maze_isBreakable(tx, ty))
+        return;
+
+    grid[ty][tx] = PATH;
+    breakableCell[ty][tx] = FALSE;
+    Maze_drawCell(tx, ty);
 }

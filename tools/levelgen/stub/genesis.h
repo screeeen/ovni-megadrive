@@ -50,6 +50,7 @@ static inline u16 sgdkRandom(void)
 #define BG_A 0
 #define BG_B 1
 #define DMA  0
+#define DMA_QUEUE_COPY 0
 #define CPU  1
 
 #define TILE_USER_INDEX 16

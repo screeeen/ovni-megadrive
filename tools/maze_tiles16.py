@@ -82,13 +82,16 @@ def escribir_h(celdas, fila_teselas):
 #define CELL_MURO_COUNT  %d
 #define CELL_SOLIDO      %d
 
+// El bloque que la bomba revienta (ladrillo trabado, no trama).
+#define CELL_ROMPIBLE    %d
+
 // Teselas sueltas de 8x8, para lo que no dibuja celdas enteras.
 #define TILE_SUELO       %d
 #define TILE_SOLIDO      %d
 
 #endif // _MAZE_TILES_GEN_H_
 """ % (celdas * 4, fila_teselas, 0, 1, len(MUROS), 1 + len(MUROS),
-       0, 2 * (1 + len(MUROS))))
+       2 + len(MUROS), 0, 2 * (1 + len(MUROS))))
 
 
 def main():
@@ -106,6 +109,13 @@ def main():
         celdas.append([[PAL_CUERPO if px[y][c * N + x] else PAL_SOMBRA for x in range(N)]
                        for y in range(N)])
     celdas.append([[PAL_CUERPO] * N for _ in range(N)])     # la maciza
+    # EL BLOQUE ROMPIBLE (la bomba). Se distingue del muro por la FORMA y no
+    # por el color -- ladrillo trabado frente a trama de puntos --, que es lo
+    # unico que se lee a 320x224 y lo unico que no depende de la vista del
+    # que juega. Va en las mismas dos tintas que el muro, asi que
+    # Maze_setPlanetTint lo tine con el planeta sin tocar nada.
+    celdas.append([[PAL_SOMBRA if ((y % 8) == 0) or ((x % 8) == (0 if ((y // 8) % 2) == 0 else 4))
+                    else PAL_CUERPO for x in range(N)] for y in range(N)])
 
     # Lo que escribe encima Maze_setPlanetTint; aqui solo tienen que ser
     # distintos entre si para que el PNG no funda los dos en uno.

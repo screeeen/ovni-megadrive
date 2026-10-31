@@ -114,6 +114,7 @@ static u8 doorOffsetFor(u8 col, u8 row, u8 dir)
 #define CELDA_NADA  0
 #define CELDA_SUELO 1
 #define CELDA_MURO  2
+#define CELDA_ROMPIBLE 3
 
 // Cabecera de sala: 11 B de metadatos, luego las plantas y luego las celdas.
 typedef struct
@@ -139,7 +140,287 @@ static u8 codigoCelda(s16 x, s16 y)
 {
     if (outsideShape[y][x] && !shapeEdge[y][x])
         return CELDA_NADA;
+    if (breakableCell[y][x])
+        return CELDA_ROMPIBLE;
     return (grid[y][x] == PATH) ? CELDA_SUELO : CELDA_MURO;
+}
+
+// --- LOS BLOQUES ROMPIBLES (peticion del usuario: bombas tipo bomberman) ---
+//
+// Se anaden DESPUES de que la sala este tallada, validada y con sus plantas
+// puestas, sobre celdas de suelo. Y no a ciegas: la condicion es que la sala
+// siga siendo buena CON CUALQUIER COMBINACION de ellos puesta o volada, que
+// es justo lo que el jugador va a poder provocar con las bombas.
+//
+// "Buena" es lo mismo que el generador exige para aceptar una sala:
+// tomboValidate (cada puerta se alcanza y se sale por ella), la pasada por
+// subconjuntos de puertas cerradas, y que cada planta ya colocada siga siendo
+// recogible (Maze_isPlantSafe). Un bloque se queda solo si TODOS los
+// subconjuntos que lo incluyen pasan; si no, se descarta y se prueba otra
+// celda. Asi no hay que razonar sobre el grafo de deslizamiento: esta
+// comprobado, sala por sala y combinacion por combinacion.
+//
+// El sorteo va con un azar PROPIO: el de SGDK es la corriente compartida de
+// la que sale cada sala del horno y tocarla aqui cambiaria todos los niveles.
+#define ROMPIBLES_MAX 8
+
+static unsigned rompiblesTotal, rompiblesSalasVacias, rompiblesSalasCero;
+static u8 gridGuardado[MAZE_MAX_H][MAZE_MAX_W];
+static bool lockGuardado[MAZE_MAX_H][MAZE_MAX_W];
+static bool rompGuardado[MAZE_MAX_H][MAZE_MAX_W];
+static int rompiblesMin = 99, rompiblesMax;
+static u16 rndRompible;
+
+static u16 rndLocal(void)
+{
+    rndRompible ^= (u16) (rndRompible >> 5);
+    rndRompible ^= (u16) (rndRompible << 9);
+    rndRompible ^= (u16) (rndRompible >> 7);
+    return rndRompible;
+}
+
+// LA PRUEBA VA SOBRE UNA COPIA. La rejilla se hornea con todas las puertas
+// cerradas (el cierre por letras es progreso de partida, no tallado), y asi
+// no se puede validar nada: no hay por donde entrar. Asi que se guarda la
+// rejilla horneada, se abren los umbrales -- que es el estado que juega el
+// jugador y el que Maze_loadRoom reconstruye --, se prueba, y se devuelve la
+// rejilla tal cual estaba antes de hornearla con los bloques elegidos encima.
+static void guardaRejilla(void)
+{
+    memcpy(gridGuardado, grid, sizeof grid);
+    memcpy(lockGuardado, lockedDoorCell, sizeof lockedDoorCell);
+    memcpy(rompGuardado, breakableCell, sizeof breakableCell);
+}
+
+static void restauraRejilla(void)
+{
+    memcpy(grid, gridGuardado, sizeof grid);
+    memcpy(lockedDoorCell, lockGuardado, sizeof lockedDoorCell);
+    memcpy(breakableCell, rompGuardado, sizeof breakableCell);
+}
+
+static void abrePuertas(u8 doorMask, const u8 offs[4])
+{
+    const s16 w = Maze_roomW(), h = Maze_roomH();
+    int d;
+
+    for (d = 0; d < 4; d++)
+    {
+        const s16 o = offs[d];
+
+        if (!(doorMask & (1 << d)))
+            continue;
+
+        switch (d)
+        {
+            case MAZE_DIR_N:
+                sealDoorCells(FALSE, 0, o, 0, o + 1, 1, o, 1, o + 1);
+                break;
+            case MAZE_DIR_S:
+                sealDoorCells(FALSE, h - 1, o, h - 1, o + 1, h - 2, o, h - 2, o + 1);
+                break;
+            case MAZE_DIR_E:
+                sealDoorCells(FALSE, o, w - 1, o + 1, w - 1, o, w - 2, o + 1, w - 2);
+                break;
+            default:
+                sealDoorCells(FALSE, o, 0, o + 1, 0, o, 1, o + 1, 1);
+                break;
+        }
+    }
+}
+
+// La sala, tal y como esta la rejilla ahora mismo: cada puerta se alcanza y
+// se sale por ella, tambien con cualquier subconjunto de puertas cerradas.
+// Las plantas no entran aqui -- se colocan DESPUES de los bloques, y solo
+// donde siguen siendo recogibles con cualquier combinacion de ellos (ver
+// plantSafeDeTodosLosSubconjuntos).
+static int salaBien(u8 doorMask, const u8 offs[4])
+{
+    // tomboValidateSubset y no tomboValidate: el segundo lleva pegado el
+    // minimo de DIFICULTAD de la sala (tomboPuzzleDeepEnough), y eso aqui no
+    // vale como criterio -- un bloque suele acortar algun camino y volverla
+    // mas facil, que es justo de lo que va la bomba. Lo que no puede pasar es
+    // que deje de ser jugable, y eso es lo que mira esta: con todas las
+    // puertas abiertas y con cualquier subconjunto de ellas.
+    int l, i;
+
+    if (!tomboValidateSubset(doorMask, doorMask, offs, ROOM_SEED_COL, ROOM_SEED_ROW))
+        return 0;
+    if (!tomboAllSubsetsSafe(doorMask, offs, ROOM_SEED_COL, ROOM_SEED_ROW))
+        return 0;
+
+    // Y cada planta que ya esta puesta sigue siendo recogible: el planeta no
+    // se termina sin todas, asi que una planta huerfana por un bombazo seria
+    // un planeta imposible.
+    plantSafeDirty = TRUE;
+    for (l = 0; l < PLANTS_LINES_PER_ROOM; l++)
+        for (i = 0; i < curCount[l]; i++)
+            if (!Maze_isPlantSafe(curCol[l][i], curRow[l][i]))
+                return 0;
+
+    return 1;
+}
+
+// Donde no puede ir un bloque ni aunque pasase la prueba: el hub (ahi va la
+// letra) y el umbral de cada puerta abierta, que es donde aparece la nave al
+// entrar. Las plantas no hace falta reservarlas: se colocan despues y solo en
+// celdas cruzables, y un bloque nunca lo es.
+static int celdaReservada(s16 x, s16 y, u8 doorMask, const u8 offs[4])
+{
+    const s16 w = Maze_roomW(), h = Maze_roomH();
+    int d;
+
+    if ((x == ROOM_SEED_COL) && (y == ROOM_SEED_ROW))
+        return 1;
+
+    for (d = 0; d < 4; d++)
+    {
+        const s16 o = offs[d];
+
+        if (!(doorMask & (1 << d)))
+            continue;
+
+        switch (d)
+        {
+            case MAZE_DIR_N: if ((y <= 1) && (x >= o) && (x <= o + 1)) return 1; break;
+            case MAZE_DIR_S: if ((y >= h - 2) && (x >= o) && (x <= o + 1)) return 1; break;
+            case MAZE_DIR_E: if ((x >= w - 2) && (y >= o) && (y <= o + 1)) return 1; break;
+            default:         if ((x <= 1) && (y >= o) && (y <= o + 1)) return 1; break;
+        }
+    }
+
+    return 0;
+}
+
+// Pone o quita los bloques de bx/by segun su bit en `mascara`.
+static void aplicaRompibles(const s16 *bx, const s16 *by, int n, unsigned mascara)
+{
+    int i;
+
+    for (i = 0; i < n; i++)
+    {
+        if (mascara & (1u << i))
+            Maze_setBreakable(bx[i], by[i]);
+        else
+        {
+            grid[by[i]][bx[i]] = PATH;
+            breakableCell[by[i]][bx[i]] = FALSE;
+        }
+    }
+}
+
+// Todos los subconjuntos que incluyen el ultimo bloque anadido: los de los
+// n-1 de antes ya se probaron cuando se anadieron.
+static int subconjuntosBien(const s16 *bx, const s16 *by, int n, u8 doorMask, const u8 offs[4])
+{
+    const unsigned ultimo = 1u << (n - 1);
+    unsigned m;
+
+    for (m = 0; m < ultimo; m++)
+    {
+        aplicaRompibles(bx, by, n, m | ultimo);
+        if (!salaBien(doorMask, offs))
+            return 0;
+    }
+
+    return 1;
+}
+
+// LOS CANDIDATOS SON MURO, no suelo. Las salas de este juego no tienen suelo
+// abierto: son pasillos de una celda, asi que un bloque nuevo en el suelo
+// corta el paso casi siempre. Lo que si cabe es marcar rompible un muro que
+// ya esta ahi: volarlo abre un atajo entre dos pasillos, y el estado "con
+// todos puestos" es la sala original, la que el generador ya valido.
+//
+// Y TIENE QUE ESTAR EN EL RECORRIDO (peticion del usuario: "los breakables
+// tienen que estar en recorrido de grafos, si no al romperse el player se
+// mete en estos huecos y se rompe el recorrido"). La condicion es que sus dos
+// vecinos OPUESTOS sean suelo: asi el bloque es un muro contra el que la nave
+// frena de verdad, y el hueco que deja al volarlo es un PASO entre dos
+// pasillos, no un agujero ciego donde meterse. Un bloque rodeado de muro
+// pasaba la prueba de playabilidad -- al no cambiar nada no rompia nada --
+// pero era basura: ni se alcanzaba ni servia para nada.
+//
+// Fuera tambien: el anillo del borde (volarlo seria salirse de la sala), lo
+// que esta fuera de la silueta y su filo, y el muro pegado al umbral de una
+// puerta, que es el marco con el que la nave frena al entrar.
+static int celdaCandidata(s16 x, s16 y, u8 doorMask, const u8 offs[4])
+{
+    const s16 w = Maze_roomW(), h = Maze_roomH();
+    int vecinos;
+
+    if (grid[y][x] == PATH)
+        return 0;
+    if ((x <= 0) || (y <= 0) || (x >= w - 1) || (y >= h - 1))
+        return 0;
+    if (outsideShape[y][x] || shapeEdge[y][x])
+        return 0;
+
+    vecinos = (Maze_isWall(x, y - 1) ? 0 : 1) + (Maze_isWall(x, y + 1) ? 0 : 1) +
+              (Maze_isWall(x - 1, y) ? 0 : 1) + (Maze_isWall(x + 1, y) ? 0 : 1);
+    if (vecinos < 2)
+        return 0;
+
+    return !celdaReservada(x, y, doorMask, offs);
+}
+
+static int colocaRompibles(u16 semilla, u8 doorMask, const u8 offs[4])
+{
+    s16 cx[MAZE_MAX_W * MAZE_MAX_H], cy[MAZE_MAX_W * MAZE_MAX_H];
+    s16 bx[ROMPIBLES_MAX], by[ROMPIBLES_MAX];
+    const s16 w = Maze_roomW(), h = Maze_roomH();
+    int n = 0, puestos = 0, i;
+    s16 x, y;
+
+    guardaRejilla();
+    abrePuertas(doorMask, offs);
+
+    // Una sala que no pasa la prueba ya sin bloques no lleva ninguno: no hay
+    // con que comparar, y meterlos solo taparia el problema.
+    if (!salaBien(doorMask, offs))
+    {
+        restauraRejilla();
+        rompiblesSalasVacias++;
+        return 0;
+    }
+
+    for (y = 0; y < h; y++)
+        for (x = 0; x < w; x++)
+            if (celdaCandidata(x, y, doorMask, offs))
+            {
+                cx[n] = x; cy[n] = y; n++;
+            }
+
+    rndRompible = (u16) (semilla ^ 0x5BD1);
+    for (i = n - 1; i > 0; i--)   // Fisher-Yates con el azar propio
+    {
+        const int j = (int) (rndLocal() % (unsigned) (i + 1));
+        const s16 tx = cx[i], ty = cy[i];
+
+        cx[i] = cx[j]; cy[i] = cy[j];
+        cx[j] = tx; cy[j] = ty;
+    }
+
+    for (i = 0; (i < n) && (puestos < ROMPIBLES_MAX); i++)
+    {
+        bx[puestos] = cx[i];
+        by[puestos] = cy[i];
+        puestos++;
+        if (!subconjuntosBien(bx, by, puestos, doorMask, offs))
+            puestos--;             // esa celda no vale: a por la siguiente
+    }
+
+    restauraRejilla();                                     // la horneada, intacta
+    aplicaRompibles(bx, by, puestos, (1u << puestos) - 1); // y los bloques encima
+
+    plantSafeDirty = TRUE;
+
+    rompiblesTotal += (unsigned) puestos;
+    if (puestos == 0)
+        rompiblesSalasCero++;
+    if (puestos < rompiblesMin) rompiblesMin = puestos;
+    if (puestos > rompiblesMax) rompiblesMax = puestos;
+    return puestos;
 }
 
 // Hornea la sala que el generador acaba de dejar en sus arrays. Devuelve
@@ -241,9 +522,11 @@ static int compruebaSala(unsigned off, int esExtraccion, int *celdasMal, int *pl
             // cual es.
             const u8 valor = (cod == CELDA_SUELO)
                              ? PATH
-                             : esExtraccion
-                               ? (u8) INSERT_WALL_VARIANT
-                               : (u8) (CELL_MURO_BASE + cellVariant(x, y, CELL_MURO_COUNT));
+                             : (cod == CELDA_ROMPIBLE)
+                               ? (u8) CELL_ROMPIBLE
+                               : esExtraccion
+                                 ? (u8) INSERT_WALL_VARIANT
+                                 : (u8) (CELL_MURO_BASE + cellVariant(x, y, CELL_MURO_COUNT));
 
             if (noDibuja != noDibujaVivo)
                 (*celdasMal)++;
@@ -805,6 +1088,15 @@ static int planeta(int indice, int preset, u16 semilla, int verboso)
             // misma semilla de sala. Dependen del grafo de deslizamiento, que
             // acaba de construir el generador.
             Plants_spawnForRoom(semillaSala, (u16) ((row * MAX_MAP_COLS) + col));
+            // Y detras los bloques rompibles: se eligen contra la sala ya
+            // tallada y con sus plantas puestas, y un bloque solo se queda si
+            // ninguna combinacion suya deja una planta sin recoger.
+            {
+                const u8 mascara = (u8) ((dN ? 1 : 0) | (dE ? 2 : 0) |
+                                         (dS ? 4 : 0) | (dW ? 8 : 0));
+
+                colocaRompibles(semillaSala, mascara, offs);
+            }
             salas++;
             {
                 const u8 mascara = (u8) ((dN ? 1 : 0) | (dE ? 2 : 0) |
@@ -852,7 +1144,8 @@ static int planeta(int indice, int preset, u16 semilla, int verboso)
                 {
                     printf("    ");
                     for (x = 0; x < Maze_roomW(); x++)
-                        printf("%c", Maze_isWall(x, y) ? '#' :
+                        printf("%c", Maze_isBreakable(x, y) ? 'x' :
+                                     Maze_isWall(x, y) ? '#' :
                                      Maze_isPlantSafe(x, y) ? ',' : '.');
                     printf("\n");
                 }
@@ -1106,6 +1399,9 @@ int main(int argc, char **argv)
                " (%.1f de media por sala, maximo %d)\n",
                total, PLANETAS, GALAXIAS, PRESET_COUNT, plantasTotal,
                (double) plantasTotal / total, plantasMax);
+        printf("\nROMPIBLES: %u bloques (%.1f por sala, de %d a %d), %u salas sin ninguno\n",
+               rompiblesTotal, (double) rompiblesTotal / total,
+               rompiblesMin, rompiblesMax, rompiblesSalasCero);
         printf("\nHORNO: %d registros de sala (las %d de rejilla mas una de extraccion por planeta)\n",
                salasHorneadas, total);
         printf("       salas %u bytes (%.1f cada una), planetas %u bytes (%.1f cada uno)\n",

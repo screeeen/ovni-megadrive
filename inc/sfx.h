@@ -86,6 +86,7 @@ void Sfx_playPlantPickup(void);
 void Sfx_playTypeTick(void);
 
 void Sfx_playEnemyKill(void);
+void Sfx_playBombBlast(void);
 void Sfx_playLetterPickup(void);
 
 // LA MUSICA. La partida suena a musica: una cancion por planeta (res/music,

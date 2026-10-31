@@ -46,6 +46,10 @@
 #define LVL_NADA  0   // no se dibuja (recorte de la silueta; sigue siendo muro)
 #define LVL_SUELO 1
 #define LVL_MURO  2
+// El bloque que la bomba revienta (peticion del usuario). Cabia en el cuarto
+// valor de los dos bits que ya gastaba cada celda, asi que el formato no
+// cambia de tamano. Es muro hasta que lo volas: ver Maze_isBreakable.
+#define LVL_ROMPIBLE 3
 
 #define LVL_PLANT_LINES 3   // tiene que valer PLANTS_LINES_PER_ROOM
 #define LVL_ROOM_META   11

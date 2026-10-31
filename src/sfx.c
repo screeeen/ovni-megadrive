@@ -421,6 +421,25 @@ void Sfx_playEnemyKill(void)
     sfxShotLeft[SFX_ID_KILL] = SPLASH_FRAMES;
 }
 
+// EL ESTALLIDO DE LA BOMBA (peticion del usuario: bombas tipo bomberman).
+// Mismo motor que el splash del enemigo muerto -- ruido blanco con la
+// envolvente cayendo -- pero arrancando mas grave y con el cuerpo mas abajo,
+// que es lo que separa un estallido de un golpe seco. Provisional, como el
+// resto de los efectos.
+void Sfx_playBombBlast(void)
+{
+    if (!enabled)
+        return;
+
+    splashHit();
+    splashDiv = (u16) (SPLASH_DIV_MIN * 3);
+    splashBody = (u16) (SPLASH_BODY_DIV * 2);
+    PSG_setTone(2, splashDiv);
+    PSG_setTone(0, splashBody);
+    splashLeft = SPLASH_FRAMES;
+    sfxShotLeft[SFX_ID_KILL] = SPLASH_FRAMES;
+}
+
 void Sfx_playLetterPickup(void)
 {
     if (!enabled)

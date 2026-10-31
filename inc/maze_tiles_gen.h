@@ -7,8 +7,8 @@
 // Teselas de 8x8 que ocupa la hoja entera en VRAM, y las que hay en una fila
 // de 8 px de la hoja: la celda c son las teselas 2c y 2c+1 arriba y
 // MAZE_SHEET_ROW + 2c y +1 abajo (ver Maze_draw).
-#define MAZE_TILE_COUNT  44
-#define MAZE_SHEET_ROW   22
+#define MAZE_TILE_COUNT  48
+#define MAZE_SHEET_ROW   24
 
 // Valores del grid: el suelo es el 0, las tramas de muro van seguidas y la
 // maciza no la pone el generador (la usa la barra de progreso).
@@ -16,6 +16,9 @@
 #define CELL_MURO_BASE   1
 #define CELL_MURO_COUNT  9
 #define CELL_SOLIDO      10
+
+// El bloque que la bomba revienta (ladrillo trabado, no trama).
+#define CELL_ROMPIBLE    11
 
 // Teselas sueltas de 8x8, para lo que no dibuja celdas enteras.
 #define TILE_SUELO       0

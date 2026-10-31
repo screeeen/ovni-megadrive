@@ -971,15 +971,24 @@ void Menu_setVisible(bool visible)
     // needs to look like planets again), and hand the slots over to
     // maze.c's yellow locked-door look the instant the menu hides
     // (gameplay starting, planet sprites all hidden by the loop above).
+    //
+    // Las dos de abajo son las que PINTAN de verdad: el arte de celda de
+    // 16x16 gasta PAL_CUERPO y PAL_SOMBRA (3 y 4), no el indice 1, asi que
+    // las puertas selladas solo salen amarillas si se les da esa pareja. Son
+    // tambien la celda encendida de la bomba (Maze_flashCell).
     if (visible)
     {
         PAL_setColor(LOCKED_DOOR_BG_INDEX, planetSmall.palette->data[0]);
         PAL_setColor(LOCKED_DOOR_INK_INDEX, planetSmall.palette->data[1]);
+        PAL_setColor((PAL3 * 16) + PAL_CUERPO, planetSmall.palette->data[PAL_CUERPO]);
+        PAL_setColor((PAL3 * 16) + PAL_SOMBRA, planetSmall.palette->data[PAL_SOMBRA]);
     }
     else
     {
         PAL_setColor(LOCKED_DOOR_BG_INDEX, RGB24_TO_VDPCOLOR(MAZE_BG_COLOR)); // the game's one background colour (maze.h)
         PAL_setColor(LOCKED_DOOR_INK_INDEX, RGB24_TO_VDPCOLOR(0xFFFF00));
+        PAL_setColor((PAL3 * 16) + PAL_CUERPO, RGB24_TO_VDPCOLOR(0xFFFF00));
+        PAL_setColor((PAL3 * 16) + PAL_SOMBRA, RGB24_TO_VDPCOLOR(MAZE_BG_COLOR));
     }
 
     // And PAL0's index1, which is grey for a locked planet while the menu

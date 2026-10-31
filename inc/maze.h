@@ -359,6 +359,22 @@ bool Maze_isPlantSafe(s16 tx, s16 ty);
 // tx/ty in maze-cell units. Out-of-range coordinates count as wall.
 bool Maze_isWall(s16 tx, s16 ty);
 
+// LOS BLOQUES ROMPIBLES (peticion del usuario: bombas tipo bomberman). Son
+// muro para Maze_isWall como cualquier otro; esto solo dice cuales se pueden
+// volar. Los coloca el horno (Maze_setBreakable) sobre muro que esta EN el
+// recorrido -- dos vecinos de suelo o mas, para que al volarlo quede un paso
+// y no un agujero ciego -- y comprobando sala por sala que sigue siendo
+// jugable con cualquier combinacion de ellos volada. Maze_breakCell deja la
+// celda en suelo y sube solo sus cuatro teselas.
+bool Maze_isBreakable(s16 tx, s16 ty);
+void Maze_setBreakable(s16 tx, s16 ty);
+void Maze_breakCell(s16 tx, s16 ty);
+
+// Repintar UNA celda, sin el plano entero: la normal y la encendida (la
+// maciza en PAL3), que es la mecha y la llamarada de la bomba.
+void Maze_drawCell(s16 tx, s16 ty);
+void Maze_flashCell(s16 tx, s16 ty);
+
 // Read-only view of the just-generated room's own slide graph (same data
 // Maze_drawDebugGraph() draws dots for) -- spec §48, so a caller (plants.c)
 // can place things only on cells the ship can actually reach by sliding.

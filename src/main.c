@@ -592,6 +592,11 @@ static GameState gameState;
 static u8 sizePresetIndex = DEBUG_FIRST_PLANET ? DEBUG_FIRST_PLANET : SIZE_PRESET_DEFAULT;
 
 static void invalidateHudLines(void); // defined with the HUD drawing below
+// La bomba, definida con el resto del HUD mas abajo: loadRoom() y newGame()
+// las necesitan desde aqui arriba.
+static void applyBrokenCells(u8 col, u8 row);
+static void bombCancel(void);
+static void drawBombHud(void);
 static u16 plantCacheSlot(u8 planet, u8 col, u8 row); // defined with loadRoom below
 
 // Planet progression (user request: "haz que cargue solo en el buffer los
@@ -654,6 +659,23 @@ static u8 unlockedPlanets = PLANETS_AT_START;
 // collectedMask (Plants_saveMask/restoreMask), taken alongside
 // plantsCollected so a resumed planet remembers exactly which rooms are
 // already cleared instead of re-offering (and re-counting) their plants.
+#define BROKEN_MAX 64
+
+// El margen de gracia al revivir (ver el bug en newGame y reviveGraceUpdate).
+#define REVIVE_GRACE_FRAMES 60   // un segundo
+
+static u16 reviveGrace;
+
+
+#define BOMB_BUTTON        BUTTON_C
+#define BOMB_EXCLUDE       (BUTTON_A | BUTTON_B | BUTTON_START)
+#define BOMB_FUSE_FRAMES   120   // dos segundos de mecha
+#define BOMB_BLAST_FRAMES   10   // lo que dura la llamarada en pantalla
+#define BOMB_REACH           2   // celdas por brazo
+#define BOMB_START           3   // con cuantas se entra a un planeta
+#define BOMB_MAX             9   // el tope: un digito en el HUD
+
+
 typedef struct
 {
     bool hasSave;
@@ -691,6 +713,15 @@ typedef struct
     bool scoreDone;   // objectives met: the clock has stopped
     u32 scoreValue;   // lo cobrado al terminarlo: el producto de la pantalla de fase completada
     u16 scoreTries;   // intentos en este planeta, uno por entrada (de momento solo se ensena)
+    // LAS BOMBAS (peticion del usuario). La municion y los bloques que ya se
+    // han volado en este planeta, que se quedan volados: cada entrada es su
+    // sala (row * MAX_MAP_COLS + col) y su celda (y * MAZE_MAX_W + x), que a
+    // 20x12 por sala entra justa en un byte. Una lista acotada y no un mapa
+    // de bits por sala: el mapa serian 2,8 KB por planeta y esto son 129 B.
+    u8 bombs;
+    u8 brokenRoom[BROKEN_MAX];
+    u8 brokenCell[BROKEN_MAX];
+    u8 brokenCount;
     // Donde se quedo la nave la ultima vez que la mataron en este planeta
     // (peticion del usuario: "cuando muere el player, comienza en la misma
     // habitacion que fallo"). deathDoor es la puerta por la que habia
@@ -1709,6 +1740,7 @@ static void loadExtractionRoom(bool puertaMenuAbierta)
 
 static void loadRoom(u8 col, u8 row)
 {
+    bombCancel();   // una bomba puesta no viaja a la sala siguiente
     const u16 seed = roomSeedFor(col, row);
     const MapCell cell = guideMap[row][col];
     const bool isInsertLinkRoom = (col == insertLinkCol) && (row == insertLinkRow);
@@ -1737,6 +1769,7 @@ static void loadRoom(u8 col, u8 row)
     }
 
     applyRoomDoorLocks(col, row); // carga la sala, decide sus vanos y la dibuja
+    applyBrokenCells(col, row);   // y los bloques que ya se volaron siguen volados
     squashFramesLeft = 0; // a wall hit does not carry over into the next room
     plantPathDirty = TRUE; // different room, different plants: the cached route is meaningless now
 
@@ -1829,6 +1862,11 @@ static void newGame(void)
     if (presetSave[sizePresetIndex].scoreRooms == 0)
         presetSave[sizePresetIndex].scoreRooms = countPlanetRooms(); // lo que escala el presupuesto de tiempo
     presetSave[sizePresetIndex].scoreTries++; // un intento mas: la pantalla de fase completada lo ensena
+    // La municion se llena en cada intento: entras al planeta con BOMB_START
+    // y lo que recojas dentro se suma hasta BOMB_MAX. Los bloques que ya
+    // volaste NO vuelven -- esos viajan en la ficha del planeta.
+    presetSave[sizePresetIndex].bombs = BOMB_START;
+    bombCancel();
     // Switches to THIS planet's own room-attempt-cache bank (spec §52) --
     // already fully populated by ensurePlantsTotalKnown()'s scan above
     // (first entry, or an earlier menu browse) or an earlier real entry
@@ -1845,6 +1883,7 @@ static void newGame(void)
     Maze_setPlanetTint(sizePresetIndex);
     tombMoving = FALSE;
     tombQueuedDir = DIR_NONE;
+    reviveGrace = 0;   // solo lo enciende la rama de revivir, mas abajo
     Items_reset();
     Plants_reset(); // spec §48 -- running counter, now also saved/restored per planet (spec §51)
     memset(doorOpenBits, 0, sizeof(doorOpenBits)); // fresh run: no doorway has been opened yet
@@ -1915,8 +1954,26 @@ static void newGame(void)
         loadRoom(currentCol, currentRow);   // genera, dibuja y levanta sus enemigos
         positionPlayerEnteringViaDoorDir(currentEnterDoor,
                                          doorOffsetFor(currentCol, currentRow, currentEnterDoor));
+        // BUG FIX (reporte del usuario: "cuando empiezan las habitaciones
+        // despues de morir a veces las trayectorias del player y del enemigo
+        // se cruzan y ya no se puede jugar porque siempre muere, no hay forma
+        // de escapar"). Eran dos cosas, y las dos hacian el bucle DETERMINISTA:
+        //
+        // 1) player.dir sobrevivia a la muerte. moveSpeed solo es 0 con
+        //    DIR_NONE, asi que la nave reaparecia ARRANCANDO SOLA en la misma
+        //    direccion en la que venia cuando la mataron -- contra lo mismo
+        //    que la mato -- y en TOMB no se puede girar en marcha. Ahora
+        //    revive parada: el primer movimiento lo elige el jugador.
+        // 2) Aun parada, un enemigo que ya venia por el pasillo de la puerta
+        //    llegaba antes de que hubiera nada que hacer. De ahi el margen de
+        //    gracia de abajo.
+        player.dir = DIR_NONE;
+        tombMoving = FALSE;
+        tombQueuedDir = DIR_NONE;
+        reviveGrace = REVIVE_GRACE_FRAMES;
         Items_drawHud();
         Plants_drawHud();
+        drawBombHud();
         drawInsertRoomStatus(FALSE);        // no esta en la sala de extraccion
         presetSave[sizePresetIndex].deathSaved = FALSE; // se gasta al usarlo
     }
@@ -1928,6 +1985,7 @@ static void newGame(void)
         Maze_draw();
         Items_drawHud();
         Plants_drawHud();
+        drawBombHud();
         drawInsertRoomStatus(TRUE); // el rotulo del planeta, spec §34
         // BUG FIX (user report + screenshot: "coloca el principio de la nave
         // en la entrada moviendose en una direccion"). Aparecer en el CENTRO
@@ -3947,6 +4005,7 @@ static void restoreLiveRoomAfterDebugScreen(void)
     VDP_clearTextLineBG(BG_B, 1);
     Items_drawHud();
     Plants_drawHud();
+    drawBombHud();
 
     clearPlantPathMarks(); // the viewer's own route, drawn with the same marks
     PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR); // the map overlay left it white
@@ -4324,6 +4383,229 @@ static void invalidateHudLines(void)
 // derecha arriba, donde estan los FPS en debug"). Same cached-redraw rule
 // the other BG_B lines use -- the number only changes once a second or
 // on a move, so there is no reason to poke glyphs every frame.
+// --- LA BOMBA (peticion del usuario: "que el personaje pudiese colocar
+// --- bombas como bomberman") -----------------------------------------------
+//
+// Se suelta con C y SOLO desde una parada: en TOMB la nave no frena donde
+// quiere, asi que soltarla deslizando seria soltarla a ciegas. No es solida
+// -- la nave desliza por encima --, que es lo unico sano con este movimiento:
+// una bomba solida en la celda donde estas te deja metido en un muro.
+//
+// La onda es una cruz de BOMB_REACH celdas. Cada brazo se corta en el primer
+// muro: si es rompible lo revienta y ahi acaba, si es permanente ni lo toca.
+// Mata a todos los enemigos que pille, peligrosos incluidos -- es la unica
+// forma de quitarselos de encima --, y a la nave la REBOTA, no la mata. Las
+// plantas las ignora.
+//
+// Los bloques volados se quedan volados en todo el planeta (presetSave), y
+// por eso el horno los elige en el recorrido pero comprobando que ninguna
+// combinacion de ellos deja una sala sin camino ni una planta sin recoger:
+// ver colocaRompibles en tools/levelgen.
+// El contador, en la fila 1 del HUD: las letras van en la columna 1 y
+// PLANTS en la 14, asi que de la 28 en adelante esta libre.
+#define BOMB_HUD_COL 28
+
+static void drawBombHud(void)
+{
+    char buf[12];
+
+    sprintf(buf, "BOMBS:%d", presetSave[sizePresetIndex].bombs);
+    Hud_drawText(buf, BOMB_HUD_COL, 1);
+}
+
+// EL MARGEN DE GRACIA AL REVIVIR (ver el bug de newGame). Mientras corre, un
+// enemigo peligroso no mata -- la nave le pasa por encima -- y la nave
+// parpadea para que se vea que es temporal. No se regala en cada entrada a
+// una sala: solo al revivir, que es cuando el jugador no eligio donde
+// aparecer.
+static void reviveGraceUpdate(void)
+{
+    if (reviveGrace == 0)
+        return;
+
+    if (--reviveGrace == 0)
+        SPR_setVisibility(playerSprite, VISIBLE);
+    else
+        SPR_setVisibility(playerSprite, (reviveGrace & 4) ? HIDDEN : VISIBLE);
+}
+
+static bool bombActive;
+static s16 bombCol, bombRow;
+static u16 bombFuse;
+static u16 bombBlast;                       // frames que le quedan a la llamarada
+static s16 blastCol[1 + (4 * BOMB_REACH)];  // las celdas que ardieron, para apagarlas
+static s16 blastRow[1 + (4 * BOMB_REACH)];
+static u8 blastCount;
+
+// Se apunta para que siga volado al volver a la sala. Si la lista se llena,
+// ese bloque rebrota en la siguiente visita: es la unica consecuencia de
+// acotarla, y 64 por planeta no se llenan jugando normal.
+static void rememberBroken(s16 tx, s16 ty)
+{
+    PresetSave *const sv = &presetSave[sizePresetIndex];
+
+    if (sv->brokenCount >= BROKEN_MAX)
+        return;
+
+    sv->brokenRoom[sv->brokenCount] = (u8) ((currentRow * MAX_MAP_COLS) + currentCol);
+    sv->brokenCell[sv->brokenCount] = (u8) ((ty * MAZE_MAX_W) + tx);
+    sv->brokenCount++;
+}
+
+// Los de esta sala, al cargarla: la deja como la dejo el jugador.
+static void applyBrokenCells(u8 col, u8 row)
+{
+    const PresetSave *const sv = &presetSave[sizePresetIndex];
+    const u8 sala = (u8) ((row * MAX_MAP_COLS) + col);
+    u8 i;
+
+    for (i = 0; i < sv->brokenCount; i++)
+        if (sv->brokenRoom[i] == sala)
+            Maze_breakCell((s16) (sv->brokenCell[i] % MAZE_MAX_W),
+                            (s16) (sv->brokenCell[i] / MAZE_MAX_W));
+}
+
+static void bombCancel(void)
+{
+    u8 i;
+
+    for (i = 0; i < blastCount; i++)
+        Maze_drawCell(blastCol[i], blastRow[i]);
+    blastCount = 0;
+    bombBlast = 0;
+    bombActive = FALSE;
+}
+
+static void bombPlace(void)
+{
+    // La celda de debajo del centro de la nave. Esta parada, asi que esta
+    // cuadrada con la rejilla y la cuenta es exacta.
+    bombCol = (s16) ((player.x + (MAZE_TILE_PX / 2)) / MAZE_TILE_PX);
+    bombRow = (s16) ((player.y + (MAZE_TILE_PX / 2)) / MAZE_TILE_PX);
+    bombFuse = BOMB_FUSE_FRAMES;
+    bombActive = TRUE;
+    presetSave[sizePresetIndex].bombs--;
+    drawBombHud();
+}
+
+static void bombExplode(void)
+{
+    static const s8 dx[4] = { 0, 1, 0, -1 };
+    static const s8 dy[4] = { -1, 0, 1, 0 };
+    u8 d, i;
+
+    bombActive = FALSE;
+    blastCount = 0;
+    blastCol[blastCount] = bombCol;
+    blastRow[blastCount] = bombRow;
+    blastCount++;
+
+    for (d = 0; d < 4; d++)
+    {
+        u8 k;
+
+        for (k = 1; k <= BOMB_REACH; k++)
+        {
+            const s16 tx = (s16) (bombCol + (dx[d] * k));
+            const s16 ty = (s16) (bombRow + (dy[d] * k));
+
+            if (Maze_isWall(tx, ty))
+            {
+                // El brazo se para aqui en los dos casos. Si es rompible, se
+                // lo lleva por delante antes de pararse.
+                if (Maze_isBreakable(tx, ty))
+                {
+                    Maze_breakCell(tx, ty);
+                    rememberBroken(tx, ty);
+                    blastCol[blastCount] = tx;
+                    blastRow[blastCount] = ty;
+                    blastCount++;
+                    plantPathDirty = TRUE;   // la sala ya no es la de antes
+                }
+                break;
+            }
+
+            blastCol[blastCount] = tx;
+            blastRow[blastCount] = ty;
+            blastCount++;
+        }
+    }
+
+    // Lo que pilla la onda, celda a celda.
+    for (i = 0; i < blastCount; i++)
+    {
+        const s16 px = (s16) (blastCol[i] * MAZE_TILE_PX);
+        const s16 py = (s16) (blastRow[i] * MAZE_TILE_PX);
+        u8 e;
+
+        Maze_flashCell(blastCol[i], blastRow[i]);
+
+        for (e = 0; e < ENEMIES_MAX; e++)
+        {
+            Enemy *const en = &enemies[e];
+
+            if (!en->alive || !Enemy_overlapsBox(en, px, py))
+                continue;
+
+            Enemy_kill(en);
+            Sfx_playEnemyKill();
+            GuideMap_markEnemyKilled(currentCol, currentRow, e);
+        }
+
+        // A la nave la empuja, no la mata (peticion del usuario): mismo
+        // rebote que el melee, invirtiendo la direccion en el sitio.
+        if ((abs(player.x - px) < MAZE_TILE_PX) && (abs(player.y - py) < MAZE_TILE_PX))
+        {
+            player.dir = (u8) ((player.dir < DIR_NONE) ? ((player.dir + 2) & 3) : player.dir);
+            triggerShake(MAZE_TILE_PX * 4);
+            triggerSquash(player.dir);
+        }
+    }
+
+    bombBlast = BOMB_BLAST_FRAMES;
+    Sfx_playBombBlast();
+}
+
+// Una vez por frame mientras se juega una sala.
+static void bombUpdate(void)
+{
+    if (bombBlast)
+    {
+        if (--bombBlast == 0)
+        {
+            u8 i;
+
+            for (i = 0; i < blastCount; i++)
+                Maze_drawCell(blastCol[i], blastRow[i]);
+            blastCount = 0;
+        }
+        return;   // la llamarada y la mecha no se solapan
+    }
+
+    if (!bombActive)
+        return;
+
+    // La mecha parpadea cada vez mas rapido: el periodo cae con lo que le
+    // queda, asi que se ve venir sin tener que contar frames.
+    {
+        const u16 periodo = (u16) ((bombFuse > 60) ? 16 : (bombFuse > 24) ? 8 : 4);
+
+        if ((bombFuse % periodo) == 0)
+        {
+            if ((bombFuse / periodo) & 1)
+                Maze_flashCell(bombCol, bombRow);
+            else
+                Maze_drawCell(bombCol, bombRow);
+        }
+    }
+
+    if (bombFuse-- == 0)
+    {
+        Maze_drawCell(bombCol, bombRow);
+        bombExplode();
+    }
+}
+
 #define SCORE_COL   30 // leaves 8 columns for the number, FPS goes left of it
 #define SCORE_RIGHT 37 // ultima columna que ocupa el numero: deja 2 de margen
                        // contra el borde, que pegado se leia apretado
@@ -5623,6 +5905,13 @@ int main(bool hardReset)
                 u8 killerIndex = 0;   // cual de ellos: la pantalla de muerte lo deja a la vista
                 u8 step;
 
+                // La bomba (peticion del usuario). Solo desde una parada y
+                // con una sola en el aire: ver su propio bloque.
+                if ((state & BOMB_BUTTON) && !(prevState & BOMB_BUTTON) &&
+                    !(state & BOMB_EXCLUDE) && !bombActive && !bombBlast &&
+                    !tombMoving && (presetSave[sizePresetIndex].bombs > 0))
+                    bombPlace();
+
                 // Los enemigos se mueven una vez por fotograma visible,
                 // ANTES del bucle de subpasos de la nave: asi todas las
                 // comprobaciones de choque de este fotograma ven la misma
@@ -5764,6 +6053,10 @@ int main(bool hardReset)
 
                             if (!e->alive || !Enemy_overlapsBox(e, player.x, player.y))
                                 continue;
+                            // Con el margen de gracia puesto, el peligroso no
+                            // mata ni empuja: la nave le pasa por encima.
+                            if ((e->state == ENEMY_DANGEROUS) && (reviveGrace > 0))
+                                continue;
 
                             triggerShake(slideDistance); // user request: shake on hitting an enemy too, either outcome
 
@@ -5879,6 +6172,9 @@ int main(bool hardReset)
             if (!mapViewOpen)
             {
                 tombMoving = (player.x != frameStartX) || (player.y != frameStartY);
+
+                bombUpdate();        // la mecha y la llamarada
+                reviveGraceUpdate(); // y el margen de gracia al revivir
 
                 // El reloj del planeta, lo unico que le queda al score
                 // aparte de los recuentos: se para para siempre al cumplir
