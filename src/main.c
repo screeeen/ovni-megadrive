@@ -687,9 +687,10 @@ typedef struct
     // leaving for the menu and coming back carries on where it left off,
     // so a planet cannot be farmed by restarting it.
     u32 scoreFrames;  // time spent playing this planet, in frames
-    u16 scoreMoves;   // slides started (a press into a wall is not a move)
-    u8  scoreRooms;   // rooms this planet's map really has, what the start value scales by
+    u8  scoreRooms;   // rooms this planet's map really has, what the time budget scales by
     bool scoreDone;   // objectives met: the clock has stopped
+    u32 scoreValue;   // lo cobrado al terminarlo: el producto de la pantalla de fase completada
+    u16 scoreTries;   // intentos en este planeta, uno por entrada (de momento solo se ensena)
     // Donde se quedo la nave la ultima vez que la mataron en este planeta
     // (peticion del usuario: "cuando muere el player, comienza en la misma
     // habitacion que fallo"). deathDoor es la puerta por la que habia
@@ -704,34 +705,45 @@ static PresetSave presetSave[SIZE_PRESET_COUNT];
 // The letter target to judge planet i by: what its map really placed,
 // falling back to the preset until that is known.
 // ---------------------------------------------------------------------
-// Score (user request: "empieza por una cifra grande y vete descontando
-// puntos a medida que el player hace movimientos y transcurre el
-// tiempo").
+// EL SCORE SE MULTIPLICA (peticion del usuario: "plantas, letters,
+// enemies, tiempo restante multiplican... el score se recalcula
+// multiplicando estos elementos en pantalla").
 //
-// The start value scales with the planet's own size because everything
-// else does: measured over 40 generated maps per planet, a room carries
-// ~11.5 plants and exactly 1 enemy, and rooms run from 1 to ~41. A flat
-// start would make the small planets trivial to max and the big ones
-// impossible, so the room is the unit.
+// Ya no se descuenta de una cifra grande. El planeta da un presupuesto de
+// tiempo y al terminarlo se cobra el producto de los cuatro factores que
+// ensena la pantalla de fase completada:
+//   score = plantas * letras * enemigos * segundos restantes
+// Uno en cero deja el producto en cero: hay que hacerlo todo. Y morir no
+// cobra nada (peticion del usuario: "cuando te matan es game over, no hay
+// recuento"), asi que solo se ingresa al limpiar el planeta.
 //
-// Two drains, deliberately the same size, so neither strategy dominates:
-// rushing badly costs as much as thinking too long.
-//   score = START*rooms - moves*MOVE - seconds*SECOND   (floored at 0)
-//
-// These three are the tuning knobs -- the numbers below are a starting
-// point from the measured content, not from play, and want one real run
-// to settle.
-#define SCORE_PER_ROOM   2500 // planet 7 (~41 rooms) therefore starts at ~102000
-#define SCORE_PER_MOVE     25
-#define SCORE_PER_SECOND   25
+// El presupuesto escala con el tamano del planeta, igual que escalaba la
+// cifra de salida: una sala mas son mas plantas y mas enemigos que buscar.
+// Los dos numeros son los mandos de ajuste.
+#define SCORE_TIME_BASE_SEC   60   // regalo fijo: un planeta de una sala no puede ser imposible
+#define SCORE_TIME_PER_ROOM   30   // y esto por cada sala que tenga el mapa
 
+static u16 scoreTimeLimit(u8 i)
+{
+    return (u16) (SCORE_TIME_BASE_SEC + ((u16) presetSave[i].scoreRooms * SCORE_TIME_PER_ROOM));
+}
+
+// Lo que queda del presupuesto. scoreFrames se para al cumplir los
+// objetivos (scoreDone), asi que esto se congela con el planeta terminado.
+static u16 scoreTimeLeft(u8 i)
+{
+    const u16 limite = scoreTimeLimit(i);
+    const u16 gastado = (u16) (presetSave[i].scoreFrames / 60);
+
+    return (gastado >= limite) ? 0 : (u16) (limite - gastado);
+}
+
+// Lo cobrado en ese planeta. Los recuentos de plantas, letras y enemigos
+// solo estan vivos para el planeta en curso, asi que el producto se guarda
+// hecho al terminarlo y esto es lo que leen la tabla de records y el menu.
 static u32 scoreFor(u8 i)
 {
-    const u32 start = (u32) presetSave[i].scoreRooms * SCORE_PER_ROOM;
-    const u32 spent = ((u32) presetSave[i].scoreMoves * SCORE_PER_MOVE) +
-                      ((presetSave[i].scoreFrames / 60) * SCORE_PER_SECOND);
-
-    return (spent >= start) ? 0 : (start - spent);
+    return presetSave[i].scoreValue;
 }
 
 // Rooms this planet's map really has (after guidemap's own leaf pruning),
@@ -779,6 +791,15 @@ static u16 countDeadEnemies(void)
             }
 
     return n;
+}
+
+// Lo que vale el planeta en curso AHORA MISMO: los tres recuentos vivos por
+// el tiempo que le queda. Es lo que ensena el HUD mientras se juega y lo que
+// se ingresa al limpiarlo.
+static u32 scoreLive(void)
+{
+    return (u32) Plants_collectedCount() * (u32) Items_collectedCount() *
+           (u32) countDeadEnemies() * (u32) scoreTimeLeft(sizePresetIndex);
 }
 
 static bool allEnemiesDead(void)
@@ -945,53 +966,6 @@ static void positionPlayerEnteringViaDoorDir(u8 doorDir, u8 offset)
     }
 }
 
-// Points at the mission door (insertRoomDoorDir/insertLinkOffset) from
-// inside the insertion room itself (spec §37, user request: "quiero que
-// indiques con una flecha la salida dentro de esta habitación") -- a
-// plain ASCII arrow glyph on BG_A, no new art needed, same "reuse
-// VDP_drawText" approach every other in-room label in this game already
-// uses (item letters, HUD). Placed just inside the door's own 2-maze-
-// cell-deep opening (the row/column closest to the room's interior),
-// centered across its 2-cell width using the same insertLinkOffset the
-// door itself is built from (spec §29quat/§30 -- opposite directions
-// share the axis, so this is the exact same value already used
-// elsewhere for this door's own position). Only ever drawn for the
-// MISSION door, not the menu-exit door (spec §36) -- that one is a
-// secondary/optional action, this is the one every run needs to find.
-static void drawInsertRoomArrow(void)
-{
-    char s[2] = { 0, '\0' };
-    const u16 ox = Maze_originColumn();
-    const u16 oy = Maze_originRow();
-    u16 tx, ty;
-
-    switch (insertRoomDoorDir)
-    {
-        case DOOR_N:
-            s[0] = '^';
-            tx = Maze_cellColumn(insertLinkOffset);
-            ty = (u16) (oy + 4);
-            break;
-        case DOOR_S:
-            s[0] = 'v';
-            tx = Maze_cellColumn(insertLinkOffset);
-            ty = Maze_cellRow(MAZE_H - 3);
-            break;
-        case DOOR_E:
-            s[0] = '>';
-            tx = Maze_cellColumn(MAZE_W - 3);
-            ty = Maze_cellRow(insertLinkOffset);
-            break;
-        default: // DOOR_W
-            s[0] = '<';
-            tx = (u16) (ox + 4);
-            ty = Maze_cellRow(insertLinkOffset);
-            break;
-    }
-
-    VDP_drawText(s, tx, ty);
-}
-
 // Insertion-room status line, drawn on BG_B row 2 (row 0 is the FPS
 // readout, row 1 is Items_drawHud's letter tracker -- both already
 // high-priority so they show over BG_A's maze) -- shown whenever the
@@ -1003,14 +977,26 @@ static void drawInsertRoomArrow(void)
 // is actually complete -- that case goes straight back to the menu
 // instead (see the exitDirForDoorDir(menuDoorDir) branch below), it
 // never lingers here.
+// Lo que lleva ahora es el planeta en el que acabas de aterrizar (peticion
+// del usuario: "que ponga welcome to <planeta>", y "el titulo del planeta
+// fuera del mapa"): esta fila cae en la banda del HUD, por encima de donde
+// empieza la sala (MAZE_HUD_ROWS), asi que el rotulo no pisa ni una tesela
+// del laberinto. La flecha que senalaba la puerta de mision ya no esta
+// (peticion del usuario: "borra la flecha").
 #define INSERT_STATUS_ROW 2
 static void drawInsertRoomStatus(bool show)
 {
-    // The "AUN FALTAN LETRAS" message is gone (user request: "quita el
-    // texto... no me gusta"). The line is still cleared, because other
-    // screens write to it and this is what takes it back off.
-    (void) show;
+    char buf[40];
+    u16 largo;
+
     VDP_clearTextLineBG(BG_B, INSERT_STATUS_ROW);
+    if (!show)
+        return;
+
+    largo = (u16) sprintf(buf, "WELCOME TO %s", Menu_planetName(sizePresetIndex));
+    while (largo && (buf[largo - 1] == ' '))   // los nombres vienen rellenos a cuatro
+        buf[--largo] = '\0';
+    VDP_drawTextBG(BG_B, buf, (u16) ((40 - largo) / 2), INSERT_STATUS_ROW);
 }
 
 // Offset (spec §30) of (col,row)'s door in direction dir -- transparently
@@ -1705,10 +1691,18 @@ static u16 plantCacheSlot(u8 planet, u8 col, u8 row)
 // La sala de extraccion, que vive fuera de la rejilla y tiene su propia ranura
 // en el planeta horneado. Sus dos puertas no se cierran nunca -- es el pasillo
 // entre el menu y la mision -- asi que se carga con los vanos abiertos.
-static void loadExtractionRoom(void)
+// LA PUERTA DE ENTRADA SE CIERRA DETRAS DE TI (peticion del usuario: "cierra
+// la puerta de entrada cuando entras en un planeta"). Es la del menu, por la
+// que la nave aparece: al entrar en el planeta se carga cerrada -- muro de
+// verdad y en amarillo, como cualquier puerta cerrada del juego -- y la nave
+// se queda dentro con la unica salida en la puerta de mision. Al VOLVER
+// andando a esta sala se carga abierta otra vez, que es lo que la convierte
+// en la salida al menu (spec 36).
+static void loadExtractionRoom(bool puertaMenuAbierta)
 {
-    static const bool abiertas[4] = { TRUE, TRUE, TRUE, TRUE };
+    bool abiertas[4] = { TRUE, TRUE, TRUE, TRUE };
 
+    abiertas[menuDoorDir] = puertaMenuAbierta;
     if (curPlanet != NULL)
         Maze_loadRoom(Levels_extractionRoom(levels, curPlanet), TRUE, abiertas);
 }
@@ -1833,7 +1827,8 @@ static void newGame(void)
 
     setUpPlanetFromRom(sizePresetIndex);
     if (presetSave[sizePresetIndex].scoreRooms == 0)
-        presetSave[sizePresetIndex].scoreRooms = countPlanetRooms(); // what the start value scales by
+        presetSave[sizePresetIndex].scoreRooms = countPlanetRooms(); // lo que escala el presupuesto de tiempo
+    presetSave[sizePresetIndex].scoreTries++; // un intento mas: la pantalla de fase completada lo ensena
     // Switches to THIS planet's own room-attempt-cache bank (spec §52) --
     // already fully populated by ensurePlantsTotalKnown()'s scan above
     // (first entry, or an earlier menu browse) or an earlier real entry
@@ -1929,12 +1924,11 @@ static void newGame(void)
     {
         // Same offset as insertLinkOffset (spec §30): opposite directions
         // (N<->S, E<->W) share the same axis, so no translation is needed.
-        loadExtractionRoom();
+        loadExtractionRoom(FALSE);   // la de entrada, cerrada detras de la nave
         Maze_draw();
-        drawInsertRoomArrow(); // spec §37
         Items_drawHud();
         Plants_drawHud();
-        drawInsertRoomStatus(TRUE); // spec §34 -- always true here, itemCount is always >= 1
+        drawInsertRoomStatus(TRUE); // el rotulo del planeta, spec §34
         // BUG FIX (user report + screenshot: "coloca el principio de la nave
         // en la entrada moviendose en una direccion"). Aparecer en el CENTRO
         // hacia que el primer frame dependiera de que esa celda estuviera en
@@ -1981,11 +1975,11 @@ static u16 screenAlternateTimer;
 // The high-score table. One row per planet, best first.
 //
 // Sorted by score rather than listed in planet order because that is what
-// makes it a scoreboard, and the scores ARE comparable across planets on
-// purpose: the start value scales with each planet's room count (see
-// SCORE_PER_ROOM), so a good run on a small planet can legitimately beat
-// a sloppy one on a big planet. A planet never played has no start value
-// yet and shows as a dash rather than a zero it never earned.
+// makes it a scoreboard, y los numeros SON comparables entre planetas a
+// proposito: el presupuesto de tiempo escala con las salas que tiene el
+// mapa (ver SCORE_TIME_PER_ROOM), asi que una buena vuelta en un planeta
+// pequeno puede ganarle a una chapucera en uno grande. Un planeta que
+// todavia no ha cobrado nada ensena una raya y no un cero que no gano.
 // Las tres unicas lineas que caben bajo la orbita con aire entre ellas.
 // La orbita mas externa acaba en la fila 22 (ver SUN_CENTER_Y en menu.c),
 // y la pantalla acaba en la 27: tres renglones de dos en dos.
@@ -1995,29 +1989,24 @@ static u16 screenAlternateTimer;
 
 static void drawMenu(void);       // all three defined below
 // ---------------------------------------------------------------------
-// Game over: resumen de lo recogido y un marcador que cae hacia atras,
-// como los arcades (user request: "quiero el resumen de lo colectado y un
-// contador de score que corre hacia atras").
-//
-// Cae desde la puntuacion de salida del planeta hasta la que queda, que
-// es justo lo que el jugador se ha gastado en tiempo y movimientos --
-// ver SCORE_PER_ROOM. Arranca cuando el texto ha terminado de escribirse,
-// no antes, para que las dos cosas no compitan.
+// El marcador de la pantalla de fase completada: sube de cero hasta el
+// producto de los cuatro factores, al modo arcade. Arranca cuando el texto
+// ha terminado de escribirse, no antes, para que las dos cosas no compitan.
+// El game over ya no lleva marcador ninguno (ver gameOverBegin).
 // ---------------------------------------------------------------------
-#define GAMEOVER_COUNT_FRAMES 90   // 1,5 s de bajada, sea cual sea el salto
-#define GAMEOVER_TICK_EVERY    4   // un clic cada 4 frames mientras baja
+#define GAMEOVER_COUNT_FRAMES 90   // 1,5 s de subida, sea cual sea el salto
+#define GAMEOVER_TICK_EVERY    4   // un clic cada 4 frames mientras corre
 #define GAMEOVER_SCORE_ROW    21
 #define GAMEOVER_SCORE_RIGHT  30   // el numero se alinea a la derecha aqui
 
-// El bloque de datos de las dos pantallas de resumen (el game over y la de
-// fase completada): misma columna y una fila de por medio entre linea y
-// linea, SIEMPRE (peticion del usuario: "cuida la interlinea"). Cada una
-// arranca donde le toca para acabar junto al marcador -- la del game over
-// lleva tres lineas y la de fase completada cinco.
+// El bloque de datos de la pantalla de fase completada: una fila de por
+// medio entre linea y linea, SIEMPRE (peticion del usuario: "cuida la
+// interlinea"), y arranca donde le toca para acabar junto al marcador --
+// cinco lineas.
 #define SUMMARY_COL         11
 #define SUMMARY_ROW_STEP     2
-#define GAMEOVER_FIRST_ROW  13
 #define REWARD_FIRST_ROW    11
+#define GAMEOVER_TEXT_ROW   13   // el game over no lleva resumen: la palabra, centrada
 
 static u32 goShown, goTarget, goStep;
 static bool goSettled;
@@ -2037,7 +2026,8 @@ static u8 goTick;
 // cualquier fotograma en el que les pille la colision.
 #define DEATH_FADE_FRAMES 24
 #define DEATH_HOLD_FRAMES 100
-#define DEATH_TEXT_ROW    13
+#define DEATH_TEXT_ROW    12
+#define DEATH_ART_BOTTOM  136  // el grupo de siluetas se apoya en esta linea, bajo el texto
 #define DEATH_TEMPO_END   25   // a cuanto por ciento de su velocidad acaba la musica
 
 static u16 deathPal[64];   // 128 B fuera de la pila: esto se llama desde hondo
@@ -2060,6 +2050,29 @@ static void deathFreeze(u8 killer)
     SPR_setVisibility(itemIconSprite, HIDDEN);
     SPR_update();
 
+    // Donde estan y donde acaban (peticion del usuario: "mueve las siluetas
+    // debajo del texto, para que quede la pantalla alineada" y "no los
+    // separes, dejalos exactamente como quedaron en la colision"): el choque
+    // se mueve ENTERO. Se mide la caja que ocupan los dos, se calcula lo que
+    // hay que arrastrarla para quedar centrada y apoyada bajo el mensaje, y
+    // ese mismo desplazamiento se le aplica a los dos sprites, asi que la
+    // postura relativa del impacto se conserva tal cual. El viaje se reparte
+    // entre los frames del fundido, asi que no se ve como un salto.
+    const s16 anchoNave = bigShip ? 32 : 16;
+    const s16 naveX0 = (s16) (player.x + Maze_originPxX() + shipDrawOffset);
+    const s16 naveY0 = (s16) (player.y + Maze_originPxY() + shipDrawOffset);
+    const s16 malX0 = (s16) (enemies[killer].x + Maze_originPxX());
+    const s16 malY0 = (s16) (enemies[killer].y + Maze_originPxY());
+    const s16 cajaIzq = min(naveX0, malX0);
+    const s16 cajaDer = max((s16) (naveX0 + anchoNave), (s16) (malX0 + 16));
+    const s16 cajaAbajo = max((s16) (naveY0 + anchoNave), (s16) (malY0 + 16));
+    const s16 dx = (s16) (((320 - (cajaDer - cajaIzq)) / 2) - cajaIzq);
+    const s16 dy = (s16) (DEATH_ART_BOTTOM - cajaAbajo);
+    const s16 naveX1 = (s16) (naveX0 + dx);
+    const s16 naveY1 = (s16) (naveY0 + dy);
+    const s16 malX1 = (s16) (malX0 + dx);
+    const s16 malY1 = (s16) (malY0 + dy);
+
     for (i = 0; i < 64; i++)
     {
         const u16 linea = (u16) (i >> 4);
@@ -2079,6 +2092,16 @@ static void deathFreeze(u8 killer)
 
     for (i = 0; i < DEATH_FADE_FRAMES; i++)
     {
+        const s16 t = (s16) (i + 1);
+
+        SPR_setPosition(playerSprite,
+                        (s16) (naveX0 + (((naveX1 - naveX0) * t) / DEATH_FADE_FRAMES)),
+                        (s16) (naveY0 + (((naveY1 - naveY0) * t) / DEATH_FADE_FRAMES)));
+        SPR_setPosition(enemySprites[killer],
+                        (s16) (malX0 + (((malX1 - malX0) * t) / DEATH_FADE_FRAMES)),
+                        (s16) (malY0 + (((malY1 - malY0) * t) / DEATH_FADE_FRAMES)));
+        SPR_update();
+
         // De su velocidad al DEATH_TEMPO_END por ciento, al mismo ritmo que
         // el color se va a negro: la cancion se para con la pantalla.
         Sfx_musicTempoPercent((u16) (100 - (((100 - DEATH_TEMPO_END) * i) / DEATH_FADE_FRAMES)));
@@ -2089,6 +2112,11 @@ static void deathFreeze(u8 killer)
     while (PAL_isDoingFade())
         SYS_doVBlankProcess();
     Sfx_musicTempoPercent(DEATH_TEMPO_END);
+
+    // El bucle puede cortarse antes de tiempo si el fundido acaba primero.
+    SPR_setPosition(playerSprite, naveX1, naveY1);
+    SPR_setPosition(enemySprites[killer], malX1, malY1);
+    SPR_update();
 
     // El mensaje va en BG_B, que se dibuja por encima del laberinto, y con
     // PAL3 porque PAL0 -- la del texto de siempre -- se acaba de ir a negro.
@@ -2113,6 +2141,10 @@ static void deathFreeze(u8 killer)
     Sfx_musicTempoPercent(100);   // el jazz del game over va a su ritmo
 }
 
+// MORIR NO COBRA (peticion del usuario: "cuando te matan es game over. No
+// hay recuento"). La pantalla es la palabra y nada mas: ni resumen de lo
+// recogido ni marcador. El planeta conserva su progreso como siempre, pero
+// solo se ingresa puntuacion al limpiarlo.
 static void gameOverBegin(void)
 {
     // La cadencia de jazz (peticion del usuario: "quiero que suene jazz en
@@ -2120,31 +2152,10 @@ static void gameOverBegin(void)
     // Sfx_slopStop que habia aqui en vez de ir detras.
     Sfx_jazzGameOver();
 
-    const u8 p = sizePresetIndex;
-    const u32 start = (u32) presetSave[p].scoreRooms * SCORE_PER_ROOM;
-    char buf[40];
-
     VDP_clearPlane(BG_A, TRUE);
     typeReset();
-    typeLine("GAME OVER", 15, 8);
-
-    // Mismo paso que la pantalla de fase completada, con tres lineas.
-    sprintf(buf, "PLANTS  %3d OF %3d", Plants_collectedCount(), presetSave[p].plantsTotal);
-    typeLine(buf, SUMMARY_COL, GAMEOVER_FIRST_ROW);
-    sprintf(buf, "LETTERS %3d OF %3d", Items_collectedCount(), lettersFor(p));
-    typeLine(buf, SUMMARY_COL, GAMEOVER_FIRST_ROW + SUMMARY_ROW_STEP);
-    sprintf(buf, "ENEMIES %3u OF %3u", countDeadEnemies(),
-            (u16) (presetSave[p].scoreRooms * enemiesPerRoom[p]));
-    typeLine(buf, SUMMARY_COL, GAMEOVER_FIRST_ROW + (2 * SUMMARY_ROW_STEP));
-    typeLine("SCORE", SUMMARY_COL, GAMEOVER_SCORE_ROW);
-
-    goTarget = scoreFor(p);
-    goShown = start;
-    // +1 para que nunca sea 0: con un salto pequeno la division se iria a
-    // cero y el marcador no bajaria nunca.
-    goStep = ((start - goTarget) / GAMEOVER_COUNT_FRAMES) + 1;
-    goSettled = FALSE;
-    goTick = 0;
+    typeLine("GAME OVER", 15, GAMEOVER_TEXT_ROW);
+    goSettled = TRUE;   // no hay marcador que mover
 }
 
 // Una vez por frame mientras la pantalla esta puesta.
@@ -2155,39 +2166,45 @@ static void gameOverBegin(void)
 static void rewardBegin(void)
 {
     const u8 p = sizePresetIndex;
-    const u32 start = (u32) presetSave[p].scoreRooms * SCORE_PER_ROOM;
-    const u16 segundos = (u16) (presetSave[p].scoreFrames / 60);
+    const u32 total = scoreLive();
     char buf[40];
 
     Sfx_musicStop();
+
+    // Se ingresa aqui, y solo lo mejor que se haya hecho en ese planeta.
+    if (total > presetSave[p].scoreValue)
+        presetSave[p].scoreValue = total;
 
     VDP_clearPlane(BG_A, TRUE);
     typeReset();
     typeLine("PLANET CLEARED", 13, 8);
 
-    // Una fila de por medio entre linea y linea, TODAS, incluida la del
-    // marcador (peticion del usuario: "cuida la interlinea"). TIME y MOVES
-    // iban pegadas y cantaba.
+    // Los cuatro factores con su X a la derecha, para que el producto se lea
+    // en la propia pantalla, y TRIES debajo sin X: aparece pero todavia no
+    // entra en la cuenta (peticion del usuario). Una fila de por medio entre
+    // linea y linea, TODAS (peticion del usuario: "cuida la interlinea").
     {
         u16 fila = REWARD_FIRST_ROW;
 
-        sprintf(buf, "PLANTS  %3d OF %3d", Plants_collectedCount(), presetSave[p].plantsTotal);
+        sprintf(buf, "PLANTS  %3d OF %3d X", Plants_collectedCount(), presetSave[p].plantsTotal);
         typeLine(buf, SUMMARY_COL, fila); fila += SUMMARY_ROW_STEP;
-        sprintf(buf, "LETTERS %3d OF %3d", Items_collectedCount(), lettersFor(p));
+        sprintf(buf, "LETTERS %3d OF %3d X", Items_collectedCount(), lettersFor(p));
         typeLine(buf, SUMMARY_COL, fila); fila += SUMMARY_ROW_STEP;
-        sprintf(buf, "ENEMIES %3u OF %3u", countDeadEnemies(),
+        sprintf(buf, "ENEMIES %3u OF %3u X", countDeadEnemies(),
                 (u16) (presetSave[p].scoreRooms * enemiesPerRoom[p]));
         typeLine(buf, SUMMARY_COL, fila); fila += SUMMARY_ROW_STEP;
-        sprintf(buf, "TIME    %3u:%02u", (u16) (segundos / 60), (u16) (segundos % 60));
+        sprintf(buf, "TIME   %4u SECS   X", scoreTimeLeft(p));
         typeLine(buf, SUMMARY_COL, fila); fila += SUMMARY_ROW_STEP;
-        sprintf(buf, "MOVES   %3u", presetSave[p].scoreMoves);
+        sprintf(buf, "TRIES  %4u", presetSave[p].scoreTries);
         typeLine(buf, SUMMARY_COL, fila);
     }
     typeLine("SCORE", SUMMARY_COL, GAMEOVER_SCORE_ROW);
 
-    goTarget = scoreFor(p);
-    goShown = start;
-    goStep = ((start - goTarget) / GAMEOVER_COUNT_FRAMES) + 1;
+    // Sube de cero hasta el producto: multiplicando ya no hay cifra de
+    // salida de la que bajar.
+    goShown = 0;
+    goTarget = total;
+    goStep = (total / GAMEOVER_COUNT_FRAMES) + 1;
     goSettled = FALSE;
     goTick = 0;
 }
@@ -2204,9 +2221,12 @@ static void summaryStep(void)
     if (goSettled)
         return;
 
-    if (goShown > goTarget)
+    if (goShown != goTarget)
     {
-        goShown = ((goShown - goTarget) > goStep) ? (goShown - goStep) : goTarget;
+        if (goShown < goTarget)
+            goShown = ((goTarget - goShown) > goStep) ? (goShown + goStep) : goTarget;
+        else
+            goShown = ((goShown - goTarget) > goStep) ? (goShown - goStep) : goTarget;
 
         if (++goTick >= GAMEOVER_TICK_EVERY)
         {
@@ -2773,7 +2793,7 @@ static void drawScoreTable(void)
         // A planet with no rooms recorded has never been entered. The
         // marker is a character, not a colour, so it reads regardless of
         // how the palette lands.
-        if (presetSave[p].scoreRooms == 0)
+        if (scoreFor(p) == 0)
             len = sprintf(buf, "%d  %-6s        ---", i + 1, Menu_planetName(p));
         else
             len = sprintf(buf, "%d  %-6s %9lu %s", i + 1, Menu_planetName(p),
@@ -4311,7 +4331,8 @@ static void invalidateHudLines(void)
 static void drawScoreHud(void)
 {
     static u32 prev = 0xFFFFFFFF;
-    const u32 score = scoreFor(sizePresetIndex);
+    static u8 tick = 0;
+    u32 score;
     char buf[12];
     int len;
 
@@ -4321,6 +4342,12 @@ static void drawScoreHud(void)
         return;
     }
 
+    // scoreLive() recorre el mapa entero (countDeadEnemies), asi que no se
+    // pregunta cada frame: el producto solo se mueve al pasar un segundo.
+    if ((++tick & 15) && !hudLinesDirty)
+        return;
+
+    score = scoreLive();
     if ((score == prev) && !hudLinesDirty)
         return;
 
@@ -5430,15 +5457,11 @@ int main(bool hardReset)
                     Maze_draw();
                     // Maze_draw() repaints every tile of BG_A, wiping
                     // whatever the room had on it along with the map
-                    // overlay (or the static) -- put it back. The
-                    // insertion room has no letter and no plants of its
-                    // own, just its door arrow (spec §37), and
-                    // currentCol/currentRow are stale while in there.
-                    if (inInsertRoom)
-                    {
-                        drawInsertRoomArrow();
-                    }
-                    else
+                    // overlay (or the static) -- put it back. La sala de
+                    // insercion no tiene nada que devolver: ni letra ni
+                    // plantas, y su rotulo WELCOME vive en BG_B, que
+                    // Maze_draw no toca.
+                    if (!inInsertRoom)
                     {
                         Items_drawInRoom(currentCol, currentRow);
                         Plants_drawInRoom(currentCol, currentRow);
@@ -5835,10 +5858,9 @@ int main(bool hardReset)
                         // same reason the sibling inInsertRoom branch already
                         // skips that below -- so inInsertRoom flips TRUE.
                         inInsertRoom = TRUE;
-                        loadExtractionRoom();
+                        loadExtractionRoom(TRUE);   // vuelve andando: la salida al menu, abierta
                         Maze_draw();
-                        drawInsertRoomArrow(); // spec §37
-                        positionPlayerEnteringViaDoorDir(insertRoomDoorDir, insertLinkOffset);
+                                        positionPlayerEnteringViaDoorDir(insertRoomDoorDir, insertLinkOffset);
                         drawInsertRoomStatus(TRUE); // spec §34
                         hideEnemySprites(); // no enemy in the insertion room (spec §27)
                     }
@@ -5856,21 +5878,14 @@ int main(bool hardReset)
             // see tombMoving.) Frozen while the map is open: nothing moves.
             if (!mapViewOpen)
             {
-                const bool wasMoving = tombMoving;
-
                 tombMoving = (player.x != frameStartX) || (player.y != frameStartY);
 
-                // Score (user request). A MOVE is the start of a slide --
-                // the FALSE->TRUE edge -- not a button press: steering into
-                // a wall never moves the ship and must not cost anything.
-                // Both counters stop for good once the planet's objectives
-                // are met, which is what makes the score a measure of the
-                // run rather than of how long the pad was left idle.
+                // El reloj del planeta, lo unico que le queda al score
+                // aparte de los recuentos: se para para siempre al cumplir
+                // los objetivos, que es lo que congela el tiempo restante
+                // en vez de dejarlo caer con el mando quieto.
                 if (!presetSave[sizePresetIndex].scoreDone)
                 {
-                    if (tombMoving && !wasMoving)
-                        presetSave[sizePresetIndex].scoreMoves++;
-
                     presetSave[sizePresetIndex].scoreFrames++;
 
                     // Los objetivos del planeta son las letras y las

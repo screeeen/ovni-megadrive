@@ -2639,6 +2639,18 @@ static void punchBorderDoor(u8 dir, s16 ax, s16 ay)
 //
 // `abierta[4]` dice, por DOOR_N/E/S/W, cual de las puertas que la sala TIENE
 // esta abierta ahora mismo. La rejilla viene horneada con todas cerradas.
+// Los dos vanos de borde de una puerta cerrada al cargar una sala horneada.
+static void closeDoorCells(bool extraccion, s16 ra, s16 ca, s16 rb, s16 cb)
+{
+    if (extraccion)
+    {
+        grid[ra][ca] = INSERT_WALL_VARIANT;
+        grid[rb][cb] = INSERT_WALL_VARIANT;
+    }
+    lockedDoorCell[ra][ca] = TRUE;
+    lockedDoorCell[rb][cb] = TRUE;
+}
+
 void Maze_loadRoom(const u8 *datos, bool extraccion, const bool abierta[4])
 {
     const u8 w = datos[2], h = datos[3];
@@ -2701,26 +2713,24 @@ void Maze_loadRoom(const u8 *datos, bool extraccion, const bool abierta[4])
                     sealDoorCells(FALSE, off, 0, off + 1, 0, off, 1, off + 1, 1);
                     break;
             }
-        // Cerrada: los dos de borde ya son muro en la horneada, solo hay que
-        // decirle a Maze_draw que van en la paleta amarilla.
+        // Cerrada: en una sala de rejilla los dos de borde ya son muro en la
+        // horneada y solo hay que decirle a Maze_draw que van en la paleta
+        // amarilla. La de extraccion va horneada con sus puertas ABIERTAS
+        // (son pasillo), asi que ahi hay que levantar el muro de verdad.
         else
             switch (d)
             {
                 case MAZE_DIR_N:
-                    lockedDoorCell[0][off] = TRUE;
-                    lockedDoorCell[0][off + 1] = TRUE;
+                    closeDoorCells(extraccion, 0, off, 0, off + 1);
                     break;
                 case MAZE_DIR_S:
-                    lockedDoorCell[MAZE_H - 1][off] = TRUE;
-                    lockedDoorCell[MAZE_H - 1][off + 1] = TRUE;
+                    closeDoorCells(extraccion, MAZE_H - 1, off, MAZE_H - 1, off + 1);
                     break;
                 case MAZE_DIR_E:
-                    lockedDoorCell[off][MAZE_W - 1] = TRUE;
-                    lockedDoorCell[off + 1][MAZE_W - 1] = TRUE;
+                    closeDoorCells(extraccion, off, MAZE_W - 1, off + 1, MAZE_W - 1);
                     break;
                 default: // MAZE_DIR_W
-                    lockedDoorCell[off][0] = TRUE;
-                    lockedDoorCell[off + 1][0] = TRUE;
+                    closeDoorCells(extraccion, off, 0, off + 1, 0);
                     break;
             }
     }
