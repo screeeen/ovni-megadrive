@@ -2876,29 +2876,89 @@ void Maze_generateInsertionRoom(u8 doorDir, u8 doorOffset, u8 menuDoorDir, u8 me
 //
 // Los escalones no son inventados: son los que el VDP de verdad tiene sobre el
 // rayo de cada tono, con 3 bits por canal.
-static const u32 planetTint[MAZE_MAP_SLOTS][4] = {
+// --- LAS PALETAS DEL JUEGO ------------------------------------------------
+//
+// (peticion del usuario: "las paletas tienen que ser efectivas, cada paleta de
+// colores del juego tiene que ser seleccionable".)
+//
+// Una paleta son los CUATRO colores del escenario: cuerpo del muro, sus
+// huecos, el brillo y el suelo. Ponerla es mover cuatro entradas de CRAM, no
+// cambiar arte, asi que la lista entera cuesta 16 B por paleta y cero de VRAM.
+//
+// Las ocho primeras son las de siempre, una por planeta: ya existian, solo que
+// antes el planeta decidia y el jugador no. Ahora cada una es elegible por su
+// nombre, y detras van las que se ganan con la barra de progreso.
+//
+// La regla que cumplen TODAS: el muro va alto de valor y el suelo bajo. Lo que
+// separa muro de suelo es el VALOR y no el tono, que es lo que hace que la
+// sala se lea sin distinguir colores. Una paleta que rompa eso no vale, por
+// bonita que sea.
+//
+// Los escalones no son inventados: son los ocho que el VDP tiene por canal
+// (00 24 48 6D 91 B6 DA FF). RGB24_TO_VDPCOLOR redondea a ellos, asi que un
+// color de fuera de la rejilla se mueve solo -- estos ya estan dentro.
+static const u32 mazePalette[MAZE_PALETTES - 1][4] = {
     //  cuerpo     sombra     brillo     suelo
-    // LAS CUATRO PRIMERAS, A TODO CONTRASTE (peticion del usuario: "cambia la
-    // paleta de color en las primeras fases, que tenga mas contraste"). El
-    // muro sube al escalon mas alto que tiene el VDP y el suelo baja casi al
-    // negro: lo que separa muro de suelo pasa a ser el VALOR, que se lee sin
-    // distinguir colores, y no el tono. De la 4 en adelante se quedan los
-    // tonos medios de antes, para que la diferencia se note al avanzar.
-    { 0x91FF6D, 0x246D24, 0xDAFFB6, 0x000000 },   // 0  verde      (el del arte original)
-    { 0x6DDAFF, 0x24486D, 0xB6FFFF, 0x000000 },   // 1  agua       (el otro del arte original)
-    { 0xFFB648, 0x6D4800, 0xFFDA91, 0x000000 },   // 2  ambar
-    { 0xFF916D, 0x6D2424, 0xFFB6B6, 0x000000 },   // 3  carmesi
-    // De la 4 en adelante la sombra vale lo mismo que el suelo: los huecos de
-    // la trama se funden con el, que es como se veian todas hasta ahora.
-    { 0xB66DDA, 0x242448, 0xB691FF, 0x242448 },   // 4  violeta
-    { 0x249191, 0x002449, 0x24DADA, 0x002449 },   // 5  turquesa
-    { 0xB6B66D, 0x242424, 0xDADA91, 0x242424 },   // 6  hueso
-    { 0x4891B6, 0x242449, 0x6D91DA, 0x242449 },   // 7  anil
+    // LAS DE LOS PLANETAS. Las cuatro primeras a todo contraste (peticion del
+    // usuario, dos veces: "quiero contraste"): la trama del muro al escalon
+    // mas alto, sus huecos a un tono medio del mismo color y el suelo al negro
+    // del todo. De la 4 en adelante los huecos valen lo mismo que el suelo,
+    // que es como se veia todo hasta ahora, y asi el salto se nota al avanzar.
+    { 0x91FF6D, 0x246D24, 0xDAFFB6, 0x000000 },   // 1  GREEN    (el del arte original)
+    { 0x6DDAFF, 0x24486D, 0xB6FFFF, 0x000000 },   // 2  AQUA     (el otro del arte original)
+    { 0xFFB648, 0x6D4800, 0xFFDA91, 0x000000 },   // 3  AMBER
+    { 0xFF916D, 0x6D2424, 0xFFB6B6, 0x000000 },   // 4  CRIMSON
+    { 0xB66DDA, 0x242448, 0xB691FF, 0x242448 },   // 5  VIOLET
+    { 0x249191, 0x002449, 0x24DADA, 0x002449 },   // 6  TEAL
+    { 0xB6B66D, 0x242424, 0xDADA91, 0x242424 },   // 7  BONE
+    { 0x4891B6, 0x242449, 0x6D91DA, 0x242449 },   // 8  INDIGO
+    // LAS QUE SE GANAN. No son tonos nuevos del mismo molde: cada una cambia
+    // COMO se lee la sala, que es lo que hace que elegirla valga la pena.
+    { 0xFFB600, 0x6D2400, 0xFFFF6D, 0x000000 },   // 9  PHOSPHOR fosforo de monitor: un solo tono
+    { 0xFF00B6, 0x480000, 0xFF48FF, 0x000000 },   // 10 NEON     suelo negro y muro al tope, todo filo
+    { 0xFFFFFF, 0x484848, 0xFFFFFF, 0x000000 },   // 11 MONO     sin color util: la sala leida solo por valor
 };
+
+// Con AUTO la paleta se indexa por planeta, asi que las ocho primeras tienen
+// que cubrirlos todos.
+_Static_assert(MAZE_PALETTES - 1 >= MAZE_MAP_SLOTS,
+               "faltan paletas para los planetas que hay");
+
+// AUTO es la 0 y no esta en la tabla: es "la del planeta", el comportamiento
+// de siempre. Los nombres viven aqui, con los colores, para que no puedan
+// descuadrarse con ellos.
+static const char *const mazePaletteName[MAZE_PALETTES] = {
+    "AUTO", "GREEN", "AQUA", "AMBER", "CRIMSON", "VIOLET", "TEAL", "BONE",
+    "INDIGO", "PHOSPHOR", "NEON", "MONO",
+};
+
+// Cual lleva puesta el jugador. 0 = AUTO, o sea que manda el planeta.
+static u8 mazePaletteSel;
+
+void Maze_setPalette(u8 idx)
+{
+    mazePaletteSel = (idx < MAZE_PALETTES) ? idx : MAZE_PAL_AUTO;
+}
+
+u8 Maze_palette(void)
+{
+    return mazePaletteSel;
+}
+
+const char *Maze_paletteName(u8 idx)
+{
+    return mazePaletteName[(idx < MAZE_PALETTES) ? idx : 0];
+}
 
 void Maze_setPlanetTint(u8 planet)
 {
-    const u32 *const t = planetTint[(planet < MAZE_MAP_SLOTS) ? planet : 0];
+    // Con AUTO manda el planeta, que es como ha sido siempre; con una paleta
+    // elegida manda ella y el planeta se queda sin voz. Es lo que hace que
+    // elegirla sea EFECTIVO (peticion del usuario).
+    const u8 cual = (mazePaletteSel != MAZE_PAL_AUTO)
+                    ? (u8) (mazePaletteSel - 1)
+                    : ((planet < MAZE_MAP_SLOTS) ? planet : 0);
+    const u32 *const t = mazePalette[cual];
 
     PAL_setColor(PAL_CUERPO, RGB24_TO_VDPCOLOR(t[0]));
     PAL_setColor(PAL_SOMBRA, RGB24_TO_VDPCOLOR(t[1]));

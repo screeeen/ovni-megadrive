@@ -113,6 +113,18 @@ s16 Maze_originPxY(void);
 // dos tonos del planeta puesto, asi que la cartografia la pinta de su color.
 // Las cuatro entradas de PAL0 del escenario. Maze_setPlanetTint mueve las tres
 // del muro; el suelo es el fondo de cualquier cosa que se dibuje sobre el.
+// LAS PALETAS DEL JUEGO (peticion del usuario: "cada paleta de colores del
+// juego tiene que ser seleccionable"). Una paleta son los cuatro colores del
+// escenario; la tabla y los nombres estan en maze.c. La 0 es AUTO -- la del
+// planeta, como siempre --, de la 1 a la 8 las de los ocho planetas y de la 9
+// a la 11 las que se ganan con la barra de progreso. Elegir una la hace
+// efectiva en TODOS los planetas.
+#define MAZE_PAL_AUTO 0
+#define MAZE_PALETTES 12
+void Maze_setPalette(u8 idx);
+u8 Maze_palette(void);
+const char *Maze_paletteName(u8 idx);
+
 #define PAL_SUELO   2
 #define PAL_CUERPO  3
 #define PAL_SOMBRA  4

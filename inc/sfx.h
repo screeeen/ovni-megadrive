@@ -85,6 +85,11 @@ void Sfx_playPlantPickup(void);
 // fires one every TYPE_TICK_EVERY glyphs instead.
 void Sfx_playTypeTick(void);
 
+// UN TIC POR TESELA que gana la barra de progreso (peticion del usuario), con
+// el tono subiendo con `nivel`: una barra que sube se tiene que OIR subir. Va
+// por el canal 1 del PSG, el unico que no usa nadie.
+void Sfx_playBarTick(u8 nivel);
+
 void Sfx_playEnemyKill(void);
 void Sfx_playLetterPickup(void);
 
@@ -172,8 +177,9 @@ void Sfx_update(void);
 #define SFX_ID_TYPE   4
 #define SFX_ID_JAZZ   5
 #define SFX_ID_BRUSH  6
-#define SFX_ID_MUSIC  7
-#define SFX_ID_COUNT  8
+#define SFX_ID_BAR    7    // el tic de la barra de progreso, voz del PSG
+#define SFX_ID_MUSIC  8
+#define SFX_ID_COUNT  9
 #define SFX_ID_SHOTS  5    // los que se disparan: 0..4
 #define SFX_ID_NONE  0xFF
 

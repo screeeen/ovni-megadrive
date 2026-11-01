@@ -315,6 +315,40 @@ void Sfx_playTypeTick(void)
     sfxShotLeft[SFX_ID_TYPE] = SFX_SHOT_FRAMES(sizeof(typeTick));
 }
 
+// --- EL TIC DE LA BARRA DE PROGRESO ----------------------------------------
+//
+// Un blip corto por cada tesela que gana la barra, mas agudo cada vez. No es
+// una muestra: es el canal 1 del PSG, que no lo usa nadie mas (el splash va
+// por 0/2/3 y el cepillo del jazz por el 2), asi que no le quita sitio a
+// ningun otro sonido ni necesita copia para el driver XGM.
+#define BAR_TICK_FRAMES 4     // lo que dura cada blip
+#define BAR_TICK_DIV_0  440   // el divisor del primero: a menos divisor, mas agudo
+#define BAR_TICK_STEP    13   // cuanto sube por tesela
+
+static u8 barTickLeft;
+
+void Sfx_playBarTick(u8 nivel)
+{
+    u16 div;
+
+    if (!enabled)
+        return;
+
+    div = (u16) (BAR_TICK_DIV_0 - (nivel * BAR_TICK_STEP));
+    if (div < 60)
+        div = 60;             // techo: mas arriba ya es un pitido
+
+    PSG_setTone(1, div);
+    PSG_setEnvelope(1, PSG_ENVELOPE_MAX);
+    barTickLeft = BAR_TICK_FRAMES;
+}
+
+static void barTick(void)
+{
+    if (--barTickLeft == 0)
+        PSG_setEnvelope(1, PSG_ENVELOPE_MIN);
+}
+
 // --- EL SPLASH, DEL CHIP ---------------------------------------------------
 //
 // Matar un enemigo ya no es una muestra sino el PSG (peticion del usuario: "me
@@ -1353,6 +1387,9 @@ void Sfx_update(void)
     if (splashLeft)
         splashTick();
 
+    if (barTickLeft)
+        barTick();
+
     if (jazzOn)
         jazzTick();
 }
@@ -1381,15 +1418,16 @@ static const char *const sfxName[SFX_ID_COUNT] = {
 
     "JAZZ",   // 5  la cadencia del game over, las cuatro voces como una sola
     "BRUSH",  // 6  el cepillo del jazz: el ruido del PSG a contratiempo
+    "BAR",    // 7  un tic por tesela de la barra de progreso, tono al alza
 
-    "MUSIC",  // 7  partida: la cancion del planeta, por el driver XGM
+    "MUSIC",  // 8  partida: la cancion del planeta, por el driver XGM
 };
 
 // Una linea de que es cada uno, para el visor. Corta a proposito: la pantalla
 // son 40 columnas y el nombre ya se come las primeras.
 static const char *const sfxWhat[SFX_ID_COUNT] = {
     "muro", "planta", "enemigo", "letra", "texto",
-    "game over", "cepillo",
+    "game over", "cepillo", "barra",
     "", // MUSIC: no es fija, la pone Sfx_debugWhat con el nombre de la cancion
 };
 
@@ -1441,6 +1479,9 @@ u8 Sfx_debugLevel(u8 id)
         return (jazzOn && (jazzBrushAtt < PSG_ENVELOPE_MIN))
                  ? (u8) (PSG_ENVELOPE_MIN - jazzBrushAtt) : 0;
 
+    if (id == SFX_ID_BAR)
+        return barTickLeft ? 15 : 0;
+
     // La cancion la lleva el Z80: aqui no hay nivel que leer, solo si suena.
     if (id == SFX_ID_MUSIC)
         return musicOn ? 15 : 0;
@@ -1457,6 +1498,11 @@ bool Sfx_debugExists(u8 id)
     // Esta en la lista para poder hablar de el, no para verlo sonar.
     if (id == SFX_ID_JAZZ || id == SFX_ID_BRUSH)
         return jazzOn;
+    // El tic de la barra vive en la pantalla de fase completada y en el
+    // taller, los dos fuera del visor: igual que el jazz, esta en la lista
+    // para poder hablar de el.
+    if (id == SFX_ID_BAR)
+        return barTickLeft > 0;
     if (id == SFX_ID_MUSIC)
         return musicOn;
     return FALSE;

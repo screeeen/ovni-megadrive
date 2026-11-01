@@ -51,7 +51,7 @@
 // menu con A. Es la misma pantalla del game over con otro titulo, asi que
 // comparte el contador de score que baja (summaryStep).
 typedef enum { STATE_INTRO, STATE_MENU, STATE_PLAYING, STATE_GAMEOVER, STATE_SCORES,
-               STATE_COLLECTION, STATE_REWARD, STATE_GALAXIES } GameState;
+               STATE_COLLECTION, STATE_REWARD, STATE_UPGRADES } GameState;
 
 // The ship slides in a straight line until a wall stops it, turning only
 // from a stop -- the only control scheme the room generator's slide-graph
@@ -81,6 +81,17 @@ static const u8 tombRamp[] = { 2, 4, 7, 10, 13 };
 static bool tombMoving;
 static u8 tombQueuedDir = DIR_NONE;
 static u8 tombSpeedIdx; // where the current slide is on tombRamp
+
+// EL MARGEN DE GRACIA AL REANUDAR (reporte del usuario: "a veces las
+// trayectorias del player y del enemigo se cruzan y ya no se puede jugar
+// porque siempre muere, no hay forma de escapar de esa situacion"). Mientras
+// corre, un enemigo peligroso no mata ni empuja: la nave le pasa por encima,
+// y parpadea para que se vea que es temporal. Solo al reanudar en la sala
+// donde te mataron -- en una entrada normal la nave llega como tu la has
+// mandado, y ahi el choque es cosa tuya.
+#define REVIVE_GRACE_FRAMES 60   // un segundo
+
+static u16 reviveGrace;
 
 // cols/rows = how many ROOMS the planet's map has; roomW/roomH/shape =
 // how big and what shape each of those rooms is (user request: "cuanto
@@ -1845,6 +1856,7 @@ static void newGame(void)
     Maze_setPlanetTint(sizePresetIndex);
     tombMoving = FALSE;
     tombQueuedDir = DIR_NONE;
+    reviveGrace = 0;   // solo lo enciende la rama de reanudar, mas abajo
     Items_reset();
     Plants_reset(); // spec §48 -- running counter, now also saved/restored per planet (spec §51)
     memset(doorOpenBits, 0, sizeof(doorOpenBits)); // fresh run: no doorway has been opened yet
@@ -1915,6 +1927,24 @@ static void newGame(void)
         loadRoom(currentCol, currentRow);   // genera, dibuja y levanta sus enemigos
         positionPlayerEnteringViaDoorDir(currentEnterDoor,
                                          doorOffsetFor(currentCol, currentRow, currentEnterDoor));
+        // BUG FIX (reporte del usuario: al reanudar en la habitacion donde te
+        // mataron, el choque volvia a pasar igual y no habia salida). Eran dos
+        // cosas, y las dos hacian el bucle DETERMINISTA:
+        //
+        // 1) player.dir sobrevivia a la muerte, y moveSpeed solo es 0 con
+        //    DIR_NONE, asi que la nave reaparecia ARRANCANDO SOLA en la misma
+        //    direccion que llevaba al morir -- contra lo mismo que la mato --
+        //    y en TOMB no se puede girar en marcha. Ahora reanuda PARADA: el
+        //    primer movimiento lo elige el jugador. Con eso ya hay salida,
+        //    incluida volver a salir por la puerta por la que entras, que
+        //    queda abierta.
+        // 2) Aun parada, un enemigo que ya venia por el pasillo de la puerta
+        //    llegaba antes de que hubiera nada que hacer: de ahi el margen de
+        //    gracia (ver REVIVE_GRACE_FRAMES).
+        player.dir = DIR_NONE;
+        tombMoving = FALSE;
+        tombQueuedDir = DIR_NONE;
+        reviveGrace = REVIVE_GRACE_FRAMES;
         Items_drawHud();
         Plants_drawHud();
         drawInsertRoomStatus(FALSE);        // no esta en la sala de extraccion
@@ -1988,6 +2018,303 @@ static u16 screenAlternateTimer;
 #define MENU_ROW_C 27   // "PRESS A TO START", o lo que cuesta abrirlo
 
 static void drawMenu(void);       // all three defined below
+// --- EL PROGRESO: LA BARRA Y LOS DESBLOQUEABLES ---------------------------
+//
+// (peticion del usuario: "cada vez que el player obtiene puntos por pasar los
+// planetas se van sumando en una barra... cada segmento de ese valor va
+// desbloqueando paletas de colores distintas y distintos personajes".)
+//
+// QUE SUMA. Solo la MEJORA sobre tu mejor marca en ese planeta: limpias por 3M
+// y la barra sube 3M; lo rehaces por 5M y sube 2M mas. Asi repetir el planeta
+// mas rapido en bucle no da nada, y mejorar si -- que es lo que empuja a
+// volver. La cuenta es la misma resta que ya hacia falta para guardar el
+// record del planeta, asi que no hay doble contabilidad.
+//
+// POR QUE LOS UMBRALES SON GEOMETRICOS. Con el score multiplicativo un planeta
+// paga entre 4 y 10 veces lo que el anterior: medido sobre los ocho, el 0 da
+// ~150 puntos y el 7 da ~30.000.000. Una escalera de pasos iguales la cruzaria
+// entera el primer planeta grande; una geometrica cae sola donde cae el
+// contenido, un segmento o dos por planeta nuevo, que es el ritmo que pedias.
+//
+// EL TOTAL NO SE GUARDA al apagar (decision del usuario: de momento solo la
+// sesion). Vive aqui en RAM y sobrevive a los viajes al menu, que es lo que
+// hace falta para que la barra tenga sentido entre planetas.
+#define UNLOCK_PALETA 0
+#define UNLOCK_PILOTO 1
+
+typedef struct
+{
+    u32 umbral;
+    u8 tipo;
+    u8 indice;         // que paleta o que piloto
+    const char *nombre;
+} Unlock;
+
+// La escalera. Los umbrales salen de los scores reales de los ocho planetas
+// (ver arriba): el primero cae limpiando un planeta mediano, el ultimo pide
+// haber hecho bien los grandes. LOS PILOTOS VAN AQUI: sus entradas son
+// { 1000000, UNLOCK_PILOTO, 1, "PILOT ..." } y compania, en los huecos de
+// 1M / 8M / 40M, en cuanto exista su arte (hoy solo hay una nave).
+// Los nombres van CORTOS porque el icono de al lado ya dice de que tipo es
+// (paleta o piloto), y asi la linea de la pantalla de recuento cabe con su
+// cifra de puntos restantes.
+static const Unlock unlocks[] = {
+    {   200000, UNLOCK_PALETA,  9, "PHOSPHOR" },
+    {  3000000, UNLOCK_PALETA, 10, "NEON"     },
+    { 20000000, UNLOCK_PALETA, 11, "MONO"     },
+};
+#define UNLOCK_COUNT ((u8) (sizeof unlocks / sizeof unlocks[0]))
+
+// Los nombres de las paletas los sirve maze.c, donde estan sus colores, para
+// que no puedan descuadrarse. Los pilotos todavia son uno.
+#define PILOTO_COUNT 1
+static const char *const pilotoNombre[PILOTO_COUNT] = { "ORIGINAL" };
+
+static u32 metaTotal;        // la barra: todo lo ganado en esta sesion
+// Un bit por paleta GANADA CON LA BARRA (las de la 9 a la 11). Las de los
+// ocho planetas no necesitan bit: se tienen por haber limpiado ese planeta,
+// que es un dato que ya existe -- ver paletaOwned().
+static u16 paletaEarned;
+static u8 pilotoOwned = 1;
+static u8 paletaWorn, pilotoWorn;
+
+// Si el jugador tiene esa paleta. Definida mas abajo: le hace falta galaxyDone.
+static bool paletaOwned(u8 idx);
+static u8 metaJustUnlocked;  // cuantos cruzo el ultimo ingreso, para la pantalla
+static u32 metaBefore;       // el total de antes, de donde arranca la barra
+
+// El tramo en el que esta `valor`: desde donde empieza y donde acaba. Pasado
+// el ultimo umbral el tramo se queda abierto -- la barra se llena y ahi
+// vive -- en vez de inventar un techo que no existe.
+static void metaSegment(u32 valor, u32 *desde, u32 *hasta, u8 *indice)
+{
+    u8 i;
+
+    *desde = 0;
+    for (i = 0; i < UNLOCK_COUNT; i++)
+    {
+        if (valor < unlocks[i].umbral)
+        {
+            *hasta = unlocks[i].umbral;
+            *indice = i;
+            return;
+        }
+        *desde = unlocks[i].umbral;
+    }
+
+    *hasta = 0;          // ya no queda escalon
+    *indice = UNLOCK_COUNT;
+}
+
+// Cuantas teselas de `w` lleva llenas la barra con ese total. La division va
+// primero: (total - desde) llega a los cientos de millones y multiplicar por
+// el ancho se saldria de un u32.
+static u16 metaBarFilled(u32 valor, u16 w)
+{
+    u32 desde, hasta;
+    u8 i;
+
+    metaSegment(valor, &desde, &hasta, &i);
+    if (hasta == 0)
+        return w;        // pasado el ultimo escalon: llena
+
+    return (u16) ((valor - desde) / (((hasta - desde) / w) + 1));
+}
+
+// Ingresa puntos y abre lo que se cruce. Devuelve cuantos desbloqueables ha
+// abierto este ingreso.
+static u8 metaAward(u32 delta)
+{
+    u8 abiertos = 0;
+    u8 i;
+
+    metaBefore = metaTotal;
+    metaTotal += delta;
+
+    for (i = 0; i < UNLOCK_COUNT; i++)
+    {
+        if ((metaBefore >= unlocks[i].umbral) || (metaTotal < unlocks[i].umbral))
+            continue;    // ya estaba abierto, o todavia no llega
+
+        if (unlocks[i].tipo == UNLOCK_PALETA)
+            paletaEarned = (u16) (paletaEarned | (1u << unlocks[i].indice));
+        else
+            pilotoOwned = (u8) (pilotoOwned | (1u << unlocks[i].indice));
+        abiertos++;
+    }
+
+    metaJustUnlocked = abiertos;
+    return abiertos;
+}
+
+// Cual abrio el ingreso numero n (0 = el primero), para la pantalla de fase
+// completada. UNLOCK_COUNT si no hubo tantos.
+static u8 metaUnlockedIndex(u8 n)
+{
+    u8 i, visto = 0;
+
+    for (i = 0; i < UNLOCK_COUNT; i++)
+        if ((metaBefore < unlocks[i].umbral) && (metaTotal >= unlocks[i].umbral))
+        {
+            if (visto == n)
+                return i;
+            visto++;
+        }
+
+    return UNLOCK_COUNT;
+}
+
+static const char *metaUnlockedName(u8 n)
+{
+    const u8 i = metaUnlockedIndex(n);
+
+    return (i < UNLOCK_COUNT) ? unlocks[i].nombre : "";
+}
+
+// --- LOS ICONOS DE LOS DESBLOQUEABLES -------------------------------------
+//
+// (peticion del usuario: "graficos (como iconos) a los unlockables".)
+//
+// El arte vive AQUI, en ASCII, y se convierte a teselas al arrancar: un icono
+// son 16x16 px = 4 teselas de 4 bits, 128 B cada uno. Asi no hay recurso
+// nuevo que pasar por rescomp y el dibujo se edita leyendolo -- el mismo
+// camino que ya usa el zoom de la coleccion para sus cuadros macizos.
+//
+// '#' es tinta y cualquier otra cosa es transparente. La tinta va al indice
+// 15, el del texto: es el unico que vale lo mismo en todas las pantallas y en
+// las cuatro paletas, asi que el icono se lee siempre. Son SILUETAS a
+// proposito, no manchas de color: el usuario es daltonico y la forma es lo
+// que tiene que distinguirlos.
+#define ICON_PALETA  0
+#define ICON_PILOTO  1
+#define ICON_CANDADO 2
+#define ICON_COUNT   3
+#define ICON_INK     15
+
+static const char *const iconArt[ICON_COUNT][16] = {
+    {   // PALETA: cuatro muestras, que es lo que una paleta es
+        "................",
+        "................",
+        "..####....####..",
+        "..####....####..",
+        "..####....####..",
+        "..####....####..",
+        "................",
+        "................",
+        "................",
+        "..####....####..",
+        "..####....####..",
+        "..####....####..",
+        "..####....####..",
+        "................",
+        "................",
+        "................",
+    },
+    {   // PILOTO: el casco, con su visera en hueco
+        "................",
+        ".....######.....",
+        "...##########...",
+        "..############..",
+        "..####....####..",
+        "..##........##..",
+        "..##........##..",
+        "..##........##..",
+        "..####....####..",
+        "..############..",
+        "..############..",
+        "...##########...",
+        "....########....",
+        ".....######.....",
+        "................",
+        "................",
+    },
+    {   // CANDADO: lo que todavia no es tuyo
+        "................",
+        "................",
+        ".....######.....",
+        "....##....##....",
+        "....##....##....",
+        "....##....##....",
+        "..############..",
+        "..############..",
+        "..#####..#####..",
+        "..####....####..",
+        "..#####..#####..",
+        "..############..",
+        "..############..",
+        "................",
+        "................",
+        "................",
+    },
+};
+
+// Detras de las cuatro teselas que gasta el zoom de la coleccion, que son las
+// ultimas de la cadena (ver Plants_tilesEnd).
+static u16 iconTileBase(void)
+{
+    return (u16) (Plants_tilesEnd() + 4);
+}
+
+// Monta los iconos en VRAM. Una vez al arrancar: no cambian nunca.
+static void iconsLoad(void)
+{
+    u8 i;
+
+    for (i = 0; i < ICON_COUNT; i++)
+    {
+        u8 tile[4][32];
+        u16 y;
+
+        memset(tile, 0, sizeof tile);
+        for (y = 0; y < 16; y++)
+        {
+            const char *const fila = iconArt[i][y];
+            u16 x;
+
+            for (x = 0; x < 16; x++)
+            {
+                if (fila[x] != '#')
+                    continue;
+                // Tesela (x/8, y/8) del cuadro, y dentro de ella el nibble
+                // que le toca a ese pixel: los 4 bits altos son el par.
+                {
+                    const u16 t = (u16) (((y / 8) * 2) + (x / 8));
+                    const u16 off = (u16) (((y % 8) * 4) + ((x % 8) / 2));
+
+                    tile[t][off] = (u8) (tile[t][off] |
+                                          (((x % 2) == 0) ? (ICON_INK << 4) : ICON_INK));
+                }
+            }
+        }
+        VDP_loadTileData((const u32 *) tile, (u16) (iconTileBase() + (i * 4)), 4, DMA);
+    }
+}
+
+// Estampa un icono en (col,row) de BG_A. Ocupa 2x2 teselas, o sea dos filas
+// de texto: la de debajo tiene que estar libre.
+static void drawIcon(u8 icono, u16 col, u16 row)
+{
+    const u16 base = (u16) (iconTileBase() + (icono * 4));
+    u16 i;
+
+    for (i = 0; i < 4; i++)
+        VDP_setTileMapXY(BG_A, TILE_ATTR_FULL(PAL0, 0, FALSE, FALSE, (u16) (base + i)),
+                          (u16) (col + (i & 1)), (u16) (row + (i >> 1)));
+}
+
+// El icono que le toca a un desbloqueable: el candado si no es tuyo todavia.
+static u8 unlockIcon(u8 i)
+{
+    const bool tengo = (unlocks[i].tipo == UNLOCK_PALETA)
+                       ? paletaOwned(unlocks[i].indice)
+                       : (((pilotoOwned >> unlocks[i].indice) & 1) != 0);
+
+    if (!tengo)
+        return ICON_CANDADO;
+
+    return (unlocks[i].tipo == UNLOCK_PALETA) ? ICON_PALETA : ICON_PILOTO;
+}
+
 // ---------------------------------------------------------------------
 // El marcador de la pantalla de fase completada: sube de cero hasta el
 // producto de los cuatro factores, al modo arcade. Arranca cuando el texto
@@ -2006,6 +2333,18 @@ static void drawMenu(void);       // all three defined below
 #define SUMMARY_COL         11
 #define SUMMARY_ROW_STEP     2
 #define REWARD_FIRST_ROW    11
+// La barra de progreso, debajo del marcador y con su fila de por medio.
+#define META_BAR_ROW        24   // pegada a su etiqueta: las dos son una cosa
+#define META_LABEL_ROW      23
+#define META_HEADLINE_ROW    9   // el aviso de desbloqueo, de subtitulo
+#define META_NEXT_ROW       26   // su icono ocupa la 26 y la 27, las ultimas
+#define META_BAR_COL        11
+#define META_BAR_W          19   // acaba en la 30, donde los numeros
+#define META_BAR_FRAMES     60   // un segundo de subida
+
+static u32 barShown, barStep;
+static u16 barFilledShown;   // teselas que ya sonaron, para un tic por tesela
+static bool barDone;
 #define GAMEOVER_TEXT_ROW   13   // el game over no lleva resumen: la palabra, centrada
 
 static u32 goShown, goTarget, goStep;
@@ -2029,6 +2368,13 @@ static u8 goTick;
 #define DEATH_TEXT_ROW    12
 #define DEATH_ART_BOTTOM  136  // el grupo de siluetas se apoya en esta linea, bajo el texto
 #define DEATH_TEMPO_END   25   // a cuanto por ciento de su velocidad acaba la musica
+// EL GOLPE DE LA MUERTE (peticion del usuario: "screenshake grande cuando te
+// matan"). Un orden de magnitud por encima del shake de chocar contra un muro
+// (SHAKE_MAX_AMPLITUDE, 3 px): arranca en DEATH_SHAKE_AMP y se va apagando a
+// lo largo del fundido, asi que el pico es el instante del choque. Mueve el
+// laberinto por scroll Y las dos siluetas por sprite -- a un sprite no le
+// afecta el scroll del plano, y sin eso la pantalla se partiria en dos.
+#define DEATH_SHAKE_AMP   12   // el unico mando: subelo si lo quieres mas bestia
 
 static u16 deathPal[64];   // 128 B fuera de la pila: esto se llama desde hondo
 
@@ -2093,13 +2439,23 @@ static void deathFreeze(u8 killer)
     for (i = 0; i < DEATH_FADE_FRAMES; i++)
     {
         const s16 t = (s16) (i + 1);
+        // El golpe: una sacudida por eje y por frame, cambiando de signo, con
+        // la amplitud cayendo hasta cero al acabar el fundido. Un eje a la
+        // vez, como el shake de siempre, para que nunca sea un salto diagonal.
+        const s16 amp = (s16) ((DEATH_SHAKE_AMP * (DEATH_FADE_FRAMES - i)) / DEATH_FADE_FRAMES);
+        const u16 fase = (u16) (i & 3);
+        const s16 sx = (fase == 0) ? amp : (fase == 2) ? (s16) -amp : 0;
+        const s16 sy = (fase == 1) ? amp : (fase == 3) ? (s16) -amp : 0;
+
+        VDP_setHorizontalScroll(BG_A, sx);
+        VDP_setVerticalScroll(BG_A, sy);
 
         SPR_setPosition(playerSprite,
-                        (s16) (naveX0 + (((naveX1 - naveX0) * t) / DEATH_FADE_FRAMES)),
-                        (s16) (naveY0 + (((naveY1 - naveY0) * t) / DEATH_FADE_FRAMES)));
+                        (s16) (sx + naveX0 + (((naveX1 - naveX0) * t) / DEATH_FADE_FRAMES)),
+                        (s16) (sy + naveY0 + (((naveY1 - naveY0) * t) / DEATH_FADE_FRAMES)));
         SPR_setPosition(enemySprites[killer],
-                        (s16) (malX0 + (((malX1 - malX0) * t) / DEATH_FADE_FRAMES)),
-                        (s16) (malY0 + (((malY1 - malY0) * t) / DEATH_FADE_FRAMES)));
+                        (s16) (sx + malX0 + (((malX1 - malX0) * t) / DEATH_FADE_FRAMES)),
+                        (s16) (sy + malY0 + (((malY1 - malY0) * t) / DEATH_FADE_FRAMES)));
         SPR_update();
 
         // De su velocidad al DEATH_TEMPO_END por ciento, al mismo ritmo que
@@ -2114,6 +2470,11 @@ static void deathFreeze(u8 killer)
     Sfx_musicTempoPercent(DEATH_TEMPO_END);
 
     // El bucle puede cortarse antes de tiempo si el fundido acaba primero.
+    // Aqui se deja todo quieto y en su sitio: el golpe no puede sobrevivir a
+    // la pantalla de game over, que se escribe en BG_A.
+    VDP_setHorizontalScroll(BG_A, 0);
+    VDP_setVerticalScroll(BG_A, 0);
+    shakeFramesLeft = 0;   // el del choque, que todavia podia quedar corriendo
     SPR_setPosition(playerSprite, naveX1, naveY1);
     SPR_setPosition(enemySprites[killer], malX1, malY1);
     SPR_update();
@@ -2156,6 +2517,7 @@ static void gameOverBegin(void)
     typeReset();
     typeLine("GAME OVER", 15, GAMEOVER_TEXT_ROW);
     goSettled = TRUE;   // no hay marcador que mover
+    barDone = TRUE;     // ni barra: morir no ingresa nada
 }
 
 // Una vez por frame mientras la pantalla esta puesta.
@@ -2167,13 +2529,18 @@ static void rewardBegin(void)
 {
     const u8 p = sizePresetIndex;
     const u32 total = scoreLive();
+    // Lo que entra en la barra es la MEJORA sobre tu mejor marca en este
+    // planeta, que es la misma resta que hace falta para guardar el record:
+    // rehacerlo igual o peor no suma nada, mejorarlo suma la diferencia.
+    const u32 mejora = (total > presetSave[p].scoreValue)
+                       ? (u32) (total - presetSave[p].scoreValue) : 0;
     char buf[40];
 
     Sfx_musicStop();
 
-    // Se ingresa aqui, y solo lo mejor que se haya hecho en ese planeta.
-    if (total > presetSave[p].scoreValue)
+    if (mejora)
         presetSave[p].scoreValue = total;
+    metaAward(mejora);   // tambien con mejora 0: deja metaBefore en su sitio
 
     VDP_clearPlane(BG_A, TRUE);
     typeReset();
@@ -2199,6 +2566,7 @@ static void rewardBegin(void)
         typeLine(buf, SUMMARY_COL, fila);
     }
     typeLine("SCORE", SUMMARY_COL, GAMEOVER_SCORE_ROW);
+    typeLine("PROGRESS", SUMMARY_COL, META_LABEL_ROW);
 
     // Sube de cero hasta el producto: multiplicando ya no hay cifra de
     // salida de la que bajar.
@@ -2207,6 +2575,83 @@ static void rewardBegin(void)
     goStep = (total / GAMEOVER_COUNT_FRAMES) + 1;
     goSettled = FALSE;
     goTick = 0;
+
+    // Y detras del marcador, la barra: arranca donde estaba el total y sube
+    // hasta el nuevo. El paso va dividido primero porque la diferencia llega
+    // a los cientos de millones.
+    barShown = metaBefore;
+    barStep = ((metaTotal - metaBefore) / META_BAR_FRAMES) + 1;
+    barFilledShown = metaBarFilled(metaBefore, META_BAR_W);
+    barDone = FALSE;
+}
+
+// Un frame de la barra de progreso, detras del marcador. Cuando llega arriba
+// anuncia lo que se haya abierto.
+static void metaBarStep(void)
+{
+    char buf[40];
+
+    if (barDone)
+        return;
+
+    if (barShown < metaTotal)
+        barShown = ((metaTotal - barShown) > barStep) ? (barShown + barStep) : metaTotal;
+    else
+    {
+        barDone = TRUE;
+
+        // Lo que acaba de abrirse va de subtitulo, debajo del titulo: es el
+        // titular de la pantalla, no una nota al pie.
+        if (metaJustUnlocked > 0)
+        {
+            const int len = sprintf(buf, "UNLOCKED  %s", metaUnlockedName(0));
+            const u8 cual = metaUnlockedIndex(0);
+
+            VDP_drawText(buf, (u16) ((40 - len) / 2), META_HEADLINE_ROW);
+            drawIcon(unlockIcon(cual), (u16) (((40 - len) / 2) + len + 1), META_HEADLINE_ROW);
+            Sfx_playLetterPickup();   // provisional: el sonido de recoger algo
+        }
+
+        // Y abajo, hacia donde va la barra ahora (peticion del usuario:
+        // "anade next <siguiente unlockable> y los puntos restantes").
+        {
+            u32 desde, hasta;
+            u8 seg;
+
+            metaSegment(metaTotal, &desde, &hasta, &seg);
+            if (hasta == 0)
+                VDP_drawText("ALL UNLOCKED", SUMMARY_COL, META_NEXT_ROW);
+            else
+            {
+                int len = sprintf(buf, "NEXT %s", unlocks[seg].nombre);
+
+                VDP_drawText(buf, SUMMARY_COL, META_NEXT_ROW);
+                drawIcon(unlockIcon(seg), (u16) (SUMMARY_COL + len + 1), META_NEXT_ROW);
+                len = sprintf(buf, "%lu", (u32) (hasta - metaTotal));
+                VDP_drawText(buf, (u16) (GAMEOVER_SCORE_RIGHT - len + 1), META_NEXT_ROW);
+            }
+        }
+    }
+
+    {
+        const int len = sprintf(buf, "%lu", barShown);
+
+        VDP_drawText("          ", (u16) (GAMEOVER_SCORE_RIGHT - 9), META_LABEL_ROW);
+        VDP_drawText(buf, (u16) (GAMEOVER_SCORE_RIGHT - len + 1), META_LABEL_ROW);
+    }
+
+    // Un tic por tesela ganada (peticion del usuario), con el tono subiendo:
+    // asi se OYE llenarse, y no es un clic suelto cada cuatro frames.
+    {
+        const u16 llenas = metaBarFilled(barShown, META_BAR_W);
+
+        if (llenas != barFilledShown)
+        {
+            barFilledShown = llenas;
+            Sfx_playBarTick((u8) llenas);
+        }
+        Maze_drawProgressBar(META_BAR_COL, META_BAR_ROW, META_BAR_W, llenas);
+    }
 }
 
 static void summaryStep(void)
@@ -2219,7 +2664,10 @@ static void summaryStep(void)
         return;        // el marcador espera a que acabe el texto
 
     if (goSettled)
+    {
+        metaBarStep();   // y la barra espera a que acabe el marcador
         return;
+    }
 
     if (goShown != goTarget)
     {
@@ -2612,81 +3060,153 @@ static void drawCollection(void)
     collDrawName();
 }
 
-// ---------------------------------------------------------------------
-// LA PAGINA DE GALAXIAS (peticion del usuario: "un menu que se activa
-// pulsando C y que tiene todos los nombres de las galaxias, misma estructura
-// que la coleccion de plantas"). Misma forma que aquella: titulo, lista con
-// cursor y una linea de ayuda abajo. Con ocho entradas no hay que desplazar
-// nada, asi que no lleva el tejemaneje de ventana que si necesita la
-// coleccion con sus 2565 plantas.
+// --- EL TALLER (la pantalla del progreso) ---------------------------------
 //
-// Lo que cuenta de cada galaxia va EN TEXTO y no en color: cuantos de sus
-// ocho planetas estan terminados, y cual es la que se esta jugando.
-// ---------------------------------------------------------------------
-#define GAL_TITLE_ROW 3
-#define GAL_FIRST_ROW 7
-#define GAL_PITCH     2
-#define GAL_X         8
-#define GAL_HINT_ROW  25
+// Donde se ve la barra fuera de una partida y donde se elige lo desbloqueado
+// (decision del usuario: "lo eliges en una pantalla nueva"). Se entra con C
+// desde la lista de galaxias -- en el menu los ocho botones ya estan dados --
+// y se sale con B.
+#define UPG_TITLE_ROW    3
+#define UPG_TOTAL_ROW    5
+#define UPG_BAR_ROW      7
+#define UPG_NEXT_ROW     9
+#define UPG_GALAXY_ROW  11
+#define UPG_PALETTE_ROW 13
+#define UPG_PILOT_ROW   15
+#define UPG_WORN_ROW    17
+#define UPG_LIST_ROW    19
+#define UPG_HINT_ROW    25
+#define UPG_COL          3   // la tira de paletas es ancha: el margen va justo
+#define UPG_ICON_COL    37   // los iconos ocupan 2x2 teselas: la fila de debajo va libre
+#define UPG_BAR_W       28
 
-static u8 galCursor;
+static u8 upgRow;      // 0 = paleta, 1 = piloto
+static u8 upgPalSel, upgPilSel;
 
-static void galDrawRow(u8 i, bool conCursor)
+// La paleta tuya siguiente (o anterior) a `desde`, dando la vuelta a la lista
+// entera del juego: el cursor solo se para en las que tienes.
+static u8 upgNextPalette(u8 desde, s8 paso)
 {
-    char buf[40];
-    char nombre[20];
-    const u8 hechos = galaxyDoneCount(i);
-    const u16 y = (u16) (GAL_FIRST_ROW + (i * GAL_PITCH));
-    int len;
+    u8 i, n = desde;
 
-    pickGalaxyName(i, nombre);
+    for (i = 0; i < MAZE_PALETTES; i++)
+    {
+        n = (u8) ((n + MAZE_PALETTES + paso) % MAZE_PALETTES);
+        if (paletaOwned(n))
+            return n;
+    }
 
-    // El estado en palabras: "COMPLETA" cuando estan los ocho, y "AQUI" la que
-    // se esta jugando ahora. Nada de esto se fia del color.
-    if (hechos >= SIZE_PRESET_COUNT)
-        len = sprintf(buf, "%c %-8s %d DE %d  COMPLETA", conCursor ? 16 : ' ',
-                      nombre, hechos, SIZE_PRESET_COUNT);
-    else if (i == curGalaxy)
-        len = sprintf(buf, "%c %-8s %d DE %d  AQUI", conCursor ? 16 : ' ',
-                      nombre, hechos, SIZE_PRESET_COUNT);
-    else
-        len = sprintf(buf, "%c %-8s %d DE %d", conCursor ? 16 : ' ',
-                      nombre, hechos, SIZE_PRESET_COUNT);
-
-    // Se rellena hasta el ancho fijo para borrar lo que hubiera antes.
-    while (len < 30)
-        buf[len++] = ' ';
-    buf[len] = '\0';
-
-    VDP_drawText(buf, GAL_X, y);
+    return desde;
 }
 
-static void drawGalaxies(void)
+// Lo mismo para una lista con mascara (los pilotos).
+static u8 upgNextOwned(u8 mask, u8 count, u8 desde, s8 paso)
 {
-    const u8 n = Levels_galaxyCount(levels);
-    u8 i;
+    u8 i, n = desde;
+
+    for (i = 0; i < count; i++)
+    {
+        n = (u8) ((n + count + paso) % count);
+        if (mask & (1u << n))
+            return n;
+    }
+
+    return desde;
+}
+
+static void drawUpgrades(void)
+{
+    char buf[42];
+    u32 desde, hasta;
+    u8 seg, i;
 
     VDP_clearPlane(BG_A, TRUE);
     VDP_setTextPalette(PAL0);
-    VDP_drawText("GALAXIAS", (40 - 8) / 2, GAL_TITLE_ROW);
+    VDP_drawText("WORKSHOP", (40 - 8) / 2, UPG_TITLE_ROW);
 
-    for (i = 0; i < n; i++)
-        galDrawRow(i, i == galCursor);
+    sprintf(buf, "PROGRESS %lu", metaTotal);
+    VDP_drawText(buf, UPG_COL, UPG_TOTAL_ROW);
+    Maze_drawProgressBar(UPG_COL, UPG_BAR_ROW, UPG_BAR_W,
+                          metaBarFilled(metaTotal, UPG_BAR_W));
 
-    VDP_drawText("A VIAJAR   B VOLVER", (40 - 19) / 2, GAL_HINT_ROW);
+    metaSegment(metaTotal, &desde, &hasta, &seg);
+    if (hasta == 0)
+        VDP_drawText("ALL UNLOCKED", UPG_COL, UPG_NEXT_ROW);
+    else
+    {
+        sprintf(buf, "NEXT %s  %lu TO GO", unlocks[seg].nombre,
+                (u32) (hasta - metaTotal));
+        VDP_drawText(buf, UPG_COL, UPG_NEXT_ROW);
+    }
+
+    // De donde sale todo esto: los planetas que llevas limpios aqui.
+    sprintf(buf, "GALAXY %u   %u OF %u PLANETS DONE", (u16) (curGalaxy + 1),
+            (u16) galaxyDoneCount(curGalaxy), (u16) SIZE_PRESET_COUNT);
+    VDP_drawText(buf, UPG_COL, UPG_GALAXY_ROW);
+
+    // Las dos filas que se pueden cambiar. El cursor es un caracter, no un
+    // color: tiene que leerse sin distinguir tonos.
+    // La tira: una casilla por paleta del juego, '#' la que tienes y '.' la
+    // que no, con la que estas mirando entre corchetes. Asi se ve de un golpe
+    // cuantas llevas de las doce sin tener que recorrerlas, y se lee sin
+    // distinguir colores.
+    {
+        char tira[MAZE_PALETTES + 3];
+        u8 j, k = 0;
+
+        for (j = 0; j < MAZE_PALETTES; j++)
+        {
+            if (j == upgPalSel)
+                tira[k++] = '[';
+            tira[k++] = paletaOwned(j) ? '#' : '.';
+            if (j == upgPalSel)
+                tira[k++] = ']';
+        }
+        tira[k] = '\0';
+
+        sprintf(buf, "%c PALETTE %-8s %s", (upgRow == 0) ? '>' : ' ',
+                Maze_paletteName(upgPalSel), tira);
+    }
+    VDP_drawText(buf, UPG_COL, UPG_PALETTE_ROW);
+    drawIcon(ICON_PALETA, UPG_ICON_COL, UPG_PALETTE_ROW);
+    sprintf(buf, "%c PILOT   %-8s", (upgRow == 1) ? '>' : ' ', pilotoNombre[upgPilSel]);
+    VDP_drawText(buf, UPG_COL, UPG_PILOT_ROW);
+    drawIcon(ICON_PILOTO, UPG_ICON_COL, UPG_PILOT_ROW);
+
+    // Lo que llevas puesto, para que el cursor sobre una opcion que no has
+    // equipado no engane.
+    sprintf(buf, "WORN  %s / %s", Maze_paletteName(paletaWorn), pilotoNombre[pilotoWorn]);
+    VDP_drawText(buf, UPG_COL, UPG_WORN_ROW);
+
+    for (i = 0; i < UNLOCK_COUNT; i++)
+    {
+        const u16 fila = (u16) (UPG_LIST_ROW + (i * 2));
+        const bool tengo = (unlocks[i].tipo == UNLOCK_PALETA)
+                           ? paletaOwned(unlocks[i].indice)
+                           : (((pilotoOwned >> unlocks[i].indice) & 1) != 0);
+
+        drawIcon(unlockIcon(i), UPG_COL, fila);
+        sprintf(buf, "%-8s %9lu  %s", unlocks[i].nombre, unlocks[i].umbral,
+                tengo ? "OWNED" : "LOCKED");
+        VDP_drawText(buf, (u16) (UPG_COL + 3), fila);
+    }
+
+    VDP_drawText("A EQUIP   B BACK", (40 - 16) / 2, UPG_HINT_ROW);
 }
 
-static void enterGalaxies(void)
+static void enterUpgrades(void)
 {
-    gameState = STATE_GALAXIES;
+    gameState = STATE_UPGRADES;
     screenAlternateTimer = 0;
-    galCursor = curGalaxy;
+    upgRow = 0;
+    upgPalSel = paletaWorn;
+    upgPilSel = pilotoWorn;
     Menu_setVisible(FALSE);
     flushSprites();
-    drawGalaxies();
+    drawUpgrades();
 }
 
-static void leaveGalaxies(void)
+static void leaveUpgrades(void)
 {
     bool completed[SIZE_PRESET_COUNT];
 
@@ -3039,6 +3559,30 @@ static u8 galaxyDoneCount(u8 galaxia)
             n++;
 
     return n;
+}
+
+// QUIEN TIENE QUE PALETA. AUTO es gratis. La de cada planeta se gana
+// LIMPIANDO ese planeta -- sus colores son el recuerdo de haberlo hecho, y no
+// hace falta guardar nada nuevo: galaxyDone ya lo sabe, y es lo unico que
+// sobrevive a cambiar de galaxia. Las tres ultimas se ganan con la barra.
+static bool paletaOwned(u8 idx)
+{
+    if (idx == MAZE_PAL_AUTO)
+        return TRUE;
+
+    if (idx <= SIZE_PRESET_COUNT)
+    {
+        const u8 p = (u8) (idx - 1);
+        u8 g;
+
+        for (g = 0; g < GALAXY_SAVE_MAX; g++)
+            if ((galaxyDone[g] >> p) & 1)
+                return TRUE;
+
+        return FALSE;
+    }
+
+    return ((paletaEarned >> idx) & 1) != 0;
 }
 
 // Apunta de paso lo que encuentra: un planeta que acaba de terminarse queda
@@ -4896,6 +5440,7 @@ int main(bool hardReset)
     GuideMap_loadGraphics();
     Menu_loadGraphics(); // spec §31 -- must come after both above, its tiles stack right after theirs in VRAM
     Plants_loadGraphics(); // detras del menu y de la fuente del HUD en VRAM
+    iconsLoad();           // y los iconos de los desbloqueables detras de todo
     Sfx_loadDriver(); // spec §47/§49 -- PCM4 driver for the kick and plant hi-hat, independent of VRAM layout
 
     PAL_setPalette(PAL1, playerShip.palette->data, DMA);
@@ -5011,36 +5556,48 @@ int main(bool hardReset)
             else if (++screenAlternateTimer >= SCREEN_ALTERNATE_FRAMES)
                 leaveScoreTable(); // its turn is over, hand back to the menu
         }
-        else if (gameState == STATE_GALAXIES)
+        else if (gameState == STATE_UPGRADES)
         {
-            // ARRIBA/ABAJO mueve el cursor, A viaja a esa galaxia y B vuelve.
-            const u8 n = Levels_galaxyCount(levels);
-            const u8 antes = galCursor;
+            const u8 antesRow = upgRow, antesPal = upgPalSel, antesPil = upgPilSel;
 
             if ((state & BUTTON_UP) && !(prevState & BUTTON_UP))
-                galCursor = (u8) ((galCursor + n - 1) % n);
+                upgRow = 0;
             if ((state & BUTTON_DOWN) && !(prevState & BUTTON_DOWN))
-                galCursor = (u8) ((galCursor + 1) % n);
+                upgRow = 1;
 
-            if (galCursor != antes)
+            // Izquierda y derecha pasan por lo desbloqueado de esa fila.
+            if ((state & BUTTON_LEFT) && !(prevState & BUTTON_LEFT))
             {
-                galDrawRow(antes, FALSE);
-                galDrawRow(galCursor, TRUE);
+                if (upgRow == 0)
+                    upgPalSel = upgNextPalette(upgPalSel, -1);
+                else
+                    upgPilSel = upgNextOwned(pilotoOwned, PILOTO_COUNT, upgPilSel, -1);
+            }
+            if ((state & BUTTON_RIGHT) && !(prevState & BUTTON_RIGHT))
+            {
+                if (upgRow == 0)
+                    upgPalSel = upgNextPalette(upgPalSel, 1);
+                else
+                    upgPilSel = upgNextOwned(pilotoOwned, PILOTO_COUNT, upgPilSel, 1);
             }
 
-            if ((state & BUTTON_B) && !(prevState & BUTTON_B))
-                leaveGalaxies();
-            else if ((state & BUTTON_A) && !(prevState & BUTTON_A))
+            if ((state & BUTTON_A) && !(prevState & BUTTON_A))
             {
-                const u8 destino = galCursor;
-
-                leaveGalaxies();
-                // El barrido de los planetas necesita el menu puesto, asi que
-                // el viaje va DESPUES de volver a el. Hacia donde se van es
-                // hacia donde esta el destino en la lista.
-                if (destino != curGalaxy)
-                    switchGalaxy(destino, (destino > curGalaxy) ? 1 : -1);
+                paletaWorn = upgPalSel;
+                pilotoWorn = upgPilSel;
+                // EFECTIVA (peticion del usuario): Maze_setPalette manda sobre
+                // el planeta en todas las salas de aqui en adelante, y el
+                // repintado de abajo la ensena ya, sin esperar a entrar en
+                // una -- la barra de esta pantalla esta hecha con las teselas
+                // de muro y suelo, asi que se ve en el acto.
+                Maze_setPalette(paletaWorn);
+                Maze_setPlanetTint(sizePresetIndex);
+                drawUpgrades();
             }
+            else if ((state & BUTTON_B) && !(prevState & BUTTON_B))
+                leaveUpgrades();
+            else if ((upgRow != antesRow) || (upgPalSel != antesPal) || (upgPilSel != antesPil))
+                drawUpgrades();
         }
         else if (gameState == STATE_COLLECTION)
         {
@@ -5175,11 +5732,12 @@ int main(bool hardReset)
                 !(state & (BUTTON_A | BUTTON_C)))
                 enterCollection();
 
-            // C abre la lista de galaxias (peticion del usuario). Igual que
-            // la B de la coleccion, sola: con A o B es parte de un acorde.
+            // C abre el taller (peticion del usuario: "haz que al taller se
+            // acceda con la C. No quiero la pantalla de los planetas"). Igual
+            // que la B de la coleccion, sola: con A o B es parte de un acorde.
             if ((state & BUTTON_C) && !(prevState & BUTTON_C) &&
                 !(state & (BUTTON_A | BUTTON_B)))
-                enterGalaxies();
+                enterUpgrades();
 
             // Sound toggle (spec §47, user request: "activable desde el menu y
             // por defecto apagado"). Estaba en C, que ahora abre las galaxias;
@@ -5764,6 +6322,10 @@ int main(bool hardReset)
 
                             if (!e->alive || !Enemy_overlapsBox(e, player.x, player.y))
                                 continue;
+                            // Con el margen de gracia puesto, el peligroso no
+                            // mata ni empuja: la nave le pasa por encima.
+                            if ((e->state == ENEMY_DANGEROUS) && (reviveGrace > 0))
+                                continue;
 
                             triggerShake(slideDistance); // user request: shake on hitting an enemy too, either outcome
 
@@ -5879,6 +6441,14 @@ int main(bool hardReset)
             if (!mapViewOpen)
             {
                 tombMoving = (player.x != frameStartX) || (player.y != frameStartY);
+
+                if (reviveGrace > 0)
+                {
+                    if (--reviveGrace == 0)
+                        SPR_setVisibility(playerSprite, VISIBLE);
+                    else
+                        SPR_setVisibility(playerSprite, (reviveGrace & 4) ? HIDDEN : VISIBLE);
+                }
 
                 // El reloj del planeta, lo unico que le queda al score
                 // aparte de los recuentos: se para para siempre al cumplir
