@@ -3939,3 +3939,288 @@ por el §52 (bancos de caché por planeta, `scanPlanetPlantTotal`).
   pausa breve (con "CARGANDO..."), que la segunda vez que entras al
   MISMO planeta ya no la hay, y que planetas distintos en el mismo
   arranque usan semillas distintas entre sí.
+
+## 56. Fuera las letras: el objetivo del planeta son sus plantas
+
+Petición del usuario: "quita las letras y quita las letras del hud" /
+"plantas en el hud va en el lugar de las letras (ya sacadas)". Deja sin
+efecto, para la rama `backto16`, todo lo que los §13, §16, §17, §20,
+§21, §33, §34, §35 y §38 decían de las letras A-E.
+
+- **Borrado**: `src/items.c` e `inc/items.h` enteros, el sprite del
+  icono de objeto (`itemIconSprite` y `updateItemIcon`), el rastreador
+  de letras del HUD, el dibujo de la letra en la sala, el faro de salas
+  de letra del mapa guía (§20/§21) y la línea `LETTERS` de la pantalla
+  de fase completada.
+- **Lo que hereda la planta**: abrir las puertas de una sala
+  (`roomFullyCleared` ya solo mira `Plants_allCollectedInRoom`), parar
+  el reloj del planeta, encender "BACK TO SPACE", disparar la pantalla
+  de fase completada, marcar el planeta como terminado en el menú y
+  alimentar el porcentaje de desbloqueo del siguiente planeta. Las
+  cuatro cosas piden además `plantsTotal > 0`: un total sin contar
+  todavía no es un planeta ya limpio.
+- **Score**: de cuatro factores a tres (`plantas * enemigos * segundos
+  restantes`). Si el recuento de letras se hubiera quedado, el producto
+  sería cero siempre. Los umbrales de `unlocks[]` van divididos por 5,
+  que es lo que valía ese factor en los planetas grandes
+  (`sizePresets[].letters`); es una regla de tres sobre los números
+  medidos del §anterior, no una medida nueva.
+- **Lo que NO se borra, y por qué**: las posiciones de sala de objeto
+  (`itemCol`/`itemRow` de guidemap) son ESTRUCTURALES -- de la primera
+  sale el enlace de inserción (§29bis) y vienen horneadas en
+  `res/levels.bin` --, así que se quedan tal cual y los niveles no
+  cambian: el horno del anfitrión vuelve a escribir `levels.bin` byte a
+  byte idéntico. También se quedan, sin que nadie los llame,
+  `GuideMap_recomputeLocks`/`GuideMap_isRoomLocked` (hoy ninguna sala
+  sale cerrada), `Maze_setTextColorLocked` y la nave gigante del
+  power-up de la letra C (decisión del usuario: "no lo borres del
+  código pero no aparece más por ahora").
+- **El mapa ya no se gana** (decisión del usuario): A enseña el mapa de
+  verdad desde el primer frame. La pantalla de ruido ("NO MAP SIGNAL")
+  se queda montada y `mapShowingNoise` no se enciende nunca.
+- **HUD**: `Plants_drawHud` se muda de la columna 14 a la 1, el sitio
+  que dejó el rastreador de letras, y es la única fila de HUD que
+  queda.
+- **No verificado interactivamente**: nada de esto se ha jugado en
+  emulador.
+
+## 57. Los puntos del enemigo subiendo, y dos pantallas menos
+
+Tres peticiones del usuario en la misma tanda.
+
+- **"quiero que salgan los puntos que proporciona matar un enemigo, que
+  vaya hacia arriba tipo arcade"**: `killPops[]` en `main.c`, hasta 4 a
+  la vez, cada uno trepando 5 filas a 6 frames por fila (medio segundo).
+  Vive en BG_B, que es el plano que está por encima del laberinto y el
+  único que NO se mueve con el temblor de pantalla (eso sólo hace scroll
+  de BG_A), así que la cifra no tiembla con el golpe que la ha sacado.
+  Texto = teselas, así que sube de 8 en 8 px. Va con la fuente del HUD
+  (`Hud_drawText`) y no con la de SGDK: es la misma cifra que está
+  sumando el marcador de arriba a la derecha, así que va en su letra.
+  - **Cuánto vale un enemigo**: el score es un PRODUCTO, no una suma, así
+    que un enemigo no vale una cantidad fija — vale lo que sube el
+    marcador al contarlo, o sea `plantas * segundos restantes`. Se mide
+    restando `scoreLive()` de antes al de después de
+    `GuideMap_markEnemyKilled`, en vez de llevar una tabla de premios:
+    así sigue siendo correcto si la fórmula cambia.
+  - **Consecuencia conocida**: con cero plantas recogidas el producto es
+    cero, así que el primer enemigo de un planeta enseña un `0`. Es la
+    verdad (todavía no paga nada), pero es la decisión de este punto que
+    más fácil es querer al revés.
+  - Se limpian al cruzar de sala, al volver a la de extracción, al abrir
+    una herramienta de depuración y al salir de `STATE_PLAYING`.
+- **"quita el debug (start) del audio en el menu"**: `soundViewStateOk()`
+  pasa de `MENU || PLAYING` a sólo `PLAYING`. En el menú la START era a
+  la vez el interruptor del sonido y el panel de depuración, y abría las
+  dos cosas de una pulsación. Durante la partida sigue igual.
+- **"quita la página de scores"**: fuera `STATE_SCORES`,
+  `enterScoreTable`/`leaveScoreTable`/`drawScoreTable`, el reloj de
+  relevo (`SCREEN_ALTERNATE_FRAMES`/`screenAlternateTimer`) y
+  `scoreFor()`. Deja sin efecto el §anterior que la había pedido ("haz
+  una tabla high scores que alterne con el menu de los planetas"). El
+  menú ya no se releva con nada: se queda puesto. `scoreValue` sigue
+  guardándose por planeta, que es lo que la barra de progreso necesita
+  para cobrar sólo la mejora.
+- **No verificado interactivamente**: nada de esto se ha jugado en
+  emulador.
+
+## 58. El score suma: cada enemigo vale un precio fijo por especie
+
+Decisión del usuario, después de ver la tabla del §57: "quiero que los
+enemigos tengan un valor fijo y después, al final, en el recuento, se
+suman todos y ya veremos multiplicadores".
+
+Deja sin efecto el score multiplicativo (`plantas * enemigos * segundos`).
+Lo que lo mató fue justo medirlo: con un producto, un enemigo no valía una
+cantidad sino lo que valieran los otros factores en ese instante —de 883 a
+130.665 en el mismo planeta, P7— y con un factor a cero el planeta entero
+no pagaba nada.
+
+- **Precio fijo POR ESPECIE** (`Enemy_points`, tabla en `enemy.c` junto al
+  enum para que no puedan descuadrarse): 100 PATRULLA, 200 TORRETA, 300
+  RONDA, 400 ACECHO, 500 DESLIZA, 600 ESPECTRO. Sube con el enum, que va
+  de lo simple a lo retorcido. Como cuántas especies entran en un planeta
+  lo decide el propio planeta (`enemySpeciesCap[]`), **un planeta grande
+  paga más sin que haya que decírselo**.
+- **La planta paga 10** (`SCORE_PLANT_POINTS`).
+- **`score = puntos de los enemigos muertos + plantas * 10`**, y se
+  pregunta en un solo sitio (`scoreLive`).
+- **El tiempo restante ya no entra en la cuenta**: sigue corriendo y sigue
+  en la pantalla de recuento, pero es el candidato a multiplicador y eso
+  está sin decidir. El día que entre, entra en `scoreLive` y en ningún
+  otro sitio.
+- **`PresetSave.enemyPoints`** (u32) acumula lo cobrado en ese planeta.
+  Viaja en la partida guardada por lo mismo que `plantsCollected`: la
+  máscara de muertos dice CUÁLES cayeron pero no de qué especie era cada
+  uno, y eso sólo lo sabe `Enemy_spawnGroup` — volver a llamarlo para
+  averiguarlo gastaría del `random()` compartido. No se puede farmear: un
+  enemigo no vuelve (`loadRoom` no lo devuelve), así que acumular es
+  correcto.
+- **La pantalla de recuento** pasa a ser una columna de precios: rótulo (8
+  columnas) + recuento (10) + lo que paga, alineado a la derecha en la
+  columna 37, que es donde ahora acaban también el marcador y la barra
+  (`GAMEOVER_SCORE_RIGHT` = `TEXT_RIGHT_MARGIN`, y `META_BAR_W` sube de 19
+  a 27). Las dos líneas que no pagan —TIME, el multiplicador sin decidir,
+  y TRIES, que no es del trato— se quedan sin cifra de puntos: más claro
+  que un cero.
+- **El marcador del HUD ya no va con retraso.** Tenía un acelerador de 16
+  frames porque `scoreLive()` recorría el mapa entero contando muertos;
+  ahora son dos lecturas, así que se pregunta cada frame y el marcador se
+  mueve a la vez que el cartelito que sube. Lo que evita repintar de balde
+  es la comparación con el valor anterior.
+- **Los umbrales de desbloqueo, rehechos y ya no geométricos.** Medido
+  sobre el reparto real de los 64 planetas horneados, un planeta limpio
+  paga: P0 390, P1 4.770, P2 13.300, P3 12.950, P4 27.600, P5 49.710, P6
+  52.560, P7 63.710 — cada uno entre una y dos veces el anterior, no
+  entre cuatro y diez. Acumulado en el orden en que se abren: ~31.000 tras
+  los cuatro pequeños, ~59.000 con P4, ~109.000 con P5, ~161.000 con P6 y
+  ~225.000 la galaxia entera. De ahí los tres escalones a pasos parejos:
+  **30.000 PHOSPHOR / 100.000 NEON / 200.000 MONO**, tres en una galaxia
+  completa.
+- **No verificado interactivamente**: nada de esto se ha jugado en
+  emulador.
+
+## 59. WELCOME, y dos cosas que se hicieron y se revirtieron
+
+Cuatro peticiones del usuario en la misma tanda. **Dos se revirtieron a
+petición suya el mismo rato, sin llegar a jugarse** ("revierte esto último
+que pedí. No me gusta"): quedan apuntadas abajo con lo que se aprendió
+haciéndolas, que es lo único que sobrevive.
+
+### La primera pantalla (HECHO)
+
+"la primera pantalla que sea welcome, press any button to start". Fuera la
+terminal del enlace subespacial (OVNI-TERM MK.VII / SUBSPACE LINK /
+OFFLINE, seis líneas de jerga) y con ella el margen de un quinto por lado
+que necesitaba para partir sus frases: dos líneas centradas en las 40
+columnas, filas 12 y 16, escritas solas y en silencio como antes.
+
+### Una sola pantalla al morir (REVERTIDO)
+
+Se pidió "que sea game over ya en la pantalla de you are dead, solo quiero
+una pantalla, con las siluetas", se hizo y se revirtió. Siguen siendo dos:
+`deathFreeze` (frenazo, golpe de pantalla, fundido a negro, las dos
+siluetas en blanco y "YOU ARE DEAD") y detrás `gameOverBegin`, que limpia
+el plano, escribe "GAME OVER" y arranca el jazz.
+
+Cómo se hizo, por si vuelve: `deathFreeze` dejaba la pantalla montada en vez
+de desmontarla al acabar su espera, su antiguo final se movía a un
+`deathScreenTeardown()` llamado al cerrarla con A, y `gameOverBegin` se
+quedaba sin dibujar nada. Lo delicado es que **el laberinto sigue en BG_A
+debajo, invisible sólo porque su paleta está a negro**: mientras esa pantalla
+viva, nadie puede tocar PAL0.
+
+### La música de esa pantalla (REVERTIDO, y un bug que sigue ahí)
+
+Se pidió que lo único que pasara fuese bajar la música al 50%. Revertido con
+la pantalla: vuelven el jazz y el arrastre de tempo del fundido.
+
+**Dos cosas que quedan en pie:**
+
+1. **BUG CONOCIDO, sin arreglar.** `Sfx_jazzGameOver` pausa la canción y
+   reprograma sus cinco voces FM, lo que marca el FM como sucio (`fmDirty`
+   en sfx.c). Consecuencia: **volver a morir y reentrar al mismo planeta
+   reinicia la canción** en vez de seguir por donde iba, que es justo lo que
+   `musicPause` existía para conseguir. Quitar el jazz lo arreglaba de
+   paso; con el jazz puesto, sigue roto.
+2. **El volumen de música pide XGM2, y migrar está bloqueado por los
+   assets.** El XGM1 no tiene volumen de ninguna clase, ni maestro ni por
+   canal, y bajar los registros del YM a mano no aguanta porque la propia
+   canción los reescribe al tocar. El XGM2 sí (`XGM2_setFMVolume` /
+   `setPSGVolume`, 0..100). La migración se hizo entera y compila --- la capa
+   de audio queda más simple, porque el XGM2 no necesita tabla de ids para
+   las muestras --- pero se revirtió por esto:
+
+   > **El XGM2 sólo come `.vgm` y la música del juego sólo existe como
+   > `.xgm`.** `xgmtool X.xgm X.vgm` va hacia atrás, pero **pierde todas las
+   > muestras**: medido, `house1.xgm` lleva 31.744 B de bloque de muestras y
+   > el `.xgm` resultante de ir y volver lleva 0. Esas muestras son la
+   > PERCUSIÓN de los temas (los VGM originales hacen la batería escribiendo
+   > el DAC registro a registro, y xgmtool la extrae a su banco al convertir
+   > a XGM1). Con los `.vgm` de vuelta, las canciones pasan de ~45 KB a 1,5
+   > KB y se quedan en FM y PSG: house sin batería. El síntoma que lo delata
+   > es que el dato de música se vuelve diminuto y la ROM cae a la mitad.
+   >
+   > Para migrar hace falta el `.vgm` ORIGINAL de cada una de las siete. En
+   > el repo sólo quedan dos `.vgz` (`HOUSE_1992_6260.vgz`, `chop.vgz`) y
+   > duran 192 y 307 s, no los 128 y 43 de las pistas horneadas.
+   >
+   > Lo que sí queda escrito: `tools/vgm_loop.py`, que le devuelve
+   > el punto de bucle a un `.vgm` (la vuelta atrás también lo pierde).
+   > Hará falta el día que aparezcan los VGM.
+
+   Y un aviso de taller: al cambiar `resources.res` entre XGM y XGM2, **make
+   no rehace nada y no avisa** (la trampa de las deps viejas). Hay que borrar
+   `out/release/res` y `out/release/_deps`.
+
+### La órbita del menú (REVERTIDO)
+
+Se pidió que en la animación permanente sólo aparecieran los planetas
+desbloqueados, y los no completados sólo con el cursor. Se implementó como
+"se ve el limpio, y aparte el que tenga el cursor encima" --- lo que dejaba
+la órbita casi vacía al empezar una partida, con un planeta y el sol --- y se
+revirtió: `src/menu.c` vuelve a HEAD y los ocho orbitan siempre.
+
+- **No verificado interactivamente**: la pantalla de WELCOME, que es lo único
+  que queda de este punto, no se ha jugado en emulador.
+
+## 60. El cartelito de puntos a sprites, y la pantalla de muerte otra vez en una
+
+Dos peticiones del usuario, la segunda una versión afinada de algo que el
+§59 había hecho y revertido.
+
+### "la animación de los puntos de los enemigos tiene que ser más fluida"
+
+El cartelito que sube del enemigo muerto era TEXTO DE FONDO (BG_B), y un
+texto son teselas: sólo podía moverse de 8 en 8 px, a 6 frames por salto.
+Ahora va en **sprites**, que se colocan al píxel.
+
+- Los dígitos no son arte nuevo: `tools/killpop_digits.py` los **recorta de
+  `res/sprite/font_hud.png`** a `res/sprite/killpop_digits.png` (11 celdas
+  de 8x8: `0..9` y el punto del separador, un fotograma por celda). Así la
+  cifra que sube y el marcador de arriba a la derecha son la misma letra, y
+  si cambia la fuente se vuelve a correr el script.
+- `KILLPOP_MAX * KILLPOP_GLYPHS` = 4x5 = **20 sprites**, reservados al
+  arrancar y escondidos. Es justo el tope de sprites por línea de rastreo
+  del VDP, que sólo se alcanzaría con cuatro cartelitos de cinco cifras a la
+  misma altura: no llega a pasar (los valores son de tres cifras y los
+  atropellos van de uno en uno), pero es el techo. Si alguno no cabe en la
+  VRAM de sprites, `killPopReady` queda en FALSE y el cartelito se calla en
+  vez de escribir sobre un puntero nulo.
+- **La subida: 32 px en 40 frames, frenando** (la parábola
+  `t*(2T-t)/T²`). Medido sobre la curva: se mueve en 27 de los 40 frames y
+  nunca salta más de 2 px. Subir más píxeles en menos frames es lo que hace
+  que la mayoría de los frames tengan movimiento — con 24 px en 48 se
+  quedaba quieta la mitad del tiempo.
+- Sale **donde cayó el enemigo**, sin corregir la altura, y deja de subir al
+  llegar al borde de la sala: arriba vive el HUD y una cifra blanca sobre el
+  marcador se lee como parte de él.
+
+### "pon game over directamente y ya está. solo una pantalla"
+
+Lo mismo que el §59 hizo y se revirtió, pero con la pieza que faltaba:
+**"¿puedes hacer el fundido al mismo color que la pantalla de game over?"**.
+Ahí estaba el problema de la versión anterior — el fundido de la muerte
+acababa en **negro** y el game over se escribía sobre el **fondo del juego**
+(`MAZE_BG_COLOR`, el azul oscuro de la entrada 0 de PAL0), así que al pasar
+de una a otra había un salto de color. Fundiendo a ese mismo fondo no hay
+salto, y entonces lo que queda al acabar el fundido **ya es** el game over.
+
+- El objetivo del fundido pasa de `0` (negro) a `fadeBackdrop()`, que lee la
+  entrada 0 de PAL0 en vez de llevar el color escrito.
+- `deathFreeze` dice **GAME OVER**, y al acabar el fundido **limpia los dos
+  planos** (con todo del color del fondo eso no se ve) y escribe la palabra.
+  Limpiar BG_A quita de en medio la fragilidad de la versión anterior, que
+  dejaba el laberinto escondido debajo esperando a que alguien tocara PAL0.
+- Las siluetas se quedan. Lo desmonta `deathScreenTeardown()`, llamado al
+  cerrar la pantalla con A, camino del menú.
+- `gameOverBegin` ya no dibuja: sólo arranca el jazz (que se queda, al
+  contrario que en el §59) y apaga el marcador y la barra.
+- `DEATH_HOLD_FRAMES` baja de 100 a 40 frames. Ya no es el rato que duraba
+  un mensaje antes de dar paso a otra pantalla, sino lo justo para que el
+  botón que todavía está pulsado en el instante del choque no salte el game
+  over.
+- **Sigue en pie el bug del §59**: el jazz reprograma las voces FM de la
+  canción y eso marca el FM como sucio, así que volver al mismo planeta
+  reinicia la canción en vez de seguir por donde iba.
+- **No verificado interactivamente**: nada de esto se ha jugado en emulador.

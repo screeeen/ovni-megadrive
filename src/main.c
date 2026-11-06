@@ -3,7 +3,6 @@
 #include "maze.h"
 #include "player.h"
 #include "guidemap.h"
-#include "items.h"
 #include "menu.h"
 #include "hud.h"
 #include "enemy.h"
@@ -40,17 +39,16 @@
 // tecnica: hasta la primera pulsacion real el random() de SGDK no esta
 // sembrado (spec 54), y de el salen el nombre de la galaxia y la semilla
 // con la que se elige el planeta horneado de cada preset.
-// STATE_SCORES is the high-score table, which the menu alternates with on
-// its own (user request: "haz una tabla high scores que alterne con el
-// menu de los planetas"). Added at the end so the debug view's own
-// stateNames[] keeps lining up with the values before it.
 // STATE_REWARD (prueba del usuario: "cuando llegue al final del planeta ...
 // simplemente sale una pantalla informativa de recompensa con los stats y
 // vuelve al menu") -- salta sola en cuanto caen la ultima letra y la ultima
 // planta, sin tener que volver andando a la sala de extraccion, y de ahi al
 // menu con A. Es la misma pantalla del game over con otro titulo, asi que
 // comparte el contador de score que baja (summaryStep).
-typedef enum { STATE_INTRO, STATE_MENU, STATE_PLAYING, STATE_GAMEOVER, STATE_SCORES,
+// Aqui vivia STATE_SCORES, la tabla de high scores con la que el menu
+// alternaba solo; fuera a peticion del usuario ("quita la pagina de
+// scores"), y con ella su reloj de relevo.
+typedef enum { STATE_INTRO, STATE_MENU, STATE_PLAYING, STATE_GAMEOVER,
                STATE_COLLECTION, STATE_REWARD, STATE_UPGRADES } GameState;
 
 // The ship slides in a straight line until a wall stops it, turning only
@@ -149,9 +147,11 @@ typedef struct { const char *const *map; u8 cols, rows, letters, roomW, roomH, v
 
 // 4 new smaller/shorter phases (spec §33, user request: "fases mas
 // pequeñas, con 1,2,3,4 letras y grids mas pequeñas") ahead of the
-// original 3 (always 5 letters, spec §0/§32bis) -- letters is the new
-// per-preset item count (guidemap.h's itemCount, no longer a fixed
-// ITEM_COUNT=5 for every game). Fuzz-tested (host-side, 20000 seeds per
+// original 3 (always 5 letters, spec §0/§32bis). `letters` ya no lo lee
+// nadie aqui -- las letras no existen (peticion del usuario) y quien
+// horneo los niveles tiene su propia copia (tools/levelgen) --, pero se
+// queda: es parte de la forma con la que se tallo cada planeta.
+// Fuzz-tested (host-side, 20000 seeds per
 // preset) via a full simulated playthrough of each -- see spec §33.
 //
 // Index 0, { 1, 1, 1 }, is a dedicated tombo test planet (user request:
@@ -270,7 +270,6 @@ _Static_assert(sizeof enemySpeciesCap == SIZE_PRESET_COUNT, "enemySpeciesCap nec
 static Player player;
 static Sprite *playerSprite;
 static Sprite *mapShipSprite;
-static Sprite *itemIconSprite;   // el icono 16x16 del objeto de esta sala, ver updateItemIcon
 static Enemy enemies[ENEMIES_MAX];
 static Sprite *enemySprites[ENEMIES_MAX];
 // Que fotograma lleva puesto cada uno: SPR_setFrame resube sus teselas, asi
@@ -290,26 +289,22 @@ static u8 idleStep = 0;
 static u8 idleTick = 0;
 
 // LA NAVE GIGANTE (peticion del usuario: "si coge la letra C se convierte en
-// sprite gigante"). Es el primer power-up: con la C en el bolsillo la nave
-// pasa a dibujarse con el arte de 32x32 en vez del de 16, y como la celda --
-// y con ella la caja de colision -- sigue midiendo 16, el dibujo sobresale 8
-// px por lado y hay que descentrarlo (shipDrawOffset). Nada del juego se
-// entera: player.c mide contra MAZE_TILE_PX, no contra el sprite.
+// sprite gigante"). La nave pasa a dibujarse con el arte de 32x32 en vez del
+// de 16, y como la celda -- y con ella la caja de colision -- sigue midiendo
+// 16, el dibujo sobresale 8 px por lado y hay que descentrarlo
+// (shipDrawOffset). Nada del juego se entera: player.c mide contra
+// MAZE_TILE_PX, no contra el sprite.
 //
-// Las letras se recogen en orden (items.c: la N esta cerrada hasta tener la
-// N-1), asi que tener 3 o mas es exactamente tener la C. Por eso el power-up
-// sobrevive a salir al menu y volver: el recuento viaja en la partida
-// guardada y no hace falta un bit propio.
-#define BIG_SHIP_LETTER 3
-
+// HOY NADIE LA ENCIENDE: colgaba de la letra C y las letras ya no existen
+// (decision del usuario: "no lo borres del codigo pero no aparece mas por
+// ahora"). El arte, el descentrado y setShipArt se quedan enteros; devolverla
+// es volver a poner esta bandera a TRUE donde se gane.
 static bool bigShip = FALSE;
 static s16 shipDrawOffset = 0;
 
 static void setShipArt(void)
 {
     u8 i;
-
-    bigShip = (Items_collectedCount() >= BIG_SHIP_LETTER);
 
     // SPR_setDefinition realoja la VRAM del sprite el solo.
     if (playerSprite)
@@ -549,10 +544,14 @@ static u8 hitboxMarkCount;
 // White-noise easter egg (user request: "crea una pantalla que sea ruido
 // visual, white noise", folded into the map button per later requests:
 // "la A es como un dispositivo mapa. Cuando el player la coge, pulsando A
-// en lugar de ver ruido ya ve el mapa" -- letter A doubles as the in-
-// fiction "map device", so BUTTON_A shows static instead of the real
-// guide map until the player has actually collected letter A
-// (Items_collectedCount()). Both halves are HELD, not toggled (user
+// en lugar de ver ruido ya ve el mapa" -- la letra A hacia de "dispositivo
+// mapa" y el ruido era la pantalla de antes de tenerlo.
+//
+// EL MAPA YA NO SE GANA (decision del usuario al quitar las letras): A
+// ensena el de verdad desde el primer frame, asi que mapShowingNoise no
+// se enciende nunca y el ruido no vuelve a salir. Todo su camino se queda
+// montado -- es lo unico que hay que tocar para colgarlo de otra cosa.
+// Both halves are HELD, not toggled (user
 // request, first for the static -- "el ruido es mientras esta pulsado A"
 // -- then extended to the real map too -- "el mapa tampoco se activa, si
 // no que se muestra mientras A esta pulsado"): whichever one is showing,
@@ -627,9 +626,11 @@ static u8 unlockedPlanets = PLANETS_AT_START;
 
 // Per-planet saved progress (spec §35, user request: "cada planeta tenga
 // el recuento de sus letras obtenidas... si el player sale de un
-// planeta, esas letras se conservan"). hasSave=FALSE for all until the
-// ship actually leaves a planet mid-run, used to decide whether
-// collectedCount/plantsCollected reflect real progress or read as 0.
+// planeta, esas letras se conservan"). Lo que se conserva ya no son
+// letras sino PLANTAS -- las letras ya no existen (peticion del usuario:
+// "quita las letras") -- y el molde es el mismo. hasSave=FALSE for all
+// until the ship actually leaves a planet mid-run, used to decide whether
+// plantsCollected reflects real progress or reads as 0.
 // mapSeed is the piece that lets a resumed game regenerate the EXACT
 // same map: GuideMap_generate() pulls from the shared random() stream,
 // which (unlike each room's own layout, maze.c's Maze_generateRoom
@@ -637,18 +638,15 @@ static u8 unlockedPlanets = PLANETS_AT_START;
 // from mapSeed automatically -- newGame() does that explicitly, so
 // replaying the same mapSeed reproduces the same room tree/item
 // placement/insertion link deterministically, same idea as maze.c
-// already relies on at the per-room level. collectedCount is enough to
-// restore item state too (Items_fastForward) since collection is always
-// strictly in order (spec §13) -- never a subset.
-// plantsCollected mirrors collectedCount for plants (spec §51,
+// already relies on at the per-room level.
+// plantsCollected es el recuento de plantas (spec §51,
 // Plants_setCollected -- no ordering to replay, just the raw count).
 // plantsTotal/plantsTotalKnown (spec §51, user request: "pintar en el
 // menu un status de cuantas ha recogido el player en cada planeta",
 // which needs a denominator) cache the full-map plant count
-// scanPlanetPlantTotal() computes -- unlike collectedCount/
-// plantsCollected, this isn't something the normal play loop produces
-// for free: a planet's total is NOT a fixed preset constant
-// (sizePresets[].letters is, plants are not), computing it means
+// scanPlanetPlantTotal() computes -- unlike plantsCollected, this isn't
+// something the normal play loop produces for free: a planet's total is
+// NOT a fixed preset constant, computing it means
 // generating every room in the map to see how many plants spec §48's
 // slide-graph placement puts in each one. newGame() computes it exactly
 // once per planet, the first time it's actually entered each boot (spec
@@ -658,9 +656,9 @@ static u8 unlockedPlanets = PLANETS_AT_START;
 // reverted per user request, "prefiero que generes cada planeta al
 // entrar").
 // plantsMask (user report: "94 DE 88 PLANTAS" -- collected exceeding the
-// real total): plantsCollected alone can't resume correctly, since unlike
-// letters a plant has no enforced order, so a raw count can't say WHICH
-// ones are already gone -- see plants.c's Plants_setCollected doc comment
+// real total): plantsCollected alone can't resume correctly, since a
+// plant has no enforced order, so a raw count can't say WHICH ones are
+// already gone -- see plants.c's Plants_setCollected doc comment
 // for the full story. This is the resumed snapshot of plants.c's own
 // collectedMask (Plants_saveMask/restoreMask), taken alongside
 // plantsCollected so a resumed planet remembers exactly which rooms are
@@ -669,13 +667,18 @@ typedef struct
 {
     bool hasSave;
     u16 mapSeed;
-    u8 collectedCount;
     u16 plantsCollected;
+    // Lo cobrado por los enemigos de ESTE planeta, sumado al matarlos (ver
+    // EL SCORE SE SUMA). Viaja en la partida guardada por lo mismo que
+    // plantsCollected: la mascara de muertos dice CUALES cayeron pero no de
+    // que especie era cada uno -- eso solo lo sabe Enemy_spawnGroup, y
+    // volver a llamarlo para averiguarlo gastaria del random() compartido.
+    u32 enemyPoints;
     u16 plantsMask[MAX_MAP_ROWS][MAX_MAP_COLS];
     // Which of each room's enemies are already dead, one bit per index
     // (user request: a planet being resumed keeps "sus enemigos ya
     // desaparecidos"). Nothing else in this struct implies it -- a killed
-    // enemy leaves no trace in the letter or plant counters -- and
+    // enemy leaves no trace in the plant counter -- and
     // GuideMap_generate() wipes the live bits every time a planet is set
     // up, so they have to travel in the save. Was one bool per room back
     // when a room had one enemy; same size either way.
@@ -687,20 +690,13 @@ typedef struct
     u16 visitedMask[MAX_MAP_ROWS];
     u16 plantsTotal;
     bool plantsTotalKnown;
-    // How many letters this planet's map COULD actually place. itemCount
-    // starts at sizePresets[].letters but GuideMap_generate lowers it when
-    // the map has fewer dead-end rooms than that, and with shaped maps
-    // that happens for real. Completion compared against the preset
-    // constant instead, so such a planet could never be finished and the
-    // unlock percentage stalled with it. 0 = not generated yet.
-    u8 lettersActual;
     // Score (user request): one running total per planet, not per visit --
     // leaving for the menu and coming back carries on where it left off,
     // so a planet cannot be farmed by restarting it.
     u32 scoreFrames;  // time spent playing this planet, in frames
     u8  scoreRooms;   // rooms this planet's map really has, what the time budget scales by
     bool scoreDone;   // objectives met: the clock has stopped
-    u32 scoreValue;   // lo cobrado al terminarlo: el producto de la pantalla de fase completada
+    u32 scoreValue;   // lo cobrado al terminarlo: la suma de la pantalla de fase completada
     u16 scoreTries;   // intentos en este planeta, uno por entrada (de momento solo se ensena)
     // Donde se quedo la nave la ultima vez que la mataron en este planeta
     // (peticion del usuario: "cuando muere el player, comienza en la misma
@@ -713,24 +709,33 @@ typedef struct
 } PresetSave;
 static PresetSave presetSave[SIZE_PRESET_COUNT];
 
-// The letter target to judge planet i by: what its map really placed,
-// falling back to the preset until that is known.
 // ---------------------------------------------------------------------
-// EL SCORE SE MULTIPLICA (peticion del usuario: "plantas, letters,
-// enemies, tiempo restante multiplican... el score se recalcula
-// multiplicando estos elementos en pantalla").
+// EL SCORE SE SUMA (decision del usuario: "quiero que los enemigos tengan
+// un valor fijo y despues, al final, en el recuento, se suman todos y ya
+// veremos multiplicadores").
 //
-// Ya no se descuenta de una cifra grande. El planeta da un presupuesto de
-// tiempo y al terminarlo se cobra el producto de los cuatro factores que
-// ensena la pantalla de fase completada:
-//   score = plantas * letras * enemigos * segundos restantes
-// Uno en cero deja el producto en cero: hay que hacerlo todo. Y morir no
-// cobra nada (peticion del usuario: "cuando te matan es game over, no hay
-// recuento"), asi que solo se ingresa al limpiar el planeta.
+// Era un PRODUCTO -- plantas * enemigos * segundos restantes -- y eso tenia
+// dos vicios que se veian en cuanto se puso el cartelito de puntos sobre el
+// enemigo muerto: un enemigo no valia una cantidad, valia lo que valieran
+// los otros factores en ese instante (de 883 a 130.665 en el mismo planeta,
+// medido), y con un factor a cero el planeta entero no pagaba nada.
 //
-// El presupuesto escala con el tamano del planeta, igual que escalaba la
-// cifra de salida: una sala mas son mas plantas y mas enemigos que buscar.
-// Los dos numeros son los mandos de ajuste.
+// Ahora cada cosa trae su precio y el planeta paga la suma:
+//   score = (puntos de los enemigos muertos) + (plantas * SCORE_PLANT_POINTS)
+// Los enemigos no valen todos lo mismo: es fijo POR ESPECIE
+// (Enemy_points, enemy.h), de 100 el patrulla a 600 el espectro.
+//
+// EL TIEMPO TODAVIA NO PAGA. El presupuesto sigue corriendo y sigue en la
+// pantalla de recuento, pero no entra en la cuenta: es el candidato a
+// multiplicador y eso esta sin decidir ("ya veremos multiplicadores"). El
+// dia que entre, entra ahi -- scoreLive es el unico sitio que hay que tocar.
+//
+// Morir no cobra (peticion del usuario: "cuando te matan es game over, no
+// hay recuento"), asi que solo se ingresa al limpiar el planeta.
+//
+// El presupuesto escala con el tamano del planeta: una sala mas son mas
+// plantas y mas enemigos que buscar. Los dos numeros son los mandos.
+#define SCORE_PLANT_POINTS    10   // lo que paga una planta
 #define SCORE_TIME_BASE_SEC   60   // regalo fijo: un planeta de una sala no puede ser imposible
 #define SCORE_TIME_PER_ROOM   30   // y esto por cada sala que tenga el mapa
 
@@ -747,14 +752,6 @@ static u16 scoreTimeLeft(u8 i)
     const u16 gastado = (u16) (presetSave[i].scoreFrames / 60);
 
     return (gastado >= limite) ? 0 : (u16) (limite - gastado);
-}
-
-// Lo cobrado en ese planeta. Los recuentos de plantas, letras y enemigos
-// solo estan vivos para el planeta en curso, asi que el producto se guarda
-// hecho al terminarlo y esto es lo que leen la tabla de records y el menu.
-static u32 scoreFor(u8 i)
-{
-    return presetSave[i].scoreValue;
 }
 
 // Rooms this planet's map really has (after guidemap's own leaf pruning),
@@ -804,13 +801,15 @@ static u16 countDeadEnemies(void)
     return n;
 }
 
-// Lo que vale el planeta en curso AHORA MISMO: los tres recuentos vivos por
-// el tiempo que le queda. Es lo que ensena el HUD mientras se juega y lo que
-// se ingresa al limpiarlo.
+// Lo que vale el planeta en curso AHORA MISMO: lo cobrado por los enemigos
+// mas lo cobrado por las plantas. Es lo que ensena el HUD mientras se juega
+// y lo que se ingresa al limpiarlo. El tiempo restante no entra todavia (ver
+// EL SCORE SE SUMA, arriba): cuando se decida como, se suma o multiplica
+// aqui y en ningun otro sitio.
 static u32 scoreLive(void)
 {
-    return (u32) Plants_collectedCount() * (u32) Items_collectedCount() *
-           (u32) countDeadEnemies() * (u32) scoreTimeLeft(sizePresetIndex);
+    return presetSave[sizePresetIndex].enemyPoints +
+           ((u32) Plants_collectedCount() * SCORE_PLANT_POINTS);
 }
 
 static bool allEnemiesDead(void)
@@ -825,11 +824,6 @@ static bool allEnemiesDead(void)
                 return FALSE;
 
     return TRUE;
-}
-
-static u8 lettersFor(u8 i)
-{
-    return presetSave[i].lettersActual ? presetSave[i].lettersActual : sizePresets[i].letters;
 }
 
 // Esconde los enemigos de golpe: lo piden todas las pantallas que tapan la
@@ -978,7 +972,7 @@ static void positionPlayerEnteringViaDoorDir(u8 doorDir, u8 offset)
 }
 
 // Insertion-room status line, drawn on BG_B row 2 (row 0 is the FPS
-// readout, row 1 is Items_drawHud's letter tracker -- both already
+// readout, row 1 is Plants_drawHud's counter -- both already
 // high-priority so they show over BG_A's maze) -- shown whenever the
 // ship is in the insertion room (spec §34, user request: "distinguir
 // salida incompleta vs completa"). The ship can walk back out through
@@ -1077,8 +1071,9 @@ _Static_assert(MAZE_MAP_SLOTS == SIZE_PRESET_COUNT, "MAZE_MAP_SLOTS must equal S
 // menu (without starting a run at all) just leaves those globals
 // clobbered until a real newGame() reinitializes them later -- harmless
 // too, nothing reads them while gameState is STATE_MENU.
-// Pooled progress over the planets already available: plants and letters
-// counted together into one percentage (user request). A planet nobody
+// Pooled progress over the planets already available: las plantas de
+// todos ellos en un solo porcentaje (user request; eran plantas Y letras,
+// y las letras ya no existen). A planet nobody
 // sin totales no tiene denominador y bloquea el siguiente desbloqueo. Desde
 // que los niveles vienen horneados eso no llega a pasar: la primera pulsacion
 // cuenta las plantas de los ocho planetas de golpe, asi que todos tienen
@@ -1090,13 +1085,13 @@ static void planetUnlockProgress(u16 *outPercent, u16 *outMissing)
 
     for (i = 0; i < unlockedPlanets; i++)
     {
-        got = (u16) (got + presetSave[i].plantsCollected + presetSave[i].collectedCount);
-        total = (u16) (total + presetSave[i].plantsTotal + lettersFor(i));
+        got = (u16) (got + presetSave[i].plantsCollected);
+        total = (u16) (total + presetSave[i].plantsTotal);
     }
 
     *outPercent = total ? (u16) (((u32) got * 100) / total) : 0;
 
-    // How many more plants-or-letters that percentage is short by, which
+    // How many more plants that percentage is short by, which
     // is what the menu tells the player when they look at a planet they
     // can't enter yet (user request) -- a count of things to go and pick
     // up says more than a percentage does.
@@ -1134,7 +1129,6 @@ static void setUpPlanetFromRom(u8 presetIndex)
     Maze_setRoomSize(sizePresets[presetIndex].roomW, sizePresets[presetIndex].roomH,
                      sizePresets[presetIndex].variety);
     GuideMap_load(levels, curPlanet);
-    presetSave[presetIndex].lettersActual = itemCount; // el planeta puede traer menos letras que el preset
     Maze_setActiveMapSlot(presetIndex);
 }
 
@@ -1204,19 +1198,12 @@ static void ensurePlantsTotalKnown(u8 presetIndex)
     presetSave[presetIndex].plantsTotalKnown = TRUE;
 }
 
-// The cartography page lives inside a margin of a fifth of the screen on
-// each side (user request: "la pagina de cartografiados es texto con
-// margenes de un 20% de espacio a cada lado") -- 8 columns of the 40, so
-// everything it draws, the flooding glyphs included, sits in the 24
-// columns between.
-#define INTRO_MARGIN_COLS 8
-#define INTRO_TEXT_COLS   (40 - (2 * INTRO_MARGIN_COLS))
-// Where a line of `len` characters starts to sit centred inside those 24
-// columns. Anything longer than the band just starts at the margin.
-static u16 introTextX(u16 len)
-{
-    return (u16) (INTRO_MARGIN_COLS + ((len < INTRO_TEXT_COLS) ? ((INTRO_TEXT_COLS - len) / 2) : 0));
-}
+// Las dos lineas de la primera pantalla. Centradas en las 40 columnas
+// enteras: aqui vivia una terminal vintage que hablaba de un enlace
+// subespacial, y con ella el margen de un quinto por lado que necesitaba para
+// partir sus frases. Dos lineas no lo necesitan.
+#define INTRO_TITLE_ROW  12
+#define INTRO_PROMPT_ROW 16
 
 // "PULSA UN BOTON" prompt (STATE_INTRO, user request -- see the enum's
 // own doc comment). Drawn once from main()'s boot code, BG_A (nothing
@@ -1352,18 +1339,20 @@ static bool typeDone(void)
     return typeCursor >= total;
 }
 
-// The boot terminal, queued rather than drawn.
+// La primera pantalla (peticion del usuario: "la primera pantalla que sea
+// welcome, press any button to start"). Era la terminal del enlace
+// subespacial, seis lineas de jerga; ahora son dos y nada mas. Se escribe
+// sola, como todas, y en silencio.
 static void drawIntroPrompt(void)
 {
+    static const char saludo[] = "WELCOME";
+    static const char aviso[]  = "PRESS ANY BUTTON TO START";
+
     VDP_clearPlane(BG_A, TRUE);
     typeReset();
     typeSilent = TRUE;   // esta pantalla escribe sin sonido (peticion del usuario)
-    typeLine("OVNI-TERM MK.VII",     introTextX(16), 9);
-    typeLine("----------------",     introTextX(16), 10); // subrayado: pegado a proposito
-    typeLine("SUBSPACE LINK",        introTextX(13), 13);
-    typeLine("OFFLINE",              introTextX(7),  15);
-    typeLine("PRESS ANY BUTTON TO",  introTextX(19), 19);
-    typeLine("ESTABLISH CONNECTION", introTextX(20), 21);
+    typeLine(saludo, (40 - (sizeof saludo - 1)) / 2, INTRO_TITLE_ROW);
+    typeLine(aviso,  (40 - (sizeof aviso - 1)) / 2,  INTRO_PROMPT_ROW);
 }
 
 
@@ -1499,16 +1488,13 @@ static void applyGalaxyName(void)
     Menu_setGalaxyLook(curGalaxy); // otros planetas: otra silueta, otro anillo, otro tinte
 }
 
-// TRUE once THIS room's own letter (if it has one) and every one of its
-// plants are collected -- user request: "las puertas se abren en cada
-// habitación siempre que se hayan recogido las plantas y la letra de la
-// misma". Vacuously TRUE for a room with neither (most rooms have no
-// letter at all; a room with 0 plants and no letter is already "clear").
+// TRUE once every one de las plantas de ESTA sala esta recogida -- user
+// request: "las puertas se abren en cada habitación siempre que se hayan
+// recogido las plantas y la letra de la misma". Ya solo las plantas: las
+// letras no existen. Vacuously TRUE para una sala sin ninguna.
 static bool roomFullyCleared(u8 col, u8 row)
 {
-    char letter;
-
-    return !Items_uncollectedAt(col, row, &letter) && Plants_allCollectedInRoom(col, row);
+    return Plants_allCollectedInRoom(col, row);
 }
 
 // Per-room, per-direction "this doorway has been opened" latch (bit
@@ -1640,7 +1626,6 @@ static void applyRoomDoorLocks(u8 col, u8 row)
         Maze_loadRoom(sala, FALSE, abierta);
     }
     Maze_draw();
-    Items_drawInRoom(col, row);
     Plants_drawInRoom(col, row);
 }
 
@@ -1857,28 +1842,24 @@ static void newGame(void)
     tombMoving = FALSE;
     tombQueuedDir = DIR_NONE;
     reviveGrace = 0;   // solo lo enciende la rama de reanudar, mas abajo
-    Items_reset();
     Plants_reset(); // spec §48 -- running counter, now also saved/restored per planet (spec §51)
     memset(doorOpenBits, 0, sizeof(doorOpenBits)); // fresh run: no doorway has been opened yet
     Plants_setPlanetTotal(presetSave[sizePresetIndex].plantsTotal); // for Plants_drawHud's "n/TOTAL"
     // save.hasSave is unconditionally TRUE here now (ensurePlantsTotalKnown()
     // above guarantees it) -- for a genuinely fresh run this just restores
-    // all-zero state, identical to what Items_reset()/Plants_reset() already
-    // left, so there's no separate "fresh start" branch to skip it in anymore.
-    Items_fastForward(save.collectedCount); // spec §35 -- restore prior progress on this planet
-    setShipArt(); // con la C ya en el bolsillo, la nave vuelve gigante (ver setShipArt)
+    // all-zero state, identical to what Plants_reset() already left, so
+    // there's no separate "fresh start" branch to skip it in anymore.
+    setShipArt();
     Plants_setCollected(save.plantsCollected); // spec §51
+    // enemyPoints no se restaura: vive en presetSave y nadie lo borra, igual
+    // que la mascara de muertos de la que es el precio. Un enemigo no se
+    // puede matar dos veces (loadRoom no lo devuelve), asi que acumular no
+    // es farmear.
     Plants_restoreMask(save.plantsMask); // bug fix, see PresetSave's own doc comment
     // After GuideMap_generate() above, which cleared every one of them.
-    // Items_fastForward's restored count is also what makes the map device
-    // work again on a resumed planet (user request: "si ya ha recogido la
-    // A en ese planeta y vuelve a entrar, el mapa tiene que ser
-    // accesible") -- holding A reads Items_collectedCount(), so a planet
-    // whose letter A is already in hand shows the real overlay instead of
-    // the static, death or no death.
     GuideMap_restoreEnemyKilled(save.enemyKilled);
     GuideMap_restoreVisited(save.visitedMask); // the map comes back as the player left it
-    GuideMap_recomputeLocks(); // unlocks up through whichever letter is now due (spec §16)
+    GuideMap_recomputeLocks(); // sin letras ya no cierra nada: deja la tabla limpia
 
 
     // The player's actual physical starting point is the special
@@ -1945,7 +1926,6 @@ static void newGame(void)
         tombMoving = FALSE;
         tombQueuedDir = DIR_NONE;
         reviveGrace = REVIVE_GRACE_FRAMES;
-        Items_drawHud();
         Plants_drawHud();
         drawInsertRoomStatus(FALSE);        // no esta en la sala de extraccion
         presetSave[sizePresetIndex].deathSaved = FALSE; // se gasta al usarlo
@@ -1956,7 +1936,6 @@ static void newGame(void)
         // (N<->S, E<->W) share the same axis, so no translation is needed.
         loadExtractionRoom(FALSE);   // la de entrada, cerrada detras de la nave
         Maze_draw();
-        Items_drawHud();
         Plants_drawHud();
         drawInsertRoomStatus(TRUE); // el rotulo del planeta, spec §34
         // BUG FIX (user report + screenshot: "coloca el principio de la nave
@@ -1995,21 +1974,6 @@ static void newGame(void)
 // don't need to be redrawn here at all, only the text.
 static void planetCompletedFlags(bool *out);
 
-// How long each screen holds before handing over to the other. A button
-// in the table cuts its turn short and goes straight back (user request);
-// nothing interrupts the menu's own turn, since every button there
-// already means something else.
-#define SCREEN_ALTERNATE_FRAMES (8 * 60)
-static u16 screenAlternateTimer;
-
-// The high-score table. One row per planet, best first.
-//
-// Sorted by score rather than listed in planet order because that is what
-// makes it a scoreboard, y los numeros SON comparables entre planetas a
-// proposito: el presupuesto de tiempo escala con las salas que tiene el
-// mapa (ver SCORE_TIME_PER_ROOM), asi que una buena vuelta en un planeta
-// pequeno puede ganarle a una chapucera en uno grande. Un planeta que
-// todavia no ha cobrado nada ensena una raya y no un cero que no gano.
 // Las tres unicas lineas que caben bajo la orbita con aire entre ellas.
 // La orbita mas externa acaba en la fila 22 (ver SUN_CENTER_Y en menu.c),
 // y la pantalla acaba en la 27: tres renglones de dos en dos.
@@ -2030,11 +1994,14 @@ static void drawMenu(void);       // all three defined below
 // volver. La cuenta es la misma resta que ya hacia falta para guardar el
 // record del planeta, asi que no hay doble contabilidad.
 //
-// POR QUE LOS UMBRALES SON GEOMETRICOS. Con el score multiplicativo un planeta
-// paga entre 4 y 10 veces lo que el anterior: medido sobre los ocho, el 0 da
-// ~150 puntos y el 7 da ~30.000.000. Una escalera de pasos iguales la cruzaria
-// entera el primer planeta grande; una geometrica cae sola donde cae el
-// contenido, un segmento o dos por planeta nuevo, que es el ritmo que pedias.
+// POR QUE LOS UMBRALES YA NO SON GEOMETRICOS. Con el score multiplicativo un
+// planeta pagaba entre 4 y 10 veces lo que el anterior y hacia falta una
+// escalera geometrica para que no la cruzara entera el primer planeta grande.
+// Sumando no: medido sobre el reparto real de enemigos y plantas de los 64
+// planetas horneados, el 0 paga ~390 y el 7 ~63.700, y cada planeta anda
+// entre una y dos veces lo que el anterior. Una galaxia entera limpia son
+// ~225.000, asi que la escalera puede ir a pasos parejos y cae donde cae el
+// contenido: un escalon cada pocos planetas, tres en una galaxia completa.
 //
 // EL TOTAL NO SE GUARDA al apagar (decision del usuario: de momento solo la
 // sesion). Vive aqui en RAM y sobrevive a los viajes al menu, que es lo que
@@ -2058,10 +2025,16 @@ typedef struct
 // Los nombres van CORTOS porque el icono de al lado ya dice de que tipo es
 // (paleta o piloto), y asi la linea de la pantalla de recuento cabe con su
 // cifra de puntos restantes.
+// REHECHOS para el score que suma. Los hitos salen de lo que pagan de verdad
+// los 64 planetas horneados, acumulado en el orden en que se abren: los
+// cuatro pequenos juntos dan ~31.000, con el P4 se llega a ~59.000, con el
+// P5 a ~109.000, con el P6 a ~161.000 y la galaxia entera a ~225.000. Si la
+// escalera se siente corta o larga al jugarla, estos tres numeros son el
+// mando.
 static const Unlock unlocks[] = {
-    {   200000, UNLOCK_PALETA,  9, "PHOSPHOR" },
-    {  3000000, UNLOCK_PALETA, 10, "NEON"     },
-    { 20000000, UNLOCK_PALETA, 11, "MONO"     },
+    {  30000, UNLOCK_PALETA,  9, "PHOSPHOR" },
+    { 100000, UNLOCK_PALETA, 10, "NEON"     },
+    { 200000, UNLOCK_PALETA, 11, "MONO"     },
 };
 #define UNLOCK_COUNT ((u8) (sizeof unlocks / sizeof unlocks[0]))
 
@@ -2107,8 +2080,8 @@ static void metaSegment(u32 valor, u32 *desde, u32 *hasta, u8 *indice)
 }
 
 // Cuantas teselas de `w` lleva llenas la barra con ese total. La division va
-// primero: (total - desde) llega a los cientos de millones y multiplicar por
-// el ancho se saldria de un u32.
+// primero: (total - desde) puede ser grande y multiplicarlo por el ancho se
+// saldria de un u32.
 static u16 metaBarFilled(u32 valor, u16 w)
 {
     u32 desde, hasta;
@@ -2315,37 +2288,83 @@ static u8 unlockIcon(u8 i)
     return (unlocks[i].tipo == UNLOCK_PALETA) ? ICON_PALETA : ICON_PILOTO;
 }
 
+// LOS PUNTOS, CON SEPARADOR DE MILLAR (peticion del usuario: "pon
+// puntuacion a los puntos"). A mano, porque la printf de SGDK no sabe
+// agrupar cifras. Un u32 son diez cifras y tres puntos.
+#define PUNTOS_MAX 16
+// La columna donde acaba toda cifra pegada al margen derecho de la
+// pantalla: deja dos columnas de aire, que contra el borde se lee apretada.
+#define TEXT_RIGHT_MARGIN 37
+
+static int puntos(u32 v, char *out)
+{
+    char cifras[12];
+    const int n = sprintf(cifras, "%lu", v);
+    int i, w = 0;
+
+    for (i = 0; i < n; i++)
+    {
+        if (i && (((n - i) % 3) == 0))
+            out[w++] = '.';
+        out[w++] = cifras[i];
+    }
+    out[w] = '\0';
+
+    return w;
+}
+
+// La cifra pegada a la columna `right`, con su hueco de `ancho` columnas
+// limpio delante: un numero que encoge no deja digitos viejos detras.
+static void drawPuntosRight(u32 v, u16 right, u16 row, u8 ancho)
+{
+    char campo[PUNTOS_MAX + 24];
+    char num[PUNTOS_MAX];
+    const int len = puntos(v, num);
+    int i, w = 0;
+
+    for (i = len; i < (int) ancho; i++)
+        campo[w++] = ' ';
+    for (i = 0; i < len; i++)
+        campo[w++] = num[i];
+    campo[w] = '\0';
+
+    VDP_drawText(campo, (u16) (right - w + 1), row);
+}
+
 // ---------------------------------------------------------------------
 // El marcador de la pantalla de fase completada: sube de cero hasta el
-// producto de los cuatro factores, al modo arcade. Arranca cuando el texto
+// total de la columna de puntos, al modo arcade. Arranca cuando el texto
 // ha terminado de escribirse, no antes, para que las dos cosas no compitan.
 // El game over ya no lleva marcador ninguno (ver gameOverBegin).
 // ---------------------------------------------------------------------
 #define GAMEOVER_COUNT_FRAMES 90   // 1,5 s de subida, sea cual sea el salto
 #define GAMEOVER_TICK_EVERY    4   // un clic cada 4 frames mientras corre
 #define GAMEOVER_SCORE_ROW    21
-#define GAMEOVER_SCORE_RIGHT  30   // el numero se alinea a la derecha aqui
+// Donde acaba toda cifra de esta pantalla. Era la 30, cuando las lineas de
+// datos solo llevaban recuentos; desde que el score es una suma cada linea
+// trae ademas lo que paga, y esa columna es la que se alinea con el
+// marcador, con la barra y con el margen del resto del juego.
+#define GAMEOVER_SCORE_RIGHT  TEXT_RIGHT_MARGIN
 
 // El bloque de datos de la pantalla de fase completada: una fila de por
 // medio entre linea y linea, SIEMPRE (peticion del usuario: "cuida la
 // interlinea"), y arranca donde le toca para acabar junto al marcador --
-// cinco lineas.
+// cuatro lineas desde que las letras no estan.
 #define SUMMARY_COL         11
 #define SUMMARY_ROW_STEP     2
-#define REWARD_FIRST_ROW    11
+#define REWARD_FIRST_ROW    13
 // La barra de progreso, debajo del marcador y con su fila de por medio.
 #define META_BAR_ROW        24   // pegada a su etiqueta: las dos son una cosa
 #define META_LABEL_ROW      23
 #define META_HEADLINE_ROW    9   // el aviso de desbloqueo, de subtitulo
 #define META_NEXT_ROW       26   // su icono ocupa la 26 y la 27, las ultimas
 #define META_BAR_COL        11
-#define META_BAR_W          19   // acaba en la 30, donde los numeros
+#define META_BAR_W          27   // acaba donde los numeros, en GAMEOVER_SCORE_RIGHT
 #define META_BAR_FRAMES     60   // un segundo de subida
 
 static u32 barShown, barStep;
 static u16 barFilledShown;   // teselas que ya sonaron, para un tic por tesela
 static bool barDone;
-#define GAMEOVER_TEXT_ROW   13   // el game over no lleva resumen: la palabra, centrada
 
 static u32 goShown, goTarget, goStep;
 static bool goSettled;
@@ -2364,7 +2383,13 @@ static u8 goTick;
 // una mancha plana. Todo lo demas se va a negro. Sale gratis y funciona con
 // cualquier fotograma en el que les pille la colision.
 #define DEATH_FADE_FRAMES 24
-#define DEATH_HOLD_FRAMES 100
+// Lo que la pantalla tarda en aceptar el boton que la cierra. No es un rato
+// de lucimiento: la mano del jugador esta en el mando en el instante del
+// choque y sin esta espera el game over se saltaria solo. Era el rato que
+// duraba "YOU ARE DEAD" antes de dar paso a una segunda pantalla, y ya no hay
+// segunda (peticion del usuario: "pon game over directamente y ya esta, solo
+// una pantalla"), asi que se queda en lo justo.
+#define DEATH_HOLD_FRAMES 40
 #define DEATH_TEXT_ROW    12
 #define DEATH_ART_BOTTOM  136  // el grupo de siluetas se apoya en esta linea, bajo el texto
 #define DEATH_TEMPO_END   25   // a cuanto por ciento de su velocidad acaba la musica
@@ -2378,10 +2403,22 @@ static u8 goTick;
 
 static u16 deathPal[64];   // 128 B fuera de la pila: esto se llama desde hondo
 
+// El color al que fundir, que es el fondo de todo el juego. Definida mas
+// abajo, con el resto de los fundidos entre pantallas.
+static u16 fadeBackdrop(void);
+
 static void deathFreeze(u8 killer)
 {
-    static const char texto[] = "YOU ARE DEAD";
+    static const char texto[] = "GAME OVER";
     const u16 blanco = RGB3_3_3_TO_VDPCOLOR(7, 7, 7);
+    // EL FUNDIDO VA AL FONDO, NO A NEGRO (peticion del usuario: "puedes hacer
+    // el fundido al mismo color que la pantalla de game over?"). El game over
+    // se escribia sobre el fondo del juego -- la entrada 0 de PAL0,
+    // MAZE_BG_COLOR -- y el fundido acababa en negro, asi que al pasar de una
+    // pantalla a la otra habia un salto de color. Yendo a ese mismo fondo no
+    // hay salto, y de paso ya no hacen falta dos pantallas: lo que queda al
+    // acabar el fundido ES el game over.
+    const u16 fondo = fadeBackdrop();
     u16 target[64];
     u16 i;
 
@@ -2393,7 +2430,6 @@ static void deathFreeze(u8 killer)
         SPR_setVisibility(enemySprites[i], (i == killer) ? VISIBLE : HIDDEN);
     SPR_setVisibility(playerSprite, VISIBLE);
     SPR_setVisibility(mapShipSprite, HIDDEN);
-    SPR_setVisibility(itemIconSprite, HIDDEN);
     SPR_update();
 
     // Donde estan y donde acaban (peticion del usuario: "mueve las siluetas
@@ -2429,7 +2465,7 @@ static void deathFreeze(u8 killer)
         else if ((linea == PAL3) && (idx == 15))
             target[i] = blanco;                      // la tinta del mensaje
         else
-            target[i] = 0;                           // el resto, negro
+            target[i] = fondo;                       // el resto, el fondo del juego
     }
 
     // El fundido va en ASINCRONO para poder arrastrar la musica a la vez: con
@@ -2479,33 +2515,54 @@ static void deathFreeze(u8 killer)
     SPR_setPosition(enemySprites[killer], malX1, malY1);
     SPR_update();
 
-    // El mensaje va en BG_B, que se dibuja por encima del laberinto, y con
-    // PAL3 porque PAL0 -- la del texto de siempre -- se acaba de ir a negro.
+    // Con todo del color del fondo, limpiar los dos planos no se ve: y deja
+    // de haber un laberinto escondido debajo esperando a que alguien toque
+    // PAL0. Lo unico que se dibuja despues es la palabra.
+    VDP_clearPlane(BG_A, TRUE);
+    VDP_clearPlane(BG_B, TRUE);
+    invalidateHudLines();
+
+    // El mensaje va en BG_B, que se dibuja por encima de todo, y con PAL3
+    // porque PAL0 -- la del texto de siempre -- se acaba de ir al fondo.
     VDP_setTextPalette(PAL3);
     VDP_drawTextBG(BG_B, texto, (u16) ((40 - (sizeof texto - 1)) / 2), DEATH_TEXT_ROW);
 
+    // Y AQUI SE QUEDA: esto ES la pantalla de game over (peticion del
+    // usuario: "una vez que la silueta de los enemigos es blanca, pon game
+    // over directamente y ya esta, solo una pantalla"). Las siluetas siguen
+    // puestas, el color es el del fondo del juego y la palabra esta escrita.
+    // Lo desmonta deathScreenTeardown, camino del menu.
     for (i = 0; i < DEATH_HOLD_FRAMES; i++)
         SYS_doVBlankProcess();
 
-    // Se recoge antes de devolver el color: si se devolviera primero, el
-    // laberinto volveria a verse un frame entero antes de que el game over
-    // limpie el plano.
+    Sfx_musicTempoPercent(100);   // el jazz va a su ritmo
+}
+
+// Deshace lo que deathFreeze deja puesto: las siluetas y la paleta de la
+// muerte. Es el antiguo final de deathFreeze, movido al momento en que la
+// pantalla se cierra de verdad.
+static void deathScreenTeardown(void)
+{
+    u8 i;
+
     for (i = 0; i < ENEMIES_MAX; i++)
         SPR_setVisibility(enemySprites[i], HIDDEN);
     SPR_setVisibility(playerSprite, HIDDEN);
     SPR_update();
-    VDP_clearPlane(BG_A, TRUE);
     VDP_clearPlane(BG_B, TRUE);
     invalidateHudLines();
     VDP_setTextPalette(PAL0);
     PAL_setColors(0, deathPal, 64, DMA);
-    Sfx_musicTempoPercent(100);   // el jazz del game over va a su ritmo
 }
 
 // MORIR NO COBRA (peticion del usuario: "cuando te matan es game over. No
-// hay recuento"). La pantalla es la palabra y nada mas: ni resumen de lo
-// recogido ni marcador. El planeta conserva su progreso como siempre, pero
-// solo se ingresa puntuacion al limpiarlo.
+// hay recuento"): ni resumen de lo recogido ni marcador. El planeta conserva
+// su progreso como siempre, pero solo se ingresa puntuacion al limpiarlo.
+//
+// YA NO DIBUJA NADA. La pantalla es la que acaba de montar deathFreeze -- las
+// siluetas y la palabra, sobre el fondo del juego -- porque son UNA sola
+// (peticion del usuario). Esto es lo que suena y lo que apaga lo que
+// summaryStep haria por frame.
 static void gameOverBegin(void)
 {
     // La cadencia de jazz (peticion del usuario: "quiero que suene jazz en
@@ -2513,9 +2570,7 @@ static void gameOverBegin(void)
     // Sfx_slopStop que habia aqui en vez de ir detras.
     Sfx_jazzGameOver();
 
-    VDP_clearPlane(BG_A, TRUE);
-    typeReset();
-    typeLine("GAME OVER", 15, GAMEOVER_TEXT_ROW);
+    typeReset();        // nada que escribir: la pantalla ya esta puesta
     goSettled = TRUE;   // no hay marcador que mover
     barDone = TRUE;     // ni barra: morir no ingresa nada
 }
@@ -2546,30 +2601,43 @@ static void rewardBegin(void)
     typeReset();
     typeLine("PLANET CLEARED", 13, 8);
 
-    // Los cuatro factores con su X a la derecha, para que el producto se lea
-    // en la propia pantalla, y TRIES debajo sin X: aparece pero todavia no
-    // entra en la cuenta (peticion del usuario). Una fila de por medio entre
-    // linea y linea, TODAS (peticion del usuario: "cuida la interlinea").
+    // EL RECUENTO, AHORA QUE SUMA (decision del usuario). Cada linea lleva
+    // su recuento y, a la derecha, lo que ese recuento paga; el marcador de
+    // abajo es la suma de esa columna. Las que no pagan -- el tiempo, que
+    // es el multiplicador sin decidir, y los intentos, que no son del
+    // trato -- se quedan sin cifra de puntos, que es mas claro que un cero.
+    //
+    // Las cuatro lineas son de 8 columnas de rotulo + 10 de recuento, asi
+    // que los recuentos acaban todos en la misma vertical (de ahi el
+    // relleno de TRIES, peticion del usuario: "alinea la cifra de tries a
+    // la derecha") y los precios acaban en GAMEOVER_SCORE_RIGHT, con el
+    // marcador y la barra. Una fila de por medio entre linea y linea,
+    // TODAS (peticion del usuario: "cuida la interlinea").
     {
+        const u16 muertos = countDeadEnemies();
+        char pts[PUNTOS_MAX];
         u16 fila = REWARD_FIRST_ROW;
 
-        sprintf(buf, "PLANTS  %3d OF %3d X", Plants_collectedCount(), presetSave[p].plantsTotal);
+        puntos((u32) Plants_collectedCount() * SCORE_PLANT_POINTS, pts);
+        sprintf(buf, "PLANTS  %3d OF %3d %8s", Plants_collectedCount(),
+                presetSave[p].plantsTotal, pts);
         typeLine(buf, SUMMARY_COL, fila); fila += SUMMARY_ROW_STEP;
-        sprintf(buf, "LETTERS %3d OF %3d X", Items_collectedCount(), lettersFor(p));
+
+        puntos(presetSave[p].enemyPoints, pts);
+        sprintf(buf, "ENEMIES %3u OF %3u %8s", muertos,
+                (u16) (presetSave[p].scoreRooms * enemiesPerRoom[p]), pts);
         typeLine(buf, SUMMARY_COL, fila); fila += SUMMARY_ROW_STEP;
-        sprintf(buf, "ENEMIES %3u OF %3u X", countDeadEnemies(),
-                (u16) (presetSave[p].scoreRooms * enemiesPerRoom[p]));
+
+        sprintf(buf, "TIME     %4u SECS", scoreTimeLeft(p));
         typeLine(buf, SUMMARY_COL, fila); fila += SUMMARY_ROW_STEP;
-        sprintf(buf, "TIME   %4u SECS   X", scoreTimeLeft(p));
-        typeLine(buf, SUMMARY_COL, fila); fila += SUMMARY_ROW_STEP;
-        sprintf(buf, "TRIES  %4u", presetSave[p].scoreTries);
+
+        sprintf(buf, "TRIES         %4u", presetSave[p].scoreTries);
         typeLine(buf, SUMMARY_COL, fila);
     }
     typeLine("SCORE", SUMMARY_COL, GAMEOVER_SCORE_ROW);
     typeLine("PROGRESS", SUMMARY_COL, META_LABEL_ROW);
 
-    // Sube de cero hasta el producto: multiplicando ya no hay cifra de
-    // salida de la que bajar.
+    // Sube de cero hasta la suma: no hay cifra de salida de la que bajar.
     goShown = 0;
     goTarget = total;
     goStep = (total / GAMEOVER_COUNT_FRAMES) + 1;
@@ -2627,18 +2695,18 @@ static void metaBarStep(void)
 
                 VDP_drawText(buf, SUMMARY_COL, META_NEXT_ROW);
                 drawIcon(unlockIcon(seg), (u16) (SUMMARY_COL + len + 1), META_NEXT_ROW);
-                len = sprintf(buf, "%lu", (u32) (hasta - metaTotal));
-                VDP_drawText(buf, (u16) (GAMEOVER_SCORE_RIGHT - len + 1), META_NEXT_ROW);
+                // Al margen derecho de la pantalla y no a la columna de
+                // las demas cifras: en esta fila el icono del siguiente
+                // desbloqueable va detras del nombre y las dos no caben.
+                len = puntos((u32) (hasta - metaTotal), buf);
+                VDP_drawText(buf, (u16) (TEXT_RIGHT_MARGIN - len + 1), META_NEXT_ROW);
             }
         }
     }
 
-    {
-        const int len = sprintf(buf, "%lu", barShown);
-
-        VDP_drawText("          ", (u16) (GAMEOVER_SCORE_RIGHT - 9), META_LABEL_ROW);
-        VDP_drawText(buf, (u16) (GAMEOVER_SCORE_RIGHT - len + 1), META_LABEL_ROW);
-    }
+    // Once columnas, que es lo que queda entre la etiqueta PROGRESS y la
+    // columna donde acaban todas las cifras de esta pantalla.
+    drawPuntosRight(barShown, GAMEOVER_SCORE_RIGHT, META_LABEL_ROW, 11);
 
     // Un tic por tesela ganada (peticion del usuario), con el tono subiendo:
     // asi se OYE llenarse, y no es un clic suelto cada cuatro frames.
@@ -2656,9 +2724,6 @@ static void metaBarStep(void)
 
 static void summaryStep(void)
 {
-    char buf[12];
-    int len;
-
     typeStep();
     if (!typeDone())
         return;        // el marcador espera a que acabe el texto
@@ -2685,12 +2750,9 @@ static void summaryStep(void)
     else
         goSettled = TRUE;   // un ultimo repintado con el valor final, y para
 
-    len = sprintf(buf, "%lu", goShown);
-    VDP_drawText("        ", (u16) (GAMEOVER_SCORE_RIGHT - 7), GAMEOVER_SCORE_ROW);
-    VDP_drawText(buf, (u16) (GAMEOVER_SCORE_RIGHT - len + 1), GAMEOVER_SCORE_ROW);
+    drawPuntosRight(goShown, GAMEOVER_SCORE_RIGHT, GAMEOVER_SCORE_ROW, 13);
 }
 
-static void drawScoreTable(void);
 static void flushSprites(void);
 
 // --- LA COLECCION DE PLANTAS -----------------------------------------------
@@ -3117,6 +3179,7 @@ static u8 upgNextOwned(u8 mask, u8 count, u8 desde, s8 paso)
 static void drawUpgrades(void)
 {
     char buf[42];
+    char num[PUNTOS_MAX];
     u32 desde, hasta;
     u8 seg, i;
 
@@ -3124,7 +3187,8 @@ static void drawUpgrades(void)
     VDP_setTextPalette(PAL0);
     VDP_drawText("WORKSHOP", (40 - 8) / 2, UPG_TITLE_ROW);
 
-    sprintf(buf, "PROGRESS %lu", metaTotal);
+    puntos(metaTotal, num);
+    sprintf(buf, "PROGRESS %s", num);
     VDP_drawText(buf, UPG_COL, UPG_TOTAL_ROW);
     Maze_drawProgressBar(UPG_COL, UPG_BAR_ROW, UPG_BAR_W,
                           metaBarFilled(metaTotal, UPG_BAR_W));
@@ -3134,8 +3198,8 @@ static void drawUpgrades(void)
         VDP_drawText("ALL UNLOCKED", UPG_COL, UPG_NEXT_ROW);
     else
     {
-        sprintf(buf, "NEXT %s  %lu TO GO", unlocks[seg].nombre,
-                (u32) (hasta - metaTotal));
+        puntos((u32) (hasta - metaTotal), num);
+        sprintf(buf, "NEXT %s  %s TO GO", unlocks[seg].nombre, num);
         VDP_drawText(buf, UPG_COL, UPG_NEXT_ROW);
     }
 
@@ -3197,7 +3261,6 @@ static void drawUpgrades(void)
 static void enterUpgrades(void)
 {
     gameState = STATE_UPGRADES;
-    screenAlternateTimer = 0;
     upgRow = 0;
     upgPalSel = paletaWorn;
     upgPilSel = pilotoWorn;
@@ -3211,7 +3274,6 @@ static void leaveUpgrades(void)
     bool completed[SIZE_PRESET_COUNT];
 
     gameState = STATE_MENU;
-    screenAlternateTimer = 0;
     Menu_setVisible(TRUE);
     Menu_hideSprites();
     drawMenu();
@@ -3225,7 +3287,6 @@ static void leaveUpgrades(void)
 static void enterCollection(void)
 {
     gameState = STATE_COLLECTION;
-    screenAlternateTimer = 0;
     collTop = 0;
     collCursor = 0;
     collZoom = FALSE;
@@ -3243,99 +3304,18 @@ static void leaveCollection(void)
     bool completed[SIZE_PRESET_COUNT];
 
     gameState = STATE_MENU;
-    screenAlternateTimer = 0;
     PAL_setColor((PAL0 * 16) + PAL_SUELO, collSavedFloor); // antes de que el menu lo guarde
     Menu_setVisible(TRUE);
-    Menu_hideSprites(); // suben solos detras de la pantalla, igual que al volver de la tabla
+    Menu_hideSprites(); // suben solos detras de la pantalla
     drawMenu();
     planetCompletedFlags(completed);
     Menu_fadeInSprites(sizePresetIndex, unlockedPlanets, completed);
-}
-
-// Menu -> table. The planets, sun and cursor are sprites, so they have to
-// be taken off the table AND flushed, or they stay on screen over it.
-static void enterScoreTable(void)
-{
-    gameState = STATE_SCORES;
-    screenAlternateTimer = 0;
-    Menu_hideSprites();
-    flushSprites();
-    drawScoreTable();
-}
-
-// Table -> menu. Same restore the end of a run does, minus the fade: the
-// two screens swap in place.
-static void leaveScoreTable(void)
-{
-    bool completed[SIZE_PRESET_COUNT];
-
-    gameState = STATE_MENU;
-    Sfx_musicScene(TRUE); // calla la cancion al volver al menu
-    screenAlternateTimer = 0;
-    drawMenu();
-    planetCompletedFlags(completed);
-    Menu_fadeInSprites(sizePresetIndex, unlockedPlanets, completed);
-}
-
-static void drawScoreTable(void)
-{
-    u8 order[SIZE_PRESET_COUNT];
-    char buf[40];
-    u8 i, j;
-    int len;
-
-    VDP_clearPlane(BG_A, TRUE);
-    VDP_setTextPalette(PAL0); // the menu leaves it here too, but this screen must not depend on that
-
-    for (i = 0; i < SIZE_PRESET_COUNT; i++)
-        order[i] = i;
-
-    // Insertion sort, descending: 8 entries, so the simplest thing that
-    // is obviously right beats anything cleverer.
-    for (i = 1; i < SIZE_PRESET_COUNT; i++)
-    {
-        const u8 v = order[i];
-
-        for (j = i; (j > 0) && (scoreFor(order[j - 1]) < scoreFor(v)); j--)
-            order[j] = order[j - 1];
-        order[j] = v;
-    }
-
-    typeReset();
-
-    len = sprintf(buf, "HIGH SCORES");
-    typeLine(buf, (u16) ((40 - len) / 2), 4);
-
-    for (i = 0; i < SIZE_PRESET_COUNT; i++)
-    {
-        const u8 p = order[i];
-
-        // A planet with no rooms recorded has never been entered. The
-        // marker is a character, not a colour, so it reads regardless of
-        // how the palette lands.
-        if (scoreFor(p) == 0)
-            len = sprintf(buf, "%d  %-6s        ---", i + 1, Menu_planetName(p));
-        else
-            len = sprintf(buf, "%d  %-6s %9lu %s", i + 1, Menu_planetName(p),
-                          scoreFor(p), presetSave[p].scoreDone ? "*" : " ");
-
-        typeLine(buf, 8, (u16) (8 + (i * 2)));
-    }
-
-    typeLine("* PLANET COMPLETED", 8, 25);
-    typeLine("PRESS ANY BUTTON", 12, 27);
 }
 
 static void drawMenu(void)
 {
     char buf[40]; // a full screen line: the longest sprintf here is the locked planet's "COLLECT n MORE ITEMS TO OPEN IT"
     int len;
-    const u8 letters = lettersFor(sizePresetIndex);
-    // Saved progress for the selected planet (spec §35) -- 0 only when
-    // it has never been played at all. A finished planet's save keeps
-    // collectedCount == letters (spec §38 fix), so it correctly reads as
-    // fully complete here instead of resetting back to 0.
-    const u8 collected = presetSave[sizePresetIndex].hasSave ? presetSave[sizePresetIndex].collectedCount : 0;
 
     VDP_clearPlane(BG_A, TRUE);
 
@@ -3386,25 +3366,24 @@ static void drawMenu(void)
     }
     else
     {
-    // Plantas y letras en UNA linea. Eran dos seguidas, y entre la orbita
-    // y el borde de pantalla solo hay tres renglones con aire (ver
-    // MENU_ROW_A/B/C): juntarlas es lo que permite separarlas del resto
-    // en vez de apilar cuatro lineas pegadas.
+    // Las plantas, que es el unico recuento que le queda al planeta: las
+    // letras ya no existen (peticion del usuario) y con ellas se va la
+    // segunda mitad de esta linea. Sin total sabido todavia no hay nada
+    // que ensenar -- un "0 DE 0" enganaria (ver plantsTotalKnown).
     if (presetSave[sizePresetIndex].plantsTotalKnown)
-        len = sprintf(buf, "%d/%d PLANTS   %d/%d LETTERS",
+    {
+        len = sprintf(buf, "%d/%d PLANTS",
                       presetSave[sizePresetIndex].plantsCollected,
-                      presetSave[sizePresetIndex].plantsTotal, collected, letters);
-    else
-        len = sprintf(buf, "%d/%d LETTERS", collected, letters);
-
-    VDP_drawText(buf, (40 - len) / 2, MENU_ROW_B);
+                      presetSave[sizePresetIndex].plantsTotal);
+        VDP_drawText(buf, (40 - len) / 2, MENU_ROW_B);
+    }
 
     VDP_drawText("PRESS A TO START   B COLLECTION", (40 - 31) / 2, MENU_ROW_C);
     }
 
     // How close the next planet is to opening (user request: the rest of
     // them unlock at PLANET_UNLOCK_PERCENT of what's already available,
-    // plants and letters pooled). Row 24 is the one free line between the
+    // las plantas de todos ellos juntas). Row 24 is the one free line between the
     // orbits and the status block. Nothing is drawn once they are all
     // open -- there is nothing left to wait for.
     if (unlockedPlanets < SIZE_PRESET_COUNT)
@@ -3595,7 +3574,11 @@ static void planetCompletedFlags(bool *out)
 
     for (i = 0; i < SIZE_PRESET_COUNT; i++)
     {
-        const bool vivo = presetSave[i].hasSave && (presetSave[i].collectedCount >= lettersFor(i));
+        // Limpiar el planeta es recoger sus plantas: el objetivo que ha
+        // quedado al quitar las letras. plantsTotal a cero es un planeta
+        // cuyo total no se ha contado todavia, no uno terminado.
+        const bool vivo = presetSave[i].hasSave && (presetSave[i].plantsTotal > 0) &&
+                          (presetSave[i].plantsCollected >= presetSave[i].plantsTotal);
 
         if (vivo)
             galaxyDone[g] |= (u8) (1u << i);
@@ -3619,20 +3602,19 @@ static void resetToMenu(void)
     // when actually leaving a real game (mid-run via the reset combo, or
     // just won -- completing the phase calls this directly from
     // STATE_PLAYING now, no separate win state in between), never when
-    // the combo is pressed while already at the menu (mapSeed/items.c's
-    // collected state would be stale leftovers from whatever was last
-    // played, not "this" run). collectedCount naturally equals itemCount
-    // when the run was won, which is exactly what should show in the menu.
+    // the combo is pressed while already at the menu (mapSeed/el recuento
+    // de plantas serian restos de lo ultimo que se jugo, no de "esta"
+    // partida). plantsCollected llega al total cuando la partida se gano,
+    // que es justo lo que tiene que ensenar el menu.
     // Dying counts exactly the same as walking out (user request: "incluso
     // si la nave muere y es game over... quiero que guardes el estado del
     // planeta"). It used to be deliberately left out, so a death threw the
-    // whole attempt away -- letters, plants and the map device with them.
+    // whole attempt away -- las plantas y el mapa con ellas.
     if ((previousState == STATE_PLAYING) || (previousState == STATE_GAMEOVER) ||
         (previousState == STATE_REWARD))
     {
         presetSave[sizePresetIndex].hasSave = TRUE;
         presetSave[sizePresetIndex].mapSeed = mapSeed;
-        presetSave[sizePresetIndex].collectedCount = Items_collectedCount();
         presetSave[sizePresetIndex].plantsCollected = Plants_collectedCount(); // spec §51
         Plants_saveMask(presetSave[sizePresetIndex].plantsMask); // bug fix, see PresetSave's own doc comment
         GuideMap_saveEnemyKilled(presetSave[sizePresetIndex].enemyKilled);
@@ -3656,7 +3638,7 @@ static void resetToMenu(void)
     SPR_setVisibility(mapShipSprite, HIDDEN);
     hideEnemySprites();
 
-    // Items_drawHud's letter tracker and drawInsertRoomStatus's message
+    // Plants_drawHud's counter and drawInsertRoomStatus's message
     // (both BG_B, high priority) are only ever refreshed during gameplay
     // -- clear them so a reset mid-game doesn't leave either lingering
     // over the menu (BG_A's own VDP_clearPlane in drawMenu() below only
@@ -3817,7 +3799,7 @@ static void clearHitboxMarks(void)
 
     // One space glyph per marked tile, NOT VDP_clearTextLineBG -- that
     // clears the WHOLE row, and a hitbox mark can legitimately land on
-    // row 0/1 (the FPS counter and Items_drawHud/Plants_drawHud's own
+    // row 0/1 (the FPS counter and Plants_drawHud's own
     // row) whenever the player/enemy is near the top of the room, which
     // would otherwise wipe those every time this redraws.
     for (i = 0; i < hitboxMarkCount; i++)
@@ -3975,24 +3957,12 @@ static bool plantPathSlideExits(s16 x, s16 y, u8 d)
     }
 }
 
-// What the route aims at: anything in this room still worth crossing.
-// That's every plant still standing and, since the user asked for it
-// ("haz que el path tambien indique el path a la letra"), the room's own
-// letter -- which always sits on the hub cell, the one place items.c ever
-// draws it. Both are collected by passing OVER them, which is why the
-// search can treat them as the same kind of target: the first slide that
-// crosses either one wins, so what gets drawn is the nearest of the two
-// and the route keeps working once a room's plants are all gone and only
-// its letter is left.
+// What the route aims at: anything in this room still worth crossing, que
+// desde que no hay letras son sus plantas y nada mas. Se recogen pasando
+// POR ENCIMA, asi que el primer deslizamiento que cruce una gana.
 static bool plantPathTargetAt(u8 roomCol, u8 roomRow, s16 x, s16 y)
 {
-    char letter;
-
-    if (Plants_uncollectedAt(roomCol, roomRow, x, y))
-        return TRUE;
-
-    return (x == MAZE_DOOR_COL) && (y == MAZE_DOOR_ROW) &&
-           Items_uncollectedAt(roomCol, roomRow, &letter);
+    return Plants_uncollectedAt(roomCol, roomRow, x, y);
 }
 
 static void clearPlantPathMarks(void)
@@ -4217,9 +4187,181 @@ static void drawPlantPath(void)
     plantPathFlood(currentCol, currentRow, startX, startY, FALSE);
 }
 
-// Everything on this planet collected -- letters AND plants (user
-// request: "se muestra cuando la nave recogio letras y plantas en su
-// totalidad") -- so tell the player to take it all back.
+// LOS PUNTOS DE MATAR, SUBIENDO (peticion del usuario: "quiero que salgan
+// los puntos que proporciona matar un enemigo, que vaya hacia arriba tipo
+// arcade"). La cifra sale sobre el enemigo atropellado y trepa KILLPOP_RISE_PX
+// pixeles frenando, al modo de un marcador de arcade.
+//
+// VA EN SPRITES, no en texto de fondo (peticion del usuario: "la animacion de
+// los puntos de los enemigos tiene que ser mas fluida"). Un texto son teselas
+// y solo puede moverse de 8 en 8 px: a 6 frames por salto se veia andar a
+// trompicones. Un sprite se coloca al pixel, asi que lo que sube ahora se
+// mueve todos los frames. Los digitos son los de la fuente del HUD,
+// recortados a hoja de sprite por tools/killpop_digits.py, de modo que la
+// cifra que sube y el marcador de arriba a la derecha son la misma letra.
+//
+// CUANTO VALE UN ENEMIGO: un numero fijo por especie (Enemy_points, enemy.h).
+// Lo era ya cuando esto se escribio con el score multiplicativo, y ahi el
+// valor dependia del momento; hoy el score es una suma y esta cifra es
+// exactamente lo que el enemigo acaba de meter en el bote.
+#define KILLPOP_MAX      4   // cuantos pueden estar subiendo a la vez
+#define KILLPOP_GLYPHS   5   // digitos por cartelito: 600 son tres, sobra sitio
+// La subida: 32 px en 40 frames, frenando. Medido sobre la curva, se mueve en
+// 27 de los 40 frames y nunca salta mas de 2 px -- con la version de teselas
+// que habia antes eran saltos de 8 px cada 6 frames. Subir mas px en menos
+// frames es lo que hace que la mayoria de los frames tengan movimiento: con
+// 24 px en 48 se quedaba quieta la mitad del tiempo.
+#define KILLPOP_FRAMES  40   // lo que dura la subida: 0,67 s
+#define KILLPOP_RISE_PX 32   // cuanto sube en total: cuatro celdas de tesela
+
+// El tope de sprites en una linea de rastreo del VDP son 20, y aqui se pueden
+// juntar KILLPOP_MAX * KILLPOP_GLYPHS = 20 justos si cuatro cartelitos de
+// cinco cifras cayeran a la misma altura. No llega a pasar -- los valores son
+// de tres cifras y los atropellos van de uno en uno -- pero es el techo.
+static Sprite *killPopSprites[KILLPOP_MAX][KILLPOP_GLYPHS];
+// FALSE si alguno de los veinte no cupo en la VRAM de sprites (SPR_addSprite
+// devuelve NULL cuando se agota, ver el comentario de main). Sin esto, el
+// primer atropello escribiria sobre un puntero nulo.
+static bool killPopReady = FALSE;
+
+typedef struct
+{
+    u8 glyph[KILLPOP_GLYPHS];   // que fotograma lleva cada digito
+    u8 len;
+    s16 x, y0;                  // esquina de la cifra, en pixeles de pantalla
+    u16 t;                      // frames desde que salio
+    bool vivo;
+} KillPop;
+
+static KillPop killPops[KILLPOP_MAX];
+
+// Los esconde todos. No toca `vivo`: eso lo deciden killPopClear y killPopStep.
+static void killPopHide(u8 i)
+{
+    u8 g;
+
+    if (!killPopReady)
+        return;
+
+    for (g = 0; g < KILLPOP_GLYPHS; g++)
+        SPR_setVisibility(killPopSprites[i][g], HIDDEN);
+}
+
+// Fuera de golpe: lo llama cualquier pantalla que tape la partida.
+static void killPopClear(void)
+{
+    u8 i;
+
+    for (i = 0; i < KILLPOP_MAX; i++)
+        if (killPops[i].vivo)
+        {
+            killPops[i].vivo = FALSE;
+            killPopHide(i);
+        }
+}
+
+// Uno nuevo centrado sobre (px,py), que son pixeles de SALA -- los mismos en
+// los que vive el enemigo.
+static void killPopAdd(u32 valor, s16 px, s16 py)
+{
+    char txt[PUNTOS_MAX];
+    const int largo = puntos(valor, txt);
+    s16 x, y;
+    u8 ranura = KILLPOP_MAX, i, n = 0;
+
+    if (!killPopReady)
+        return;
+
+    for (i = 0; i < KILLPOP_MAX; i++)
+        if (!killPops[i].vivo)
+        {
+            ranura = i;
+            break;
+        }
+
+    if (ranura >= KILLPOP_MAX)
+        ranura = 0;             // sin hueco, el mas viejo cede el sitio
+
+    // Los glifos de la hoja son 0..9 y el punto del separador (ver
+    // tools/killpop_digits.py). Lo que no quepa se queda fuera: con tres
+    // cifras no llega a pasar, y un recorte es mejor que no ensenar nada.
+    for (i = 0; (i < (u8) largo) && (n < KILLPOP_GLYPHS); i++)
+    {
+        if ((txt[i] >= '0') && (txt[i] <= '9'))
+            killPops[ranura].glyph[n++] = (u8) (txt[i] - '0');
+        else if (txt[i] == '.')
+            killPops[ranura].glyph[n++] = 10;
+    }
+
+    // Centrada sobre la celda del enemigo y dentro de la pantalla. Sale DONDE
+    // CAYO, sin corregir la altura: lo que no puede es seguir subiendo dentro
+    // de la banda del HUD, y de eso se encarga el tope de killPopStep.
+    x = (s16) (px + Maze_originPxX() + (MAZE_TILE_PX / 2) - ((n * 8) / 2));
+    if (x < 0)
+        x = 0;
+    if (x > (s16) (320 - (n * 8)))
+        x = (s16) (320 - (n * 8));
+    y = (s16) (py + Maze_originPxY());
+
+    killPops[ranura].len = n;
+    killPops[ranura].x = x;
+    killPops[ranura].y0 = y;
+    killPops[ranura].t = 0;
+    killPops[ranura].vivo = (bool) (n > 0);
+    if (!killPops[ranura].vivo)
+        killPopHide(ranura);
+}
+
+// Un frame de los que esten subiendo. Fuera de la partida se apagan: ahi la
+// pantalla es de otro.
+static void killPopStep(void)
+{
+    u8 i;
+
+    for (i = 0; i < KILLPOP_MAX; i++)
+    {
+        KillPop *k = &killPops[i];
+        s16 y;
+        u8 g;
+
+        if (!k->vivo)
+            continue;
+
+        if ((gameState != STATE_PLAYING) || (k->t >= KILLPOP_FRAMES))
+        {
+            k->vivo = FALSE;
+            killPopHide(i);
+            continue;
+        }
+
+        // FRENANDO, no a velocidad constante: sale rapido del enemigo y se
+        // para arriba, que es como se mueve un marcador de arcade. Es la
+        // parabola t*(2T-t)/T^2, que vale 0 al empezar y 1 al acabar.
+        y = (s16) (k->y0 - (s16) (((s32) KILLPOP_RISE_PX * k->t *
+                                   ((2 * KILLPOP_FRAMES) - k->t))
+                                  / ((s32) KILLPOP_FRAMES * KILLPOP_FRAMES)));
+
+        // Y para de subir al llegar a la sala: arriba vive el HUD, y una
+        // cifra blanca sobre el marcador se lee como parte de el.
+        if (y < (s16) (MAZE_HUD_ROWS * 8))
+            y = (s16) (MAZE_HUD_ROWS * 8);
+
+        for (g = 0; g < k->len; g++)
+        {
+            SPR_setPosition(killPopSprites[i][g], (s16) (k->x + (g * 8)), y);
+            SPR_setFrame(killPopSprites[i][g], k->glyph[g]);
+            SPR_setVisibility(killPopSprites[i][g], VISIBLE);
+        }
+        for (g = k->len; g < KILLPOP_GLYPHS; g++)
+            SPR_setVisibility(killPopSprites[i][g], HIDDEN);
+
+        k->t++;
+    }
+}
+
+// Todas las plantas de este planeta recogidas (user request: "se muestra
+// cuando la nave recogio letras y plantas en su totalidad"; las letras ya
+// no existen) -- so tell the player to take it all back.
 //
 // It pulses once every RETURN_MSG_PERIOD frames (user request: "el
 // parpadeo cada 10 seg") instead of breathing without pause: the glyphs
@@ -4230,41 +4372,12 @@ static void drawPlantPath(void)
 // invisible against the backdrop, so between pulses there is simply
 // nothing there, and the pulse itself fades in and out instead of
 // snapping on.
-// El icono de 16x16 del objeto que aun esta en esta sala, que mide justo una
-// celda. Una sola llamada por frame decide si se ve: asi no hay que acordarse
-// de esconderlo en cada pantalla que tapa la partida.
-static void updateItemIcon(void)
-{
-    static u16 frameShown = 0xFFFF;
-    char letter;
-    const bool want = (gameState == STATE_PLAYING) && !mapViewOpen && !roomViewerOn &&
-                      !sweepOn && !inInsertRoom &&
-                      Items_uncollectedAt(currentCol, currentRow, &letter) &&
-                      ((u8) (letter - 'A') < ITEM_ICON_COUNT);
-
-    if (!want)
-    {
-        SPR_setVisibility(itemIconSprite, HIDDEN);
-        return;
-    }
-
-    if (frameShown != (u16) (letter - 'A'))
-    {
-        frameShown = (u16) (letter - 'A');
-        SPR_setFrame(itemIconSprite, frameShown); // resube sus teselas: solo al cambiar
-    }
-    SPR_setPosition(itemIconSprite,
-                    (s16) ((MAZE_DOOR_COL * MAZE_TILE_PX) + Maze_originPxX()),
-                    (s16) ((MAZE_DOOR_ROW * MAZE_TILE_PX) + Maze_originPxY()));
-    SPR_setVisibility(itemIconSprite, VISIBLE);
-}
-
 static void drawReturnToInsertHint(void)
 {
     static const u32 ramp[8] = { 0x000000, 0x242424, 0x484848, 0x6D6D6D,
                                   0x919191, 0xB6B6B6, 0xDADADA, 0xFFFFFF };
     const bool want = (gameState == STATE_PLAYING) && !inInsertRoom &&
-                      Items_allCollected() &&
+                      (presetSave[sizePresetIndex].plantsTotal > 0) &&
                       (Plants_collectedCount() >= presetSave[sizePresetIndex].plantsTotal) &&
                       !mapViewOpen && !roomViewerOn && !sweepOn;
 
@@ -4483,16 +4596,15 @@ static void restoreLiveRoomAfterDebugScreen(void)
 {
     buildRoomForInspection(currentCol, currentRow, ROOM_LOCKS_LIVE);
     Maze_draw();
-    Items_drawInRoom(currentCol, currentRow);
     Plants_drawInRoom(currentCol, currentRow);
 
-    // The tools' own text is longer than what the HUDs write back, so the
-    // row goes entirely before they repaint it.
+    // The tools' own text is longer than what the HUD writes back, so the
+    // row goes entirely before it repaints it.
     VDP_clearTextLineBG(BG_B, 1);
-    Items_drawHud();
     Plants_drawHud();
 
     clearPlantPathMarks(); // the viewer's own route, drawn with the same marks
+    killPopClear();
     PAL_setColor(PLAYER_SHIP_INK_INDEX, PLAYER_SHIP_COLOR); // the map overlay left it white
     SPR_setVisibility(playerSprite, VISIBLE);
     SPR_setVisibility(mapShipSprite, HIDDEN);
@@ -4513,6 +4625,7 @@ static void beginDebugScreen(void)
 
     mapViewOpen = FALSE;
     mapShowingNoise = FALSE;
+    killPopClear();
     SPR_setVisibility(playerSprite, HIDDEN);
     SPR_setVisibility(mapShipSprite, HIDDEN);
     hideEnemySprites();
@@ -4540,7 +4653,6 @@ static void drawRoomViewer(void)
     roomBuildFor(rvCol, rvRow, ROOM_LOCKS_LIVE, &rb);
     buildRoomForInspection(rvCol, rvRow, ROOM_LOCKS_LIVE);
     Maze_draw();
-    Items_drawInRoom(rvCol, rvRow);
     Plants_drawInRoom(rvCol, rvRow);
 
     clearPlantPathMarks();
@@ -4868,16 +4980,15 @@ static void invalidateHudLines(void)
 // derecha arriba, donde estan los FPS en debug"). Same cached-redraw rule
 // the other BG_B lines use -- the number only changes once a second or
 // on a move, so there is no reason to poke glyphs every frame.
-#define SCORE_COL   30 // leaves 8 columns for the number, FPS goes left of it
-#define SCORE_RIGHT 37 // ultima columna que ocupa el numero: deja 2 de margen
-                       // contra el borde, que pegado se leia apretado
+#define SCORE_COL   25 // trece columnas para el numero, FPS a su izquierda:
+                       // con separador de millar un u32 son hasta 13 glifos
+#define SCORE_RIGHT TEXT_RIGHT_MARGIN // ultima columna que ocupa el numero
 
 static void drawScoreHud(void)
 {
     static u32 prev = 0xFFFFFFFF;
-    static u8 tick = 0;
     u32 score;
-    char buf[12];
+    char buf[PUNTOS_MAX];
     int len;
 
     if (gameState != STATE_PLAYING)
@@ -4886,21 +4997,22 @@ static void drawScoreHud(void)
         return;
     }
 
-    // scoreLive() recorre el mapa entero (countDeadEnemies), asi que no se
-    // pregunta cada frame: el producto solo se mueve al pasar un segundo.
-    if ((++tick & 15) && !hudLinesDirty)
-        return;
-
+    // Se pregunta cada frame: desde que el score es una suma, scoreLive()
+    // son dos lecturas y no el recorrido del mapa entero que era con el
+    // producto (countDeadEnemies). Antes habia un acelerador de 16 frames
+    // aqui, y eso dejaba al marcador hasta un cuarto de segundo por detras
+    // del cartelito que sube del enemigo recien muerto. Lo que evita
+    // repintar de balde es la comparacion con `prev`, justo debajo.
     score = scoreLive();
     if ((score == prev) && !hudLinesDirty)
         return;
 
     prev = score;
-    len = sprintf(buf, "%lu", score);
+    len = puntos(score, buf);
 
     // Alineado a la derecha, con relleno para que un numero que encoge no
     // deje sus digitos viejos detras.
-    Hud_drawText("        ", SCORE_COL, 0);
+    Hud_drawText("             ", SCORE_COL, 0);
     Hud_drawText(buf, (u16) (SCORE_RIGHT - len + 1), 0);
 }
 
@@ -4978,16 +5090,18 @@ static void drawRoomIdHud(void)
 static bool soundBoxOn = FALSE;
 static void clearSoundView(void);
 
-// Donde puede vivir el panel: solo donde BG_A se puede repintar a voluntad,
-// que es el menu (drawMenu) y la partida (Maze_draw). La intro, la tabla de
-// puntuaciones y el resumen final se escriben SOLOS glifo a glifo (typeStep,
-// gameOverStep) y no hay forma de volver a pintarlos -- el fondo del panel se
-// iria comiendo lo ya escrito, y al cerrarlo Maze_draw() les plantaria encima
-// el laberinto de la ultima sala. Los dos submodos del mapa (el visor de salas
-// y el barrido) siguen siendo STATE_PLAYING, asi que entran.
+// Donde puede vivir el panel: SOLO en la partida (peticion del usuario:
+// "quita el debug (start) del audio en el menu"). En el menu la START es el
+// interruptor del sonido y abria las dos cosas de una. Fuera de ahi, el
+// panel tampoco podria vivir: la intro y el resumen final se escriben SOLOS
+// glifo a glifo (typeStep) y no hay forma de volver a pintarlos -- el fondo
+// del panel se iria comiendo lo ya escrito, y al cerrarlo Maze_draw() les
+// plantaria encima el laberinto de la ultima sala. Los dos submodos del mapa
+// (el visor de salas y el barrido) siguen siendo STATE_PLAYING, asi que
+// entran.
 static bool soundViewStateOk(void)
 {
-    return (bool) ((gameState == STATE_MENU) || (gameState == STATE_PLAYING));
+    return (bool) (gameState == STATE_PLAYING);
 }
 
 static void drawSoundView(void)
@@ -5143,7 +5257,6 @@ static void clearSoundView(void)
     else if (gameState == STATE_PLAYING)
     {
         Maze_draw();
-        Items_drawInRoom(currentCol, currentRow);
         Plants_drawInRoom(currentCol, currentRow);
     }
     // En cualquier otro estado no se devuelve nada a mano: ahi se llega porque
@@ -5173,9 +5286,8 @@ static void clearDebugView(void)
     if ((gameState != STATE_MENU) && (gameState != STATE_INTRO))
     {
         Maze_draw();
-        // Same letter/plants wipe as DEBUG_EDGES_COMBO's own toggle (see
-        // its comment) -- Maze_draw() alone doesn't redraw either.
-        Items_drawInRoom(currentCol, currentRow);
+        // Same plants wipe as DEBUG_EDGES_COMBO's own toggle (see its
+        // comment) -- Maze_draw() alone doesn't redraw them.
         Plants_drawInRoom(currentCol, currentRow);
     }
 }
@@ -5205,9 +5317,9 @@ static void updateDebugCombo(u16 state, u16 prevState)
     // lados: sin ella, soltar la B de B+C+START (HITBOX) con la START todavia
     // pulsada daria el flanco y abriria tambien el panel.
     //
-    // Solo donde el panel puede vivir (ver soundViewStateOk). De paso eso saca
-    // a STATE_INTRO, donde la START es uno de los "pulsa algo" que arrancan la
-    // intro y abrir el panel seria un doble disparo.
+    // Solo donde el panel puede vivir (ver soundViewStateOk): la partida. De
+    // paso eso saca al menu, donde la START es el interruptor del sonido, y a
+    // STATE_INTRO, donde es uno de los "pulsa algo" que arrancan la intro.
     if (soundViewStateOk()
         && ((state & (SOUND_VIEW_COMBO | SOUND_VIEW_EXCLUDE)) == SOUND_VIEW_COMBO)
         && ((prevState & (SOUND_VIEW_COMBO | SOUND_VIEW_EXCLUDE)) != SOUND_VIEW_COMBO))
@@ -5254,12 +5366,11 @@ static void updateDebugCombo(u16 state, u16 prevState)
         {
             Maze_setDebugEdgesVisible(!Maze_debugEdgesVisible());
             // Maze_draw() repaints every tile of BG_A from scratch (same
-            // "wipes the letter/plants" situation its other call sites
-            // already comment on) -- without these two, toggling RUTAS
-            // off blanked this room's letter and plants (user report:
-            // "al sacar este modo... se borran").
+            // "wipes the plants" situation its other call sites already
+            // comment on) -- without this, toggling RUTAS off blanked
+            // this room's plants (user report: "al sacar este modo... se
+            // borran").
             Maze_draw();
-            Items_drawInRoom(currentCol, currentRow);
             Plants_drawInRoom(currentCol, currentRow);
         }
     }
@@ -5305,7 +5416,7 @@ static void drawDebugView(void)
     VDP_setTextPriority(1);
 
     {
-        static const char *const stateNames[] = { "INTR", "MENU", "PLAY", "OVER", "SCOR", "COLL", "WIN ", "GALX" };
+        static const char *const stateNames[] = { "INTR", "MENU", "PLAY", "OVER", "COLL", "WIN ", "GALX" };
 
         sprintf(buf, "ST:%s", stateNames[gameState]);
         VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW);
@@ -5361,9 +5472,6 @@ static void drawDebugView(void)
             countDeadEnemies(), (u16) (presetSave[sizePresetIndex].scoreRooms * roomEnemyCount()),
             roomEnemyCount());
     VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 6);
-
-    sprintf(buf, "ITM %d/%d ALL:%d", Items_collectedCount(), itemCount, Items_allCollected());
-    VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 7);
 
     sprintf(buf, "MSEED:%u RSEED:%u", mapSeed, roomSeedFor(currentCol, currentRow));
     VDP_drawTextBG(BG_B, buf, 1, DEBUG_VIEW_FIRST_ROW + 8);
@@ -5450,11 +5558,27 @@ int main(bool hardReset)
     // separate palette load -- just a smaller (1 tile, 8x8) silhouette
     // shown instead of playerShip while the guide map is open.
     mapShipSprite = SPR_addSprite(&mapShip, 0, 0, TILE_ATTR(PAL1, TRUE, FALSE, FALSE));
-    // PAL0: el arte ya viene con las tintas de las plantas (11/12/13), asi que
-    // no hace falta linea de paleta propia -- no queda ninguna libre.
-    itemIconSprite = SPR_addSprite(&itemIcons, 0, 0, TILE_ATTR(PAL0, TRUE, FALSE, FALSE));
-    SPR_setVisibility(itemIconSprite, HIDDEN);
 
+    // Los digitos del cartelito de puntos (ver KILLPOP_MAX): uno por cifra y
+    // por cartelito, todos escondidos hasta que haya algo que ensenar. PAL0,
+    // igual que la fuente de la que salen -- su tinta es el indice 15 y no
+    // gastan linea de paleta.
+    {
+        bool todos = TRUE;
+        u8 i, g;
+
+        for (i = 0; i < KILLPOP_MAX; i++)
+            for (g = 0; g < KILLPOP_GLYPHS; g++)
+            {
+                killPopSprites[i][g] = SPR_addSprite(&killpopDigits, 0, 0,
+                                                     TILE_ATTR(PAL0, TRUE, FALSE, FALSE));
+                if (killPopSprites[i][g] == NULL)
+                    todos = FALSE;
+                else
+                    SPR_setVisibility(killPopSprites[i][g], HIDDEN);
+            }
+        killPopReady = todos;
+    }
     // PAL2 la trae entera enemyShip: una tinta por especie y el blanco del
     // nucleo (ver enemiesPerRoom arriba). El menu le pisa el indice 1 y lo
     // devuelve al salir, y "BACK TO SPACE" el 15.
@@ -5538,23 +5662,6 @@ int main(bool hardReset)
                     Menu_fadeInSprites(sizePresetIndex, unlockedPlanets, completed);
                 }
             }
-        }
-        else if (gameState == STATE_SCORES)
-        {
-            // Any button at all goes back (user request: "si el usuario
-            // pulsa boton en high scores se va al menu de nuevo"). Edge
-            // detected, so the press that brought us here cannot bounce
-            // straight back out, and the same press is not seen by the
-            // menu either -- prevState carries it into next frame.
-            const u16 anyButton = BUTTON_A | BUTTON_B | BUTTON_C | BUTTON_START |
-                                  BUTTON_UP | BUTTON_DOWN | BUTTON_LEFT | BUTTON_RIGHT;
-
-            typeStep(); // la tabla se escribe sola
-
-            if ((state & anyButton) && !(prevState & anyButton))
-                leaveScoreTable();
-            else if (++screenAlternateTimer >= SCREEN_ALTERNATE_FRAMES)
-                leaveScoreTable(); // its turn is over, hand back to the menu
         }
         else if (gameState == STATE_UPGRADES)
         {
@@ -5747,19 +5854,6 @@ int main(bool hardReset)
                 Sfx_setEnabled(!Sfx_isEnabled());
                 drawMenu();
             }
-
-            // Hand over to the high-score table after a while untouched.
-            // Guarded on still being in the menu: pressing A above starts
-            // a run, and this must not then pull the table over it. Any
-            // input at all restarts the wait, so the table never appears
-            // while the planet bar is being browsed.
-            if (gameState == STATE_MENU)
-            {
-                if (state != prevState)
-                    screenAlternateTimer = 0;
-                else if (++screenAlternateTimer >= SCREEN_ALTERNATE_FRAMES)
-                    enterScoreTable();
-            }
         }
         else if ((gameState == STATE_GAMEOVER) || (gameState == STATE_REWARD))
         {
@@ -5768,7 +5862,11 @@ int main(bool hardReset)
             // A sigue volviendo al menu aunque ya no se anuncie (user
             // request: quitar el "PRESS A TO RETURN").
             if ((state & BUTTON_A) && !(prevState & BUTTON_A))
+            {
+                if (gameState == STATE_GAMEOVER)
+                    deathScreenTeardown();   // las siluetas y la paleta de la muerte
                 resetToMenu();
+            }
         }
         // Both map-screen tools (only ever on during STATE_PLAYING) run
         // INSTEAD of the game: the ship, the enemy and every collection
@@ -5866,17 +5964,14 @@ int main(bool hardReset)
             // rule the static noise already had, so both halves of this
             // device behave identically). Which of the two actually shows
             // depends on whether letter A -- the in-fiction "map device"
-            // -- has been collected yet (Items_collectedCount(), see
-            // mapShowingNoise's own doc comment): static beforehand, the
-            // real overlay afterwards. Either way it vanishes the instant
-            // A is released, no on/off memory.
+            // -- ya no hay nada que recoger para tenerlo (ver
+            // mapShowingNoise): sale siempre el mapa de verdad, y
+            // desaparece en cuanto se suelta A, sin memoria de encendido.
             // The map works from the insertion room too (user request:
-            // "desde la sala de insercion el mapa (si ya lo tiene la nave
-            // por que ha recogido A en ese planeta) tiene que estar
-            // disponible") -- same rules as anywhere else, the real
-            // overlay once letter A is in hand and the static until then.
-            // The room is drawn on the map already; what it never had was
-            // a way to open it from inside.
+            // "desde la sala de insercion el mapa... tiene que estar
+            // disponible") -- same rules as anywhere else. The room is
+            // drawn on the map already; what it never had was a way to
+            // open it from inside.
             {
                 // Se arma al soltar: desde aqui, A abre el mapa como siempre.
                 if (!(state & BUTTON_A))
@@ -5887,7 +5982,7 @@ int main(bool hardReset)
                     if (!mapViewOpen)
                     {
                         mapViewOpen = TRUE;
-                        mapShowingNoise = !(Items_collectedCount() > 0);
+                        mapShowingNoise = FALSE; // el mapa ya no se gana, ver mapShowingNoise
 
                         if (mapShowingNoise)
                         {
@@ -6016,14 +6111,11 @@ int main(bool hardReset)
                     // Maze_draw() repaints every tile of BG_A, wiping
                     // whatever the room had on it along with the map
                     // overlay (or the static) -- put it back. La sala de
-                    // insercion no tiene nada que devolver: ni letra ni
+                    // insercion no tiene nada que devolver: no lleva
                     // plantas, y su rotulo WELCOME vive en BG_B, que
                     // Maze_draw no toca.
                     if (!inInsertRoom)
-                    {
-                        Items_drawInRoom(currentCol, currentRow);
                         Plants_drawInRoom(currentCol, currentRow);
-                    }
                     // Restores the ship's normal color (spec §23) -- only
                     // the one word that PLAYER_SHIP_INK_INDEX touched, the
                     // transparent index0 was never changed.
@@ -6143,14 +6235,10 @@ int main(bool hardReset)
                 else if (exitDir == exitDirForDoorDir(menuDoorDir))
                 {
                     // Walked out through the menu-exit door (spec §36),
-                    // whether every letter is collected (phase complete)
-                    // or not -- straight back to the menu either way.
-                    // resetToMenu() saves progress (spec §35);
-                    // collectedCount naturally equals itemCount when the
-                    // run was won, which is exactly what should show
-                    // there (its own doc comment). Used to show a "FASE
-                    // COMPLETADA" screen first and wait for BUTTON_A when
-                    // Items_allCollected() -- removed per user request
+                    // este el planeta limpio o no -- de vuelta al menu en
+                    // los dos casos. resetToMenu() saves progress (spec
+                    // §35). Used to show a "FASE COMPLETADA" screen first
+                    // and wait for BUTTON_A -- removed per user request
                     // ("elimina la pantalla de fase completada, simplemente
                     // vuelve al menu").
                     resetToMenu();
@@ -6235,69 +6323,27 @@ int main(bool hardReset)
                         wasWallBlocked = blockedNow;
                     }
 
-                    // Cheap box pre-check first: this runs once per px moved,
-                    // and the letter only lives in the hub's cell.
-                    if ((exitDir == EXIT_NONE) &&
-                        (player.x > (MAZE_DOOR_COL - 1) * MAZE_TILE_PX) && (player.x < (MAZE_DOOR_COL + 1) * MAZE_TILE_PX) &&
-                        (player.y > (MAZE_DOOR_ROW - 1) * MAZE_TILE_PX) && (player.y < (MAZE_DOOR_ROW + 1) * MAZE_TILE_PX) &&
-                        Items_tryCollect(currentCol, currentRow, player.x, player.y))
-                    {
-                        Sfx_playLetterPickup(); // user request -- placeholder, see sfx.h
-                        plantPathDirty = TRUE;  // the route may have been pointing at exactly this letter
-                        // La C hace gigante a la nave (ver setShipArt). Se
-                        // llama siempre: la funcion mira el recuento y solo
-                        // cambia el arte si de verdad toca.
-                        setShipArt();
-
-                        // Unlocks the next branch (spec §16) -- affects
-                        // rooms not yet loaded, they pick up the new lock
-                        // state next time loadRoom() regenerates them.
-                        // Checked BEFORE roomFullyCleared() below
-                        // because con MAP_TUNNEL (guidemap.h) si importa:
-                        // la letra ya no vive en un callejon sino en una
-                        // sala de paso, y lo que acaba de abrirse es la
-                        // sala de la letra siguiente, que es por donde
-                        // sigue el pasillo.
-                        GuideMap_recomputeLocks();
-
-                        if (roomFullyCleared(currentCol, currentRow))
-                        {
-                            // This room's own doors may have just gone
-                            // from sealed to open (user request: "las
-                            // puertas se abren en cada habitación siempre
-                            // que se hayan recogido las plantas y la
-                            // letra de la misma") -- regenerates+redraws
-                            // (wipes the now-collected letter's tile too).
-                            applyRoomDoorLocks(currentCol, currentRow);
-                        }
-                        else
-                        {
-                            Maze_draw();           // wipes the now-collected letter's tile (and any plants, spec §48)
-                            Plants_drawInRoom(currentCol, currentRow);
-                        }
-                        Items_drawHud();
-                    }
-
-                    // Plant pickup (spec §48, user request) -- no cheap
-                    // box pre-check like the letter's above: plants can
-                    // sit anywhere in the room, not just the hub cell, but
-                    // Plants_tryCollect is only ever a handful of AABB
-                    // tests (PLANTS_MAX_PER_ROOM=5), cheap enough to just
-                    // call every sub-step unconditionally.
+                    // Plant pickup (spec §48, user request) -- sin
+                    // pre-chequeo de caja: las plantas pueden estar en
+                    // cualquier celda de la sala, no en una fija, pero
+                    // Plants_tryCollect son cuatro AABB
+                    // (PLANTS_MAX_PER_ROOM=5), bastante barato para
+                    // llamarlo en cada sub-paso sin mirar antes.
                     if ((exitDir == EXIT_NONE) && Plants_tryCollect(currentCol, currentRow, player.x, player.y))
                     {
                         if (roomFullyCleared(currentCol, currentRow))
                         {
                             // This room's own doors may have just opened
-                            // (same user request as the letter pickup
-                            // above) -- regenerates+redraws (wipes the
-                            // now-collected plant's tile too).
+                            // (user request: "las puertas se abren en cada
+                            // habitación siempre que se hayan recogido las
+                            // plantas... de la misma") --
+                            // regenerates+redraws (wipes the now-collected
+                            // plant's tile too).
                             applyRoomDoorLocks(currentCol, currentRow);
                         }
                         else
                         {
-                            Maze_draw();           // wipes the now-collected plant's tile (and the letter, if still uncollected)
-                            Items_drawInRoom(currentCol, currentRow);
+                            Maze_draw();           // wipes the now-collected plant's tile
                             Plants_drawInRoom(currentCol, currentRow);
                         }
                         Plants_drawHud();
@@ -6336,12 +6382,19 @@ int main(bool hardReset)
                             }
                             else
                             {
+                                const u16 pago = Enemy_points(e->species);
+
                                 Enemy_kill(e);
                                 Sfx_playEnemyKill(); // user request -- placeholder, see sfx.h
                                 // Remember it for good (user request: "los
                                 // enemigos no reaparecen") -- loadRoom() checks
                                 // this on every future visit to this room.
                                 GuideMap_markEnemyKilled(currentCol, currentRow, i);
+                                // Y su precio al bote del planeta, que es el
+                                // score (ver EL SCORE SE SUMA), con la misma
+                                // cifra subiendo desde donde cayo.
+                                presetSave[sizePresetIndex].enemyPoints += pago;
+                                killPopAdd(pago, e->x, e->y);
                                 // Bounce (user request: "cuando haga melee...
                                 // y lo mate, la nave rebota") -- reverses
                                 // p->dir on the spot (UP<->DOWN, LEFT<->RIGHT),
@@ -6382,10 +6435,8 @@ int main(bool hardReset)
                     // con el mensaje. No vuelve hasta que ha terminado.
                     deathFreeze(killerIndex);
 
-                    SPR_setVisibility(playerSprite, HIDDEN);
-                    hideEnemySprites();
-                    drawInsertRoomStatus(FALSE);
-
+                    // Las siluetas NO se esconden: son la pantalla de game
+                    // over. Las recoge deathScreenTeardown al cerrarla.
                     gameOverBegin();
 
                     // La sala donde te matan vuelve a traer a todos sus
@@ -6420,6 +6471,7 @@ int main(bool hardReset)
                         // same reason the sibling inInsertRoom branch already
                         // skips that below -- so inInsertRoom flips TRUE.
                         inInsertRoom = TRUE;
+                        killPopClear();             // igual que al cruzar a otra sala
                         loadExtractionRoom(TRUE);   // vuelve andando: la salida al menu, abierta
                         Maze_draw();
                                         positionPlayerEnteringViaDoorDir(insertRoomDoorDir, insertLinkOffset);
@@ -6428,6 +6480,9 @@ int main(bool hardReset)
                     }
                     else
                     {
+                        // La sala cambia: los puntos que estuvieran subiendo
+                        // se quedan limpios aqui y no en la siguiente.
+                        killPopClear();
                         enterRoomFrom(exitDir);
                     }
                 }
@@ -6458,14 +6513,16 @@ int main(bool hardReset)
                 {
                     presetSave[sizePresetIndex].scoreFrames++;
 
-                    // Los objetivos del planeta son las letras y las
-                    // plantas, los mismos que encienden "BACK TO SPACE".
-                    // Antes pedia tambien matar a todos los enemigos, que
-                    // con uno por sala era exigente y con seis es
-                    // inalcanzable: el reloj no se paraba nunca y el
-                    // marcador se iba a cero en los planetas grandes.
-                    // allEnemiesDead() sigue ahi para el recuento.
-                    if (Items_allCollected() &&
+                    // El objetivo del planeta son sus PLANTAS, el mismo
+                    // que enciende "BACK TO SPACE" (eran las plantas y las
+                    // letras; las letras ya no existen). Antes pedia
+                    // tambien matar a todos los enemigos, que con uno por
+                    // sala era exigente y con seis es inalcanzable: el
+                    // reloj no se paraba nunca y el marcador se iba a cero
+                    // en los planetas grandes. allEnemiesDead() sigue ahi
+                    // para el recuento. plantsTotal a cero es un total sin
+                    // contar todavia, no un planeta ya limpio.
+                    if ((presetSave[sizePresetIndex].plantsTotal > 0) &&
                         (Plants_collectedCount() >= presetSave[sizePresetIndex].plantsTotal))
                     {
                         presetSave[sizePresetIndex].scoreDone = TRUE;
@@ -6476,7 +6533,6 @@ int main(bool hardReset)
                         gameState = STATE_REWARD;
                         SPR_setVisibility(playerSprite, HIDDEN);
                         hideEnemySprites();
-                        updateItemIcon();
                         drawInsertRoomStatus(FALSE);
                         rewardBegin();
                     }
@@ -6485,7 +6541,7 @@ int main(bool hardReset)
         }
 
         // FPS debug readout (user request), top-right corner on BG_B --
-        // same plane/high-priority trick Items_drawHud uses, so it stays
+        // same plane/high-priority trick Plants_drawHud uses, so it stays
         // visible over BG_A's low-priority maze/menu tiles without those
         // needing to coordinate with it. SYS_getFPS() must be called
         // exactly once per frame (its own doc comment) -- this is that
@@ -6524,9 +6580,9 @@ int main(bool hardReset)
         hudLinesDirty = FALSE; // both readers above have had their frame
         drawDebugView(); // no-op unless the debug combo turned it on
         drawSoundView(); // idem, el inventario de sonidos (START)
-        updateItemIcon(); // el icono del objeto de la sala, ver su propio comentario
         drawCollisionGizmos(); // no-op unless HITBOX is on and gameState is STATE_PLAYING
         drawPlantPath(); // no-op unless PLANTA is on and gameState is STATE_PLAYING
+        killPopStep();   // los puntos del enemigo atropellado, trepando
         drawReturnToInsertHint(); // no-op until every letter is in hand
 
         prevState = state;

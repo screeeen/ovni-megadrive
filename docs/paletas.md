@@ -22,9 +22,9 @@ columnas.
 
 ## PAL0 — el escenario, el texto y el HUD
 
-El plano BG_A (laberinto), BG_B (HUD y textos), las plantas y los iconos de
-letra. Es la unica paleta que vive a la vez en fondo y en sprite
-(`itemIconSprite`).
+El plano BG_A (laberinto), BG_B (HUD y textos) y las plantas. Era tambien la
+unica paleta que vivia a la vez en fondo y en sprite, por el icono del objeto
+de la sala; ese sprite se fue con las letras y hoy PAL0 es solo de fondo.
 
 | idx | en partida | en el menu | quien lo escribe |
 |----|------------|------------|------------------|
@@ -109,10 +109,12 @@ sprites de planeta y el cursor) y **libre durante la partida**, que es cuando
    cambia ningun texto. El indice 1 solo es el violeta que el menu pisa para
    los planetas cerrados.
 
-2. **La letra tras puerta cerrada no sale amarilla.** `Maze_setTextColorLocked()`
+2. **La letra tras puerta cerrada no salia amarilla.** `Maze_setTextColorLocked()`
    se limita a cambiar a PAL3, y da por hecho que "PAL3's index1 is already
    yellow throughout gameplay". Pero el texto pinta con el 15, y PAL3[15]
-   durante la partida es lo que trae `planetSmall`, no el amarillo.
+   durante la partida es lo que trae `planetSmall`, no el amarillo. Ya no se
+   ve: las letras no existen y nadie llama a esa funcion -- pero el error
+   sigue dentro, listo para morder al siguiente que la use.
 
 3. **Las puertas selladas tampoco salian amarillas** (arreglado en la rama
    `bomberman`, no en `backto16`). El arte de celda de 16x16 pinta con

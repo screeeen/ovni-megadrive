@@ -12,21 +12,17 @@
 #include <genesis.h>
 #include "maze.h"
 #include "guidemap.h"
-#include "items.h"
 
 // --- lo que guidemap.c y maze.c esperan de fuera
 const TileSet mazeTiles;
 const TileSet mapTiles;
 
-// Al hornear, todas las puertas van abiertas: el cierre por letras es
-// progreso de partida y no cambia el tallado (maze.h lo documenta: "the
-// interior carve is unaffected").
-bool Items_isUnlocked(u8 n) { (void) n; return TRUE; }
-bool Items_revealedOnMap(u8 col, u8 row, char *outLetter)
-{ (void) col; (void) row; (void) outLetter; return FALSE; }
+// Al hornear, todas las puertas van abiertas; ya no hacen falta postizos
+// de items.c porque las letras no existen (peticion del usuario: "quita
+// las letras"). El tallado no cambia: las posiciones de sala de objeto
+// siguen saliendo igual, que es lo que fija el enlace de insercion.
 void Menu_setVisible(bool v) { (void) v; }
 
-void Items_drawHud(void) { }
 void Hud_drawText(const char *s, u16 x, u16 y) { (void) s; (void) x; (void) y; }
 
 #include "../../src/maze.c"

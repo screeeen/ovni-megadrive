@@ -691,7 +691,7 @@ void Plants_drawHud(void)
     char buf[20];
 
     sprintf(buf, "PLANTS:%d/%d", total, planetTotal);
-    Hud_drawText(buf, 14, 1); // fuente propia del HUD, igual que Items_drawHud
+    Hud_drawText(buf, 1, 1); // donde estaban las letras (peticion del usuario)
 }
 
 u16 Plants_collectedCount(void)

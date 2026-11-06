@@ -10,12 +10,12 @@
 // grupos de varias en línea." A plant is one maze cell, drawn with its
 // own tile, y no hay dos iguales en todo el juego: la forma sale del
 // indice unico de cada planta (ver Plants_buildTile mas abajo).
-// Unlike items.h's letters, there's no COLLECTION order -- just a
+// No hay orden de recogida -- just a
 // running counter. They do gate something now, though (user request:
 // "las puertas se abren en cada habitación siempre que se hayan
 // recogido las plantas y la letra de la misma"): main.c's
 // Plants_allCollectedInRoom() below feeds into every room's own door
-// lock, alongside the letter.
+// lock, y desde que no hay letras es lo UNICO que lo abre.
 //
 // Placed in PLANTS_LINES_PER_ROOM (plants.c, 3 -- 1 original + 2 more,
 // user request: "añade dos hileras más de plantas") independent lines
@@ -32,7 +32,7 @@
 // while spawning).
 
 // Clears every room's collected-plant state and the running total. Call
-// once per newGame(), alongside Items_reset().
+// once per newGame().
 // Deja puestas las tres tintas de la flora en PAL0. Una vez al arrancar,
 // junto a Maze_loadGraphics(). El dibujo no se carga: se arma al vuelo.
 void Plants_loadGraphics(void);
@@ -114,16 +114,14 @@ void Plants_invalidateCache(void);
 // lines) the ship's 16x16 box newly overlaps as collected (persisted
 // per-room) and bumps the running total. Returns TRUE if at least one
 // was collected this call (caller should redraw: Maze_draw() +
-// Plants_drawInRoom() + Plants_drawHud(), same pattern a letter pickup
-// already uses).
+// Plants_drawInRoom() + Plants_drawHud()).
 bool Plants_tryCollect(u8 col, u8 row, s16 playerX, s16 playerY);
 
 // Draws every still-uncollected plant of THIS room (the one
 // Plants_spawnForRoom last ran for), across all its lines, at each
-// one's fixed cell position. Call after Maze_draw() -- like
-// Items_drawInRoom, this only touches those tiles, not the rest of the
-// plane. col/row select which room's collected-state to check (the
-// caller's current room).
+// one's fixed cell position. Call after Maze_draw() -- this only touches
+// those tiles, not the rest of the plane. col/row select which room's
+// collected-state to check (the caller's current room).
 // Dibuja las plantas sin recoger de esa sala: cada una, 2x2 teselas de fondo
 // que llenan su celda de 16 px (peticion del usuario: "las plantas dejalas en
 // 16x16"). Por eso no pisan nada de alrededor, y por eso siguen saliendo del
@@ -132,8 +130,10 @@ bool Plants_tryCollect(u8 col, u8 row, s16 playerX, s16 playerY);
 void Plants_drawInRoom(u8 col, u8 row);
 
 // Draws the running total against this planet's real total ("PLANTAS:
-// n/TOTAL", user request) on BG_B row 1, to the right of Items_drawHud's
-// own letter tracker -- same plane/row/high-priority trick. Reads
+// n/TOTAL", user request) on BG_B row 1, donde estaba el rastreador de
+// letras -- las letras ya no existen (peticion del usuario: "plantas en
+// el hud va en el lugar de las letras") y esta es la unica fila de HUD
+// que queda, con el mismo truco de plano/prioridad de siempre. Reads
 // Plants_setPlanetTotal()'s value for the denominator, so call that
 // first. Call once after Plants_reset() and again every time
 // Plants_tryCollect() returns TRUE.
@@ -141,14 +141,12 @@ void Plants_drawHud(void);
 
 // How many plants have been collected so far THIS session (spec §51) --
 // same value Plants_drawHud() prints. main.c saves this into
-// presetSave[].plantsCollected on resetToMenu(), same pattern
-// Items_collectedCount() already has for letters.
+// presetSave[].plantsCollected on resetToMenu().
 u16 Plants_collectedCount(void);
 
 // Restores a saved running total instantly (spec §51, resuming a
-// planet) -- a plain setter, no order/position to replay the way
-// Items_fastForward has to. Call right after Plants_reset(), before any
-// room loads.
+// planet) -- a plain setter, no order/position to replay. Call right
+// after Plants_reset(), before any room loads.
 //
 // BUG FIX (user report: "94 DE 88 PLANTAS" in the menu -- collected
 // exceeding the real total). This setter alone was never enough: it

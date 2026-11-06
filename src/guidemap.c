@@ -2,7 +2,6 @@
 #include "maze.h"
 #include "levels.h"
 #include "resources.h"
-#include "items.h"
 
 typedef struct { u8 col, row; } Coord;
 
@@ -26,8 +25,10 @@ static u16 frontierCount;
 static u8 dist[MAX_MAP_ROWS][MAX_MAP_COLS];
 
 // roomLocked[][] from the most recent GuideMap_recomputeLocks() call (spec
-// §16): TRUE only for the (at most itemCount) rooms that are a not-yet-due
-// letter's own dead end.
+// §16). Lo cerraba una letra todavia no debida, y las letras ya no existen
+// (peticion del usuario: "quita las letras"), asi que hoy esta tabla esta
+// siempre entera a FALSE. Se queda, y con ella el aspecto de puerta sellada
+// que lee main.c: es el enganche para lo siguiente que cierre una sala.
 static bool roomLocked[MAX_MAP_ROWS][MAX_MAP_COLS];
 
 // TRUE for every room on the unique tree path between (startCol,startRow)
@@ -480,27 +481,12 @@ static u8 bfsFromStart(void)
 void GuideMap_recomputeLocks(void)
 {
     s16 col, row;
-    u8 n;
 
+    // Nada cierra una sala desde que no hay letras: esto solo deja la
+    // tabla limpia (ver roomLocked).
     for (row = 0; row < mapRows; row++)
         for (col = 0; col < mapCols; col++)
             roomLocked[row][col] = FALSE;
-
-    for (n = 0; n < itemCount; n++)
-    {
-        // The start room can never be locked (the player begins there,
-        // and unlike a real item dead end it can have up to 4 through
-        // doors serving the rest of the map) -- selectItemRooms()'s one
-        // documented exception, using it as a fallback item room on a map
-        // too small for enough real dead ends, must leave it just as open
-        // as it always was rather than trying to seal a room with no
-        // single door to seal.
-        if ((itemCol[n] == startCol) && (itemRow[n] == startRow))
-            continue;
-
-        if (!Items_isUnlocked(n))
-            roomLocked[itemRow[n]][itemCol[n]] = TRUE;
-    }
 }
 
 bool GuideMap_isRoomLocked(u8 col, u8 row)
@@ -1152,13 +1138,10 @@ void GuideMap_drawOverlay(void)
             if (!roomShown((u8) col, (u8) row))
                 continue; // fog of war (spec §17), unless the debug reveal
                           // is on: never-visited rooms are
-                          // fully hidden -- box, corridors and letter alike
-                          // -- not just shown differently. A locked room
-                          // (spec §16) can never be visited either (the
-                          // unlock is monotonic), so this also covers it.
-                          // The itemCount item rooms are the one
-                          // exception, drawn in a separate pass below
-                          // (spec §21) regardless of visited state.
+                          // fully hidden -- box and corridors alike --
+                          // not just shown differently. Sin letras ya no
+                          // hay excepcion ninguna: lo que no se ha
+                          // pisado, no se ve.
 
             // Every visited room (current or not) is fully solid (spec
             // §23) -- the blinking white ship sprite (main.c) is what
@@ -1180,109 +1163,14 @@ void GuideMap_drawOverlay(void)
                 putTile(MAP_TILE_CORRIDOR_H, PAL0, rx + ROOM_BOX_W, ry);
             if (cell.doorS && (row + 1 < mapRows) && roomShown((u8) col, (u8) (row + 1)))
                 putTile(MAP_TILE_CORRIDOR_V, PAL0, rx + (ROOM_BOX_W / 2), ry + ROOM_BOX_H);
-
-            // Item letter (spec §13/§17): also gated on cell.visited now
-            // (guaranteed true here by the `continue` above) -- letters no
-            // longer act as a beacon through the fog, discovering one is
-            // part of exploring. Only the letters up to the one currently
-            // due are revealed (Items_revealedOnMap) once the room itself
-            // has been seen. Drawn on top of the box, centered in the
-            // middle column (same column the N/S corridor stub would use).
-            {
-                char letter;
-
-                if (Items_revealedOnMap((u8) col, (u8) row, &letter))
-                {
-                    char s[2];
-
-                    s[0] = letter;
-                    s[1] = '\0';
-                    // Default colour -- this pass only ever runs for
-                    // cell.visited rooms (the `continue` above), which by
-                    // construction can't be locked.
-                    VDP_drawText(s, rx + (ROOM_BOX_W / 2), ry);
-                }
-            }
         }
     }
 
-    // All itemCount item rooms (spec §21, replaces §20's single-letter
-    // beacon): regardless of visited/locked state, show that room's
-    // letter AND a hollow-border box -- the "known, unvisited" look the
-    // map used before the §17 fog-of-war tightened things, now scoped to
-    // only these itemCount rooms instead of every explored-but-unvisited
-    // cell. A room already drawn by the main pass above (visited,
-    // including the current room) is skipped here -- it already shows
-    // its letter via Items_revealedOnMap and keeps its normal solid look.
-    {
-        u8 n;
-
-        for (n = 0; n < itemCount; n++)
-        {
-            const u8 icol = itemCol[n];
-            const u8 irow = itemRow[n];
-            u16 rx, ry;
-            char s[2];
-
-            if (guideMap[irow][icol].visited)
-                continue;
-
-            roomBoxOriginTiles(icol, irow, &rx, &ry);
-
-            // The hollow "known but never walked into" box -- skipped
-            // while the reveal is on, where the main pass above has
-            // already drawn this same room solid like every other one
-            // and a hollow box on top would read as fog that isn't
-            // there any more. Its corridor stub and its letter below
-            // still draw either way: that's where a locked letter's
-            // yellow comes from.
-            if (!revealAll)
-            {
-                putTile(MAP_TILE_CORNER_TL, PAL0, rx,     ry);
-                putTile(MAP_TILE_EDGE_T,    PAL0, rx + 1, ry);
-                putTile(MAP_TILE_CORNER_TR, PAL0, rx + 2, ry);
-                putTile(MAP_TILE_CORNER_BL, PAL0, rx,     ry + 1);
-                putTile(MAP_TILE_EDGE_B,    PAL0, rx + 1, ry + 1);
-                putTile(MAP_TILE_CORNER_BR, PAL0, rx + 2, ry + 1);
-            }
-
-            // The one corridor stub connecting this item's dead end back to
-            // its (real, tree) parent -- user request: "muestra las
-            // puertas en el mapa, con sus estados". This is the only door
-            // that can ever be locked now (spec §16 rewrite), so it's the
-            // one door worth calling out with its own color here: PAL3
-            // (yellow, same convention as maze.c's locked-door walls and
-            // Maze_setTextColorLocked's letter) while still locked, plain
-            // PAL0 once unlocked -- which can happen before the player has
-            // actually walked in and set cell.visited, so this stub is the
-            // only way to see that a just-freed letter is now reachable
-            // without first finding it on foot. A dead-end room has
-            // exactly one door (selectItemRooms), so exactly one of these
-            // four fires -- except the documented start-room fallback,
-            // which is always already visited and never reaches this
-            // branch at all (see the `continue` above).
-            {
-                const u16 corridorPal = GuideMap_isRoomLocked(icol, irow) ? PAL3 : PAL0;
-                const MapCell icell = guideMap[irow][icol];
-
-                if (icell.doorE) putTile(MAP_TILE_CORRIDOR_H, corridorPal, rx + ROOM_BOX_W, ry);
-                if (icell.doorW) putTile(MAP_TILE_CORRIDOR_H, corridorPal, rx - 1, ry);
-                if (icell.doorS) putTile(MAP_TILE_CORRIDOR_V, corridorPal, rx + (ROOM_BOX_W / 2), ry + ROOM_BOX_H);
-                if (icell.doorN) putTile(MAP_TILE_CORRIDOR_V, corridorPal, rx + (ROOM_BOX_W / 2), ry - 1);
-            }
-
-            s[0] = (char) ('A' + n);
-            s[1] = '\0';
-            // Colored to match this item's own door (user request): yellow
-            // while its room is still locked (same yellow maze.c's own
-            // locked-door wall tiles use) -- this is the one letter-drawing pass that
-            // actually covers locked, never-visited item rooms too.
-            if (GuideMap_isRoomLocked(icol, irow))
-                Maze_setTextColorLocked();
-            VDP_drawText(s, rx + (ROOM_BOX_W / 2), ry);
-            Maze_restoreTextColor();
-        }
-    }
+    // AQUI IBA EL FARO DE LAS SALAS DE LETRA (spec §21): cada una con su
+    // letra y su recuadro hueco, vista o no, y con el amarillo de la que
+    // seguia cerrada. Fuera con las letras (peticion del usuario), asi que
+    // el mapa es niebla de guerra y nada mas: solo se ve lo pisado, que es
+    // lo que ya hace el bucle de arriba.
 
     // Insertion/extraction room (spec §37, user request: "quiero que la
     // habitación de inserción/extracción figure en el mapa") -- always

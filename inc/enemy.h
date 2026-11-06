@@ -102,6 +102,17 @@ bool Enemy_overlapsBox(const Enemy *e, s16 boxX, s16 boxY);
 // (normal, o estrujado contra el muro que acaba de golpear).
 u8 Enemy_frame(const Enemy *e);
 
+// LO QUE PAGA MATARLO, fijo y por especie (decision del usuario: "quiero
+// que los enemigos tengan un valor fijo y despues, al final, en el recuento,
+// se suman todos"). La tabla vive junto al enum, en enemy.c, para que no
+// puedan descuadrarse.
+//
+// Sube con el enum, y el enum va de lo simple a lo retorcido: el PATRULLA de
+// siempre cuesta 100 y el ESPECTRO que atraviesa muros 600. Como cuantas
+// especies entran en un planeta lo decide el propio planeta (main.c,
+// enemySpeciesCap), un planeta grande paga mas sin que haya que decirselo.
+u16 Enemy_points(u8 species);
+
 // Tres letras, para la vista de datos.
 const char *Enemy_speciesTag(u8 species);
 

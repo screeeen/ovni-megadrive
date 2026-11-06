@@ -107,11 +107,14 @@ extern u8 goalCol, goalRow;
 extern u8 insertLinkOffset;
 extern u8 insertLinkCol, insertLinkRow, insertLinkDir;
 
-// Item rooms (spec §13): letters A..A+itemCount-1, one per dead-end room
-// (exactly 1 door), picked by farthest-point sampling so they end up
-// spread apart from the start AND from each other, not clustered.
-// itemCol[n]/itemRow[n] is where letter n lives; items.c owns which ones
-// are collected. ITEM_COUNT is the largest itemCount any preset can pick
+// Item rooms (spec §13): one per dead-end room (exactly 1 door), picked
+// by farthest-point sampling so they end up spread apart from the start
+// AND from each other, not clustered. Ahi vivian las letras, que ya no
+// existen (peticion del usuario: "quita las letras"); estas posiciones se
+// quedan porque son ESTRUCTURALES -- de itemCol[0]/itemRow[0] sale el
+// enlace de insercion (selectInsertionLink, spec §29bis) y vienen
+// horneadas en res/levels.bin, asi que tocarlas cambiaria cada planeta.
+// ITEM_COUNT is the largest itemCount any preset can pick
 // (main.c) -- fixes the static array sizes below, same MAX_/active
 // relationship as MAX_MAP_COLS/mapCols above. itemCount itself is set by
 // main.c before calling GuideMap_generate() (spec §33: "fases mas
@@ -151,15 +154,12 @@ u8 GuideMap_doorOffset(u8 col, u8 row, u8 dir);
 
 // Recomputes which rooms are locked (spec §16, user request: "quiero que
 // las compuertas cerradas esten unicamente en la misma habitacion donde
-// esta la letra"): only a not-yet-due letter's own dead-end room
-// (Items_isUnlocked) is ever locked -- never an intermediate room on the
-// way to it, and never the whole branch beyond some earlier door the way
-// this used to work. Since an item room's single door IS the room, this
-// also directly answers "is this door sealed" for whichever ordinary room
-// borders it. Call once after GuideMap_generate()+Items_reset() (newGame)
-// and again every time Items_tryCollect() returns TRUE -- locking only
-// ever loosens as nextIndex advances, never the reverse, so a room already
-// visited can never become locked later. Read back via
+// esta la letra"). Lo que cerraba una sala era una letra todavia no
+// debida, y las letras ya no existen (peticion del usuario: "quita las
+// letras"), asi que esto solo deja la tabla limpia y NINGUNA sala sale
+// cerrada. Se queda llamandose desde newGame y se queda
+// GuideMap_isRoomLocked, que es lo que leen el mapa y las puertas: es el
+// enganche montado para lo siguiente que cierre una sala. Read back via
 // GuideMap_isRoomLocked().
 void GuideMap_recomputeLocks(void);
 

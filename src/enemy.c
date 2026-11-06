@@ -16,8 +16,10 @@
 #define EMOVE_GHOST 5
 
 // Fotogramas parado entre dos deslizamientos (ESP_DESLIZA), y cada cuanto
-// se reorienta el espectro.
-#define SLIDE_PAUSE_FRAMES 36
+// se reorienta el espectro. La pausa es ADEMAS su ventana vulnerable -- "se
+// mueve, mata" --, asi que sube de 36 a 60 por lo mismo que el reparto de
+// arriba: un segundo entero parado da para llegar y embestirlo.
+#define SLIDE_PAUSE_FRAMES 60
 #define GHOST_AIM_FRAMES   90
 
 // Celdas libres que como poco tiene que tener la carrera de un carril: un
@@ -34,13 +36,24 @@ typedef struct { u8 move, stepEvery, stepPx; u16 danger, vuln; } Kind;
 // Son los mandos de dificultad: el reparto de la torreta es el que decide
 // si una sala con una torreta en medio es un rodeo o una espera.
 // ESP_DESLIZA no usa los dos ultimos: su estado lo manda el movimiento.
+//
+// MAS TIEMPO VULNERABLES (peticion del usuario: "quiero que los enemigos esten
+// mas tiempo vulnerables, que sea mas facil avanzar"). Antes la torreta y el
+// acechador pasaban el 24% del tiempo vulnerables (220/70 y 190/60), que es lo
+// que convertia una sala con uno de ellos en una espera larga: ahora todos
+// pasan mas de la mitad del tiempo atropellables, y la ventana nunca baja de
+// unos 2,3 s -- lo que se tarda en cruzar una sala y embestir.
+//
+// El reparto RELATIVO se mantiene: la torreta sigue siendo la peor y el
+// espectro el mas blando. Lo que cambia es el suelo de todos.
 static const Kind kinds[ENEMY_SPECIES_COUNT] = {
-    { EMOVE_LANE,  1, 1, 100, 100 },
-    { EMOVE_STILL, 1, 0, 220,  70 },
-    { EMOVE_RING,  1, 2, 160,  80 },
-    { EMOVE_STALK, 1, 1, 190,  60 },
-    { EMOVE_SLIDE, 1, 3,   1,   1 },
-    { EMOVE_GHOST, 2, 1,  50, 150 },
+    //                        danger  vuln     % vulnerable (antes)
+    { EMOVE_LANE,  1, 1,  70, 150 },   // 68%  (50%)
+    { EMOVE_STILL, 1, 0, 130, 140 },   // 52%  (24%)  la torreta
+    { EMOVE_RING,  1, 2, 100, 150 },   // 60%  (33%)
+    { EMOVE_STALK, 1, 1, 110, 160 },   // 59%  (24%)  el acechador
+    { EMOVE_SLIDE, 1, 3,   1,   1 },   // --          lo manda su movimiento
+    { EMOVE_GHOST, 2, 1,  40, 210 },   // 84%  (75%)
 };
 
 static const char *const speciesTags[ENEMY_SPECIES_COUNT] = { "PAT", "TOR", "RON", "ACE", "DES", "ESP" };
@@ -461,7 +474,17 @@ void Enemy_spawnGroup(Enemy *list, u8 count, u8 speciesCap, u8 killedMask, u16 r
         e->aimTimer = GHOST_AIM_FRAMES;
         // La fase del parpadeo es lo unico que sale del random() compartido:
         // la sala no puede recibirte igual dos veces (peticion del usuario).
-        e->state = (random() & 1) ? ENEMY_VULNERABLE : ENEMY_DANGEROUS;
+        //
+        // Y el estado de salida se sortea CON SU REPARTO y no a cara o cruz:
+        // una especie que pasa el 84% del tiempo vulnerable aparecia la mitad
+        // de las veces matando, que es justo la entrada que no da tiempo a
+        // leer. Con el reparto de arriba, casi todos aparecen atropellables.
+        {
+            const u16 ciclo = (u16) (kinds[sp].danger + kinds[sp].vuln);
+
+            e->state = ((random() % ciclo) < kinds[sp].vuln)
+                       ? ENEMY_VULNERABLE : ENEMY_DANGEROUS;
+        }
         e->stateTimer = (u16) (random() % stateLimit(e));
         e->alive = TRUE;
     }
@@ -686,6 +709,14 @@ u8 Enemy_frame(const Enemy *e)
                      + e->squashDir);
 
     return (u8) ((e->species * 2) + vuln);
+}
+
+// Ver enemy.h: en el orden del enum, de la patrulla al espectro.
+static const u16 speciesPoints[ENEMY_SPECIES_COUNT] = { 100, 200, 300, 400, 500, 600 };
+
+u16 Enemy_points(u8 species)
+{
+    return (species < ENEMY_SPECIES_COUNT) ? speciesPoints[species] : 0;
 }
 
 const char *Enemy_speciesTag(u8 species)

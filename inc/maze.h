@@ -165,12 +165,16 @@ void Maze_doorOffsetRange(u8 dir, u8 *lo, u8 *hi);
 // space starts instead of each one guessing.
 #define MAZE_SCRATCH_TILE_COUNT (24 + 1)
 
-// Item-letter coloring: a letter is drawn yellow while the door it lives
-// behind is still locked (matching maze.c's own locked-door wall tiles,
-// menu.c's LOCKED_DOOR_INK_INDEX). Call Maze_setTextColorLocked() right
-// before such a VDP_drawText/VDP_drawTextBG call, then
-// Maze_restoreTextColor() immediately after -- every OTHER text draw in
-// the game (HUD, FPS...) assumes the default is restored in between.
+// El amarillo del texto que vive detras de una puerta CERRADA (el mismo de
+// las teselas de muro de puerta cerrada, menu.c's LOCKED_DOOR_INK_INDEX).
+// Call Maze_setTextColorLocked() right before such a
+// VDP_drawText/VDP_drawTextBG call, then Maze_restoreTextColor()
+// immediately after -- every OTHER text draw in the game (HUD, FPS...)
+// assumes the default is restored in between.
+//
+// HOY NO LO LLAMA NADIE: lo pedia la letra de una sala cerrada, y ni las
+// letras ni los cierres existen ya (peticion del usuario: "quita las
+// letras"). Se queda con el resto de la maquinaria de puerta sellada.
 void Maze_setTextColorLocked(void);
 void Maze_restoreTextColor(void);
 

@@ -266,20 +266,22 @@ static u8 tomboOpposite(u8 dir)
     return (u8) ((dir + 2) & 3);
 }
 
-// Random attempts per room, seeded from the room's own seed (still fully
-// deterministic per roomSeed), then TOMBO_FALLBACK_ATTEMPTS more drawn
-// from a seed that depends on NOTHING but this file -- so if every
-// roomSeed-derived attempt fails, the outcome is a pure function of the
-// door layout (which doors, and where), un dominio bastante pequeno para
-// recorrerlo entero en el anfitrion: 57.541 repartos de puerta x posicion
-// con los ocho tamanos de main.c, probados con dos semillas cada uno, y 23
-// de ellos (el 0,04%) acaban en el relleno trivial. Todas son salas de 3 o 4 puertas en las de menos de
-// 11 celdas de alto, y subir este numero no las arregla (probado a 223 y a
-// 191+32: 44 y 45) -- no es mala suerte, es que a ese tamano esas puertas
-// no dan sala. El tope lo pone el byte de la cache de intentos:
-// 2*TOMBO_STRICT_ATTEMPTS + TOMBO_FALLBACK_ATTEMPTS <= 255.
-#define TOMBO_STRICT_ATTEMPTS         16 // per puzzle tier
-#define TOMBO_FALLBACK_ATTEMPTS       200
+// CUANTOS INTENTOS LLEVA CADA TRAMO de la escalera de puzzle (puzzleTiers, mas
+// abajo) y de donde sale su semilla. Los tres primeros salen de la semilla de
+// la SALA, cada uno por su franja para que dos tramos no repitan el mismo
+// intento; el ultimo de una fija que no depende de NADA mas que de este
+// fichero, asi que si ni esos valen, lo que sale es funcion solo del reparto
+// de puertas (cuales y por donde) -- un dominio bastante pequeno para
+// recorrerlo entero en el anfitrion: 20.342 repartos -- las 15 combinaciones
+// de puertas x todas las posiciones de vano x los ocho tamanos de main.c, con
+// dos semillas cada uno. De ahi salen 516 (el 2,5%) que acaban en el relleno
+// trivial, repartos que ya no daban sala antes de esto (458 con la escalera de
+// tres tramos), y 86 (el 0,42%) de camino unico, que eran 1.235 (el 6,1%): es
+// el reparto de intentos que mejor cambia lo uno por lo otro.
+// El tope lo pone el byte de la cache de intentos: la suma cabe en 255.
+#define TOMBO_TIER_COUNT 4
+static const u8 tierAttempts[TOMBO_TIER_COUNT]  = { 48, 48, 64, 95 };
+static const u16 tierSeedBase[TOMBO_TIER_COUNT] = { 0, 0x4000, 0x8000, 0 };
 #define TOMBO_FALLBACK_SEED           0x5A17
 
 // The ONE place the room's shape is enforced during generation: a cell
@@ -816,17 +818,27 @@ static void tomboRebuildGraph(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hu
 //     way in, and never one obvious slide from where it lands.
 //   - and, in a room with 2+ doors, the hardest door-to-door trip is a real
 //     puzzle of at least TOMBO_HARD_EXIT_MOVES.
+//   - y la sala ofrece al menos TOMBO_MIN_LOOPS anillos: con un anillo hay
+//     dos formas de recorrerla, no una (ver tomboCountLoops).
 // These are the thresholds of the current difficulty tier -- see
 // generateRoomTombo: the strict tier is tried first, then progressively
-// easier ones for the odd door layout where nothing strict turns up (down to
-// no puzzle requirement at all, which is what guarantees a room always
-// comes out).
-typedef struct { s16 exitMin, hubMin, hardExit; } PuzzleTier;
-static const PuzzleTier puzzleTiers[3] = { { 2, 4, 5 }, { 2, 3, 4 }, { 0, 0, 0 } };
+// easier ones for the odd door layout where nothing strict turns up. El orden
+// en que se sueltan dice que importa mas: primero la profundidad del puzzle y
+// el anillo al final, porque una sala de camino unico se nota mas que una
+// facil. El ultimo tramo no pide nada, que es lo que garantiza que siempre
+// sale sala.
+typedef struct { s16 exitMin, hubMin, hardExit, loops; } PuzzleTier;
+static const PuzzleTier puzzleTiers[TOMBO_TIER_COUNT] = {
+    { 2, 4, 5, 1 },   // el puzzle entero, y con eleccion de recorrido
+    { 2, 3, 4, 1 },   // menos puzzle; el anillo se mantiene
+    { 0, 0, 0, 1 },   // sin puzzle, pero antes un anillo que un camino unico
+    { 0, 0, 0, 0 },   // el ultimo recurso: lo que salga, para que salga sala
+};
 static const PuzzleTier *puzzle = &puzzleTiers[0];
 #define TOMBO_EXIT_MIN_MOVES  (puzzle->exitMin)
 #define TOMBO_HUB_MIN_MOVES   (puzzle->hubMin)
 #define TOMBO_HARD_EXIT_MOVES (puzzle->hardExit)
+#define TOMBO_MIN_LOOPS       (puzzle->loops)
 
 // Breadth-first slide distances from `start` (0 = start itself, -1 =
 // unreachable) into dist[].
@@ -856,6 +868,45 @@ static void slideDistances(s16 start, s16 dist[SLIDE_MAX_NODES], u16 queue[SLIDE
             }
         }
     }
+}
+
+// CUANTAS FORMAS DISTINTAS DE RECORRER LA SALA (peticion del usuario: "no
+// tienen que ser todas recorridas en 1 solo camino"). En el grafo de
+// deslizamiento, ir de una parada a otra y volver es el MISMO pasillo, asi que
+// una sala de recorrido unico -- la serpiente de siempre -- es un arbol:
+// tantas aristas como paradas menos una. Cada arista de mas cierra un anillo,
+// y un anillo es una eleccion de verdad, porque la nave puede darle la vuelta
+// por los dos lados. Esto devuelve ese numero de aristas de mas (el
+// ciclomatico) contando solo las paradas marcadas en `reach`, que es un
+// conjunto conexo por construccion.
+static s16 tomboCountLoops(const bool *reach)
+{
+    u16 i;
+    s16 nodos = 0, aristas = 0;
+
+    for (i = 0; i < slideCount; i++)
+    {
+        u8 dir;
+
+        if (!reach[i])
+            continue;
+        nodos++;
+        for (dir = 0; dir < 4; dir++)
+        {
+            const s16 t = slideTo[i][dir];
+
+            if ((t < 0) || !reach[t])
+                continue;
+            // Si la vuelta existe, la arista la cuenta el extremo de indice
+            // menor y aqui no; si no existe (deslizarse de vuelta se pasa de
+            // largo), este es el unico sitio donde se cuenta.
+            if ((slideTo[t][tomboOpposite(dir)] == (s16) i) && (t < (s16) i))
+                continue;
+            aristas++;
+        }
+    }
+
+    return (nodos > 0) ? (s16) (aristas - nodos + 1) : 0;
 }
 
 // TRUE if, entering through door e, every other active door needs at least
@@ -1251,6 +1302,10 @@ static bool tomboValidate(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY, 
         }
 
         if (!hubSeen)
+            return FALSE;
+
+        // Y desde aqui la sala tiene que ofrecer mas de un recorrido.
+        if (tomboCountLoops(reach) < TOMBO_MIN_LOOPS)
             return FALSE;
 
         for (i = 0; i < slideCount; i++)
@@ -1651,6 +1706,31 @@ static u16 tomboBlockAlignedDoors(u8 doorMask, const u8 doorOff[4], s16 hubX, s1
 static s16 pocketX[CARVE_POCKET_MAX], pocketY[CARVE_POCKET_MAX];
 static u8 pocketCount;
 
+// LAS ESQUINAS DE LA SERPIENTE: donde gira. Ahi la nave PARA, porque el
+// pasillo se corta y deslizandose contra ese muro se queda quieta -- asi que
+// un brazo nuevo que salga de una esquina SI se puede tomar. Uno que salga de
+// la mitad de un tramo recto no: la nave pasa de largo por delante. Es la
+// lista de los sitios de los que se puede colgar un atajo.
+#define CARVE_CORNER_MAX 32
+static s16 cornerX[CARVE_CORNER_MAX], cornerY[CARVE_CORNER_MAX];
+static u8 cornerCount;
+
+static void cornerAdd(s16 x, s16 y)
+{
+    u8 i;
+
+    for (i = 0; i < cornerCount; i++)
+        if ((cornerX[i] == x) && (cornerY[i] == y))
+            return;
+
+    if (cornerCount < CARVE_CORNER_MAX)
+    {
+        cornerX[cornerCount] = x;
+        cornerY[cornerCount] = y;
+        cornerCount++;
+    }
+}
+
 static bool carveIsPocket(s16 x, s16 y)
 {
     u8 i;
@@ -1814,7 +1894,10 @@ static bool carveTail(s16 x, s16 y)
             const s16 ty = (s16) (y + (len * dirStepY[dir]));
 
             if (carveStraight(x, y, tx, ty, -1, -1))
+            {
+                cornerAdd(tx, ty);
                 return TRUE;
+            }
         }
     }
 
@@ -1855,16 +1938,62 @@ static void carveDoorPocket(u8 dir, const u8 doorOff[4], s16 *px, s16 *py)
     }
 }
 
+// LOS ATAJOS, que es lo que le quita a la sala el camino unico: pasillos
+// nuevos entre dos esquinas de la serpiente, que cierran un anillo. Dandole la
+// vuelta a un anillo la nave elige por donde, y si el anillo pasa por la letra
+// hay dos formas de ir a por ella. Cada atajo se talla con la misma regla que
+// el resto -- carveConnect no deja dos pasillos pegados -- asi que lo que sale
+// sigue siendo de un carril, y el que no cabe se deshace solo.
+// Dos esquinas cercanas no valen: de ahi sale otro codo, no un anillo.
+#define CARVE_LOOPS_MAX   3
+#define CARVE_LOOP_TRIES  24
+#define CARVE_LOOP_SPAN   5
+
+static void tomboCarveLoops(void)
+{
+    u8 hechos = 0, t;
+
+    if (cornerCount < 2)
+        return;
+
+    for (t = 0; (hechos < CARVE_LOOPS_MAX) && (t < CARVE_LOOP_TRIES); t++)
+    {
+        const u8 a = (u8) (random() % cornerCount);
+        const u8 b = (u8) (random() % cornerCount);
+        s16 dx, dy, cx, cy;
+
+        if (a == b)
+            continue;
+
+        dx = (s16) (cornerX[a] - cornerX[b]);
+        dy = (s16) (cornerY[a] - cornerY[b]);
+        if (dx < 0) dx = (s16) -dx;
+        if (dy < 0) dy = (s16) -dy;
+        if ((dx + dy) < CARVE_LOOP_SPAN)
+            continue;
+
+        if (carveConnect(cornerX[a], cornerY[a], cornerX[b], cornerY[b], &cx, &cy))
+        {
+            cornerAdd(cx, cy);
+            hechos++;
+        }
+    }
+}
+
 // Abre los pasillos de esta sala sobre la roca que dejo fillWallsFixed.
 // El llamante ya ha comprobado que la sala tiene 1 o 2 puertas.
 //
-// La sala es UNA serpiente: boca de la primera puerta -> un rodeo -> la celda
-// de la letra -> la segunda puerta (o un fondo de saco si no hay segunda).
-// Ni una bifurcacion, y no por simplificar: deslizandose, de un cruce salen
-// siempre dos direcciones alineadas, la nave pasa de largo por el y el tercer
-// brazo no se puede tomar NUNCA. Un cruce de tres es un pasillo muerto.
-// Por eso tampoco sabe hacer salas de 3 o 4 puertas: ahi hace falta un cruce,
-// y esas se las deja al generador de obstaculos (tomboTryOnce).
+// El esqueleto es UNA serpiente: boca de la primera puerta -> un rodeo -> la
+// celda de la letra -> la segunda puerta (o un fondo de saco si no hay
+// segunda). Encima, tomboCarveLoops le cose atajos entre esquinas, que es lo
+// que hace que la sala se pueda recorrer de varias formas y no de una.
+//
+// Lo que no vale es colgar un brazo de la MITAD de un tramo recto:
+// deslizandose, la nave pasa de largo por delante y ese brazo no se puede
+// tomar nunca. Por eso los atajos salen solo de las esquinas, donde la nave
+// para. Y por eso esto tampoco sabe hacer salas de 3 o 4 puertas: ahi hace
+// falta un cruce en medio, y esas se las queda el generador de obstaculos
+// (tomboTryOnce), que es de sala abierta.
 //
 // FALSE si no ha encontrado recorrido: el intento se descarta como cualquier
 // otro y se prueba con otra semilla.
@@ -1874,6 +2003,7 @@ static bool tomboCarve(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
     u8 dir, k, doors = 0, primera = 4, segunda = 4;
 
     pocketCount = 0;
+    cornerCount = 0;
 
     for (dir = 0; dir < 4; dir++)
         if (doorMask & (1 << dir))
@@ -1886,7 +2016,9 @@ static bool tomboCarve(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
         return FALSE;
 
     grid[hubY][hubX] = PATH;
+    cornerAdd(hubX, hubY);
     carveDoorPocket(primera, doorOff, &ax, &ay);
+    cornerAdd(ax, ay);
 
     // De la boca a la letra, dando el rodeo que se pueda. Si con los rodeos
     // ya no hay forma de llegar a la letra, se deshacen y se va derecho.
@@ -1899,21 +2031,32 @@ static bool tomboCarve(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
 
         if (carveConnect(wx, wy, rx, ry, &cx, &cy))
         {
+            cornerAdd(cx, cy);
             wx = rx; wy = ry;
+            cornerAdd(wx, wy);
         }
     }
 
     if (!carveConnect(wx, wy, hubX, hubY, &cx, &cy))
     {
+        // Los rodeos se deshacen enteros, asi que las esquinas que dejaron ya
+        // no existen: la lista vuelve a la boca de la puerta y a la letra.
         memcpy(grid, carveKeep, sizeof(carveKeep));
+        cornerCount = 0;
+        cornerAdd(hubX, hubY);
+        cornerAdd(ax, ay);
         if (!carveConnect(ax, ay, hubX, hubY, &cx, &cy))
             return FALSE;
     }
+    cornerAdd(cx, cy);
 
     if (doors == 2)
     {
         // Y de la letra a la otra puerta, con mas rodeo si cabe.
+        const u8 esquinasTramo1 = cornerCount;
+
         carveDoorPocket(segunda, doorOff, &bx, &by);
+        cornerAdd(bx, by);
         memcpy(carveKeep, grid, sizeof(carveKeep));
         wx = hubX; wy = hubY;
         for (k = 0; k < CARVE_WAYPOINTS; k++)
@@ -1923,18 +2066,25 @@ static bool tomboCarve(u8 doorMask, const u8 doorOff[4], s16 hubX, s16 hubY)
 
             if (carveConnect(wx, wy, rx, ry, &cx, &cy))
             {
+                cornerAdd(cx, cy);
                 wx = rx; wy = ry;
+                cornerAdd(wx, wy);
             }
         }
         if (!carveConnect(wx, wy, bx, by, &cx, &cy))
         {
             memcpy(grid, carveKeep, sizeof(carveKeep));
+            cornerCount = esquinasTramo1;
+            cornerAdd(bx, by);
             if (!carveConnect(hubX, hubY, bx, by, &cx, &cy))
                 return FALSE;
         }
+        cornerAdd(cx, cy);
     }
     else if (!carveTail(hubX, hubY))
         return FALSE;
+
+    tomboCarveLoops();
 
     return TRUE;
 }
@@ -2054,11 +2204,11 @@ static bool tomboTryOnce(u16 seed, s16 hubX, s16 hubY, u8 doorMask, const u8 doo
 // it reseeds the RNG, refills the grid, and the validator draws no random
 // numbers -- so the code of the attempt that got accepted is all that is
 // needed to rebuild the exact same room later, without the failed attempts
-// before it. Codes run over the three phases in order:
-//   0 .. STRICT-1                    strict puzzle, seed roomSeed + n
-//   STRICT .. 2*STRICT-1             middle tier,   seed roomSeed + 0x4000 + n
-//   2*STRICT .. +FALLBACK-1          no puzzle,     fixed seed (verified exhaustively)
-#define TOMBO_CODE_COUNT (2 * TOMBO_STRICT_ATTEMPTS + TOMBO_FALLBACK_ATTEMPTS)
+// before it. Los codigos recorren los tramos en orden, tierAttempts[] intentos
+// cada uno, y los tres primeros con su propia franja de la semilla de la sala
+// (tierSeedBase[]).
+#define TOMBO_CODE_COUNT (tierAttempts[0] + tierAttempts[1] + \
+                          tierAttempts[2] + tierAttempts[3])
 
 // Per-room cache of accepted attempt codes, indexed by the caller's slot
 // (main.c: one per grid room, plus MAZE_INSERT_CACHE_SLOT) within
@@ -2363,33 +2513,31 @@ void Maze_clearRoomCache(void)
 static bool tomboTryCode(u16 code, s16 hubX, s16 hubY, u8 doorMask, const u8 doorOff[4],
                           u16 roomSeed, bool useFixedWall, u8 fixedWallVariant, bool spawnAtHub, bool validate)
 {
-    u16 seed;
+    u16 seed, base = 0;
+    u8 tier;
 
-    if (code < TOMBO_STRICT_ATTEMPTS)
+    for (tier = 0; tier < TOMBO_TIER_COUNT - 1; tier++)
     {
-        puzzle = &puzzleTiers[0];
-        seed = roomSeed + code;
+        if (code < (u16) (base + tierAttempts[tier]))
+            break;
+        base = (u16) (base + tierAttempts[tier]);
     }
-    else if (code < 2 * TOMBO_STRICT_ATTEMPTS)
-    {
-        puzzle = &puzzleTiers[1];
-        seed = roomSeed + 0x4000 + (code - TOMBO_STRICT_ATTEMPTS);
-    }
-    else
-    {
-        puzzle = &puzzleTiers[2];
-        seed = TOMBO_FALLBACK_SEED + (code - (2 * TOMBO_STRICT_ATTEMPTS));
-    }
+
+    puzzle = &puzzleTiers[tier];
+    seed = (tier == (TOMBO_TIER_COUNT - 1))
+           ? (u16) (TOMBO_FALLBACK_SEED + (code - base))
+           : (u16) (roomSeed + tierSeedBase[tier] + (code - base));
 
     return tomboTryOnce(seed, hubX, hubY, doorMask, doorOff, useFixedWall, fixedWallVariant, spawnAtHub, validate);
 }
 
-// Full tombo pipeline for one room: attempts in code order (strict puzzle,
-// then the middle tier, then the fixed-seed no-puzzle ones -- see the tier
-// comments above), stopping at the first the validator accepts. FALSE only
+// Full tombo pipeline for one room: attempts in code order, tramo a tramo de
+// la escalera de puzzle y acabando en los de semilla fija -- see the tier
+// comments above -- stopping at the first the validator accepts. FALSE only
 // if every one is rejected -- the caller (Maze_generateRoom) then falls
-// back to a trivial open interior (0,04% de los repartos de puertas: ver
-// el recorrido exhaustivo en el comentario de TOMBO_FALLBACK_ATTEMPTS).
+// back to a trivial open interior (el 2,5% de los repartos de puertas, que ya
+// no daban sala antes: ver el recorrido exhaustivo en el comentario de
+// tierAttempts).
 // If cacheSlot already holds an accepted code, only that attempt is
 // replayed (same room, no search, no validation).
 // useFixedWall/fixedWallVariant let the insertion room keep its own
@@ -2994,14 +3142,15 @@ void Maze_drawProgressBar(u16 x, u16 y, u16 w, u16 filled)
 }
 
 // Absolute CRAM index of PAL0's index1 -- the shared default every text
-// draw in the game (HUD, FPS counter, map status, item letters) uses.
+// draw in the game (HUD, FPS counter, map status) uses.
 // Maze_setTextColorLocked/Maze_restoreTextColor borrow it only for the
-// brief window around a single letter draw, mirroring the same "set,
-// draw, restore" shape VDP_setTextPriority is already used with.
+// brief window around a single draw, mirroring the same "set, draw,
+// restore" shape VDP_setTextPriority is already used with.
 #define WALL_TEXT_INK_INDEX ((PAL0 * 16) + 1)
 
-// Call right before drawing an item's letter that's still behind a LOCKED
-// door -- PAL3's index1 is already yellow throughout gameplay (menu.c's
+// Call right before drawing text that's still behind a LOCKED door --
+// hoy nadie lo hace, ver maze.h.
+// PAL3's index1 is already yellow throughout gameplay (menu.c's
 // Menu_setVisible, same color maze.c's own locked-door wall tiles use), so
 // this just points text at it, no color value to touch at all. Follow with
 // Maze_restoreTextColor() immediately after.

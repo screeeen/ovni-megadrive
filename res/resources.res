@@ -45,6 +45,12 @@ SPRITE enemyShip16 "sprite/enemy16.png" 2 2 NONE
 # de las plantas, asi que el sprite se pinta con PAL0 y no gasta linea.
 SPRITE itemIcons "sprite/item_icons.png" 2 2 NONE
 SPRITE mapShip "sprite/map_ship.png" 1 1 BEST
+# Los digitos del cartelito de puntos que sube del enemigo muerto, recortados
+# de la fuente del HUD por tools/killpop_digits.py: 0..9 y el punto del
+# separador, un fotograma por celda. Son sprites y no texto de fondo para que
+# el numero pueda subir al pixel y no de 8 en 8 (peticion del usuario). Tinta
+# en el indice 15, como toda la fuente, asi que van con PAL0 y no gastan linea.
+SPRITE killpopDigits "sprite/killpop_digits.png" 1 1 NONE
 SPRITE planetSmall "sprite/planet_small.png" 1 1 BEST
 SPRITE planetMedium "sprite/planet_medium.png" 2 2 BEST
 SPRITE planetLarge "sprite/planet_large.png" 3 3 BEST
